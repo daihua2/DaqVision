@@ -114,17 +114,43 @@ class VisionInferenceServicer(pb_grpc.VisionInferenceServicer):
         )
 
 
+def _prepare_unix(target: str):
+    """从 unix 目标里取出文件路径，建父目录并清理残留 socket（Linux/WSL/RK3588）。"""
+    path = target.split("://", 1)[1] if "://" in target else target.split(":", 1)[1]
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    if os.path.exists(path):
+        os.unlink(path)  # 清理上次残留，否则 bind 失败
+
+
 def serve():
-    # 同机部署可用 Unix socket：VISION_BIND="unix:///var/run/daqgate/vision.sock"
-    bind = os.environ.get("VISION_BIND", "0.0.0.0:50061")
+    # VISION_BIND 支持逗号分隔的多地址，可同时监听 unix + TCP。
+    #   同机(daqgate 走 unix) + 调试(grpcurl 走 tcp) 并存：
+    #   VISION_BIND="unix:///var/run/daqgate/vision.sock,0.0.0.0:50061"
+    # 默认仅 TCP（跨平台可用，Windows 下 unix socket 不支持）。
+    binds = [b.strip() for b in os.environ.get("VISION_BIND", "0.0.0.0:50061").split(",") if b.strip()]
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=8),
         options=[("grpc.max_send_message_length", 8 * 1024 * 1024)],
     )
     pb_grpc.add_VisionInferenceServicer_to_server(VisionInferenceServicer(), server)
-    server.add_insecure_port(bind)  # 同机/内网先用 insecure；分布式换 mTLS
+
+    bound = []
+    for b in binds:
+        try:
+            if b.startswith("unix:"):
+                _prepare_unix(b)
+            if server.add_insecure_port(b) == 0 and not b.startswith("unix:"):
+                raise RuntimeError("端口被占用或无效")  # 同机/内网先 insecure；分布式换 mTLS
+            bound.append(b)
+        except Exception as e:
+            print(f"[vision-infer:stub] 跳过监听地址 {b}: {e}")
+
+    if not bound:
+        sys.exit("没有可用的监听地址，启动失败")
     server.start()
-    print(f"[vision-infer:stub] VisionInference 已启动，监听 {bind}（proto {PROTO_VERSION}）")
+    print(f"[vision-infer:stub] VisionInference 已启动，监听 {bound}（proto {PROTO_VERSION}）")
     server.wait_for_termination()
 
 
