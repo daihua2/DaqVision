@@ -1,0 +1,19 @@
+# 生成的 gRPC 桩（从 vision.proto 重建，不入库）
+vision-infer/app/vision_pb2.py
+vision-infer/app/vision_pb2_grpc.py
+proto/gen/
+
+# 数据/模型/抓拍（体积大、可重建，见 data/README.md）
+data/**
+!data/README.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# 运行期
+config/pipelines.yaml
+*.log

@@ -1,0 +1,16 @@
+# 示例 pipeline 配置（一路相机 = 一个 pipeline）。
+# 注意：配置主源拟以 daqgate 为准、运行期经 ApplyPipeline 下发（见交互方案 v1 开放问题3，待定）。
+# 本文件用于 Python 服务本地起步/联调阶段。
+pipelines:
+  - source_id: cam-demo          # 唯一标识，对应 daqgate 里的一个虚拟设备
+    stream_url: "usb:0"          # rtsp://user:pass@ip:554/...  |  usb:0  |  file:/path/to.mp4
+    model: helmet-yolo11n
+    frame_stride: 5              # 每 5 帧推理一次
+    score_threshold: 0.5
+    anomaly_threshold: 0.0       # 检测模型用不到
+    heartbeat_sec: 5
+    save_snapshot: true
+    rois: []                     # 空=全画面；可配 {name,x,y,w,h}（归一化 0..1）
+
+snapshot_dir: "/tmp/daqvision/snapshots"
+models_dir: "../data/models"     # .rknn 模型存放（见 data/README.md）

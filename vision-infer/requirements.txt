@@ -1,0 +1,10 @@
+# 阶段 3 骨架（STUB）所需
+grpcio>=1.60
+grpcio-tools>=1.60
+protobuf>=4.25
+
+# ── 接真模型后再启用（多在 RK3588/aarch64 上装）──
+# numpy
+# opencv-python            # 取流/解码/画框（板上优先用硬解 MPP）
+# rknn-toolkit-lite2       # 瑞芯微板端推理（从对应版本 wheel 安装，须与 librknnrt 同版本）
+# pyyaml                   # 读 config/pipelines.yaml
