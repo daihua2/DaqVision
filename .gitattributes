@@ -1,0 +1,5 @@
+# 本工程部署到 Linux(RK3588)/WSL，统一用 LF，避免 .sh/.py 因 CRLF 失效
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.proto text eol=lf
