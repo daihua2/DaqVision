@@ -17,3 +17,7 @@ venv/
 # 运行期
 config/pipelines.yaml
 *.log
+
+# 厂家手册/样本(体积大、非本项目产出;同目录的 md 摘录照常入库)
+doc/传感器资料/*.pdf
+doc/传感器资料/*.png
