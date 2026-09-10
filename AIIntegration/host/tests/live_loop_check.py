@@ -143,14 +143,12 @@ def main() -> int:
     check("回读**数值**结论（受限连接用 localId）", len(back.get(num_lid, [])) >= 1,
           f"lid={num_lid} {len(back.get(num_lid, []))} 笔")
 
-    # ★已知问题（hs 侧，根因已定位，见 doc/已知问题.md §1）：
-    #   离散点（字符串/时刻型）用 kRawData 查**恒回空** —— `AggregateDiscretePicks` 漏了
-    #   `Method::Raw`。**与落盘无关、不会自愈**。换 kLastValue 查得到，故下面顺带验一次：
-    #   数据确实在，只是 Raw 这条路被漏了。
-    #   本条**不计入通过与否**，但每次都打出来 —— 别让它悄悄变成"本来就这样"。
+    # 字符串结论的 kRawData 回读。★曾是 hs 的一个缺陷（离散路径漏了 Method::Raw，恒回空），
+    #   已于 2026-09-10 修复并发布 hs 1.9.437，见 doc/已知问题.md §1。
+    #   ⇒ 这里改成**硬断言**：再回空就是回归了，或者跑的引擎是 1.9.437 以前的版本。
     ns = len(back.get(str_lid, []))
-    print(f"  [已知] 字符串结论 kRawData 回读：lid={str_lid} {ns} 笔"
-          + ("" if ns else " —— 符合已知缺陷（AggregateDiscretePicks 漏了 Raw），见 doc/已知问题.md §1"))
+    check("回读**字符串**结论（曾为 hs 缺陷，1.9.437 修）", ns >= 1,
+          f"lid={str_lid} {ns} 笔" + ("" if ns else " —— 回空：检查引擎版本是否 ≥1.9.437"))
     if not ns:
         from aiintegration.hsproto import historystore_pb2 as _hs
         _req = _hs.HisDataQueryReq()
