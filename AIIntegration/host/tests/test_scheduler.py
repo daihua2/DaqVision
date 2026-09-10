@@ -227,3 +227,47 @@ class TestScheduler(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSyncOnChange(unittest.TestCase):
+    """★运行期新增的绑定必须建点 + 起线程 —— 否则界面上看着配好了、实际一拍都不走。
+
+    这个缺口是整机自检里"推送快照：0 个"暴露出来的：`ensure_points` 原先只在启动时跑一次。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        self.points = PointMap(d / "p.db")
+        self.bindings = BindingStore(d / "b.db")
+        self.client = _FakeClient()
+        self.sched = Scheduler(client=self.client, fetcher=_FakeFetcher(),
+                               domains={"vib": loaded()},
+                               bindings=self.bindings, points=self.points)
+
+    def tearDown(self):
+        self.sched.stop(timeout=1); self.points.close()
+        self.bindings.close(); self._tmp.cleanup()
+
+    def test_启动时没有绑定则点表为空(self):
+        self.assertEqual(self.sched.sync(), 0)
+        self.assertEqual(self.points.count(), 0)
+
+    def test_运行期加绑定后同步会建点并起线程(self):
+        self.sched.sync()
+        self.bindings.put(Binding("vib", "dev1", {"x_acc": 101}))
+        alive = self.sched.sync()
+        self.assertEqual(alive, 1)
+        self.assertEqual(self.points.count(), 2)          # 该域两个声明输出
+        self.assertEqual(len(self.client.snapshots[-1]), 2)  # 快照是全量
+
+    def test_同步是幂等的不会重复建点也不会起第二个线程(self):
+        self.bindings.put(Binding("vib", "dev1", {"x_acc": 101}))
+        self.assertEqual(self.sched.sync(), 1)
+        n = self.points.count()
+        self.assertEqual(self.sched.sync(), 1)   # 仍是 1 个线程
+        self.assertEqual(self.points.count(), n)  # 没重复建点
+
+    def test_停用的绑定不起线程(self):
+        self.bindings.put(Binding("vib", "dev1", {"x_acc": 101}, enabled=False))
+        self.assertEqual(self.sched.sync(), 0)

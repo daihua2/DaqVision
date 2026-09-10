@@ -1,0 +1,21 @@
+[Unit]
+Description=AIIntegration —— AI 集成层（骨架 + 域模块）
+# 实时库晚起是常态，故只是 After 而不 Requires：连不上会按退避重试并每周期告警。
+After=network-online.target iRtdb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=AII_ROOT=/home/Project/AIIntegration
+WorkingDirectory=/home/Project/AIIntegration
+ExecStart=/home/Project/AIIntegration/.venv/bin/python -m aiintegration.service
+Environment=PYTHONPATH=/home/Project/AIIntegration/host
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+# 日志进 journal；服务自己另有内存环供 SubscribeLogs/QueryLogs 两口读。
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,157 @@
+// aiintegration.proto —— AIIntegration(Python 服务) ⇄ AICloud(Go 后端) 的控制面契约
+//
+// ★**正本在本仓**（`daqvision/AIIntegration/proto/`）。分发点 `AISERVER:/home/Project/AIIntegration/proto/`
+//   是副本；两边不一致时以本仓为准，且说明我方漏投了 —— **改即投并发函**（AI-9 §2.3、C-9 §2.1）。
+//
+// ★形态（C-8 §3 定）：**控制面走 gRPC，大对象走 HTTP**。
+//   结构化、要契约、要版本、要类型的走这里；模型工件/图片/数据集导出走 HTTP，本文件不管。
+//
+// ★**浏览器不直连我方**（AI-9 §2.2）。本口只面向 AICloud 后端，由它桥给前端并**逐个 RPC 自查 ACL**。
+//   我方不实现平台的账号体系 —— 抄一份必漂，漂的样子是"这个人在平台里看不到这台设备，
+//   却能在 AI 页面上改它的标注"。
+//
+// 改动规则：字段编号只增不改不复用；废弃用 reserved；改契约必须升 proto_version 并记 CHANGELOG。
+syntax = "proto3";
+package aiintegration;
+
+import "google/protobuf/timestamp.proto";
+
+service AIIntegrationService {
+  // 服务身份与能力。启动握手 + 周期探活。
+  rpc GetInfo (InfoRequest) returns (InfoReply);
+
+  // ★域发现：有哪些域、各自**有哪些能力位**。
+  //   前端**按能力位渲染**，不按域名分支 —— 新增一个 AI 域，前端零改动（AI-8 §2，贵方 C-7 §2 已确认吃得下）。
+  rpc ListDomains (DomainsRequest) returns (DomainsReply);
+
+  // ── 绑定：把域声明的输入角色对到实际测点 ──
+  rpc ListBindings (ListBindingsRequest) returns (ListBindingsReply);
+  rpc PutBinding   (PutBindingRequest)   returns (PutBindingReply);
+  rpc DeleteBinding(DeleteBindingRequest) returns (DeleteBindingReply);
+
+  // ── 日志：**形状与 historystore 逐条对齐**（用户要求"装设 hs 类似的日志接口"）──
+  //   对齐的四条见 host/aiintegration/logstore.py 模块头：同一判据、ASCII 折叠、真实总数、背压不静默。
+  rpc SubscribeLogs (LogSubscribeReq) returns (stream LogStreamItem);
+  rpc QueryLogs     (LogQueryReq)     returns (QueryLogsRes);
+}
+
+// ───────────────────────── 身份与能力 ─────────────────────────
+message InfoRequest {}
+message InfoReply {
+  string service_version = 1;
+  string proto_version   = 2;   // 本契约版本，如 "1.0"
+  string guid            = 3;   // 本服务的系统 guid（首启生成、永不变）
+  string runtime         = 4;   // 如 "CPython 3.11.2 / linux-x86_64"
+  int32  domain_count    = 5;
+  // 装载失败的域（文件名 + 原因）。★**不藏**：静默跳过会变成"某个域莫名其妙不见了"。
+  repeated DomainLoadError load_errors = 6;
+}
+message DomainLoadError {
+  string file   = 1;
+  string reason = 2;
+}
+
+// ───────────────────────── 域与能力位 ─────────────────────────
+message DomainsRequest {}
+message DomainsReply { repeated DomainInfo domains = 1; }
+
+message DomainInfo {
+  string key     = 1;   // 运行期值，**不是编译期枚举**
+  string display = 2;
+  string version = 3;
+  // ★能力位。**名字是契约**：加位随时，改义发函（贵方 C-7 §2 提，我方采纳）。
+  //   已知位：infer / train / annotate / artifact。
+  repeated string capabilities = 4;
+  repeated InputSpec  inputs   = 5;
+  repeated OutputSpec outputs  = 6;
+}
+message InputSpec {
+  string role        = 1;   // 域内角色名，绑定时对到实际测点
+  string unit        = 2;   // ★仅作核对提示，**我方不做单位换算**（换错了比不换更危险）
+  bool   required    = 3;
+  string description = 4;
+}
+message OutputSpec {
+  string key         = 1;
+  string display     = 2;
+  string value_type  = 3;   // float | int | bool | string
+  string unit        = 4;
+  string description = 5;
+}
+
+// ───────────────────────── 绑定 ─────────────────────────
+message Binding {
+  string domain  = 1;
+  string binding = 2;              // 被诊断对象标识；我方不解释它
+  // 角色 → **globalId**。★取数走明文回环全量连接，那条连接上一律 globalId；
+  //   写结论走受限连接用 localId —— 两者不是同一个号，**不要互相换算着用**。
+  map<string, int32> roles = 3;
+  double interval_sec = 4;
+  double window_sec   = 5;
+  bool   enabled      = 6;
+  // 声明里必填、而本绑定没给的角色。**只读**，我方算好回给贵方渲染"配置不全"提示。
+  repeated string missing_required = 7;
+}
+message ListBindingsRequest { string domain = 1; }   // 空 = 全部
+message ListBindingsReply   { repeated Binding bindings = 1; }
+message PutBindingRequest   { Binding binding = 1; }
+message PutBindingReply     { bool ok = 1; string message = 2; }
+message DeleteBindingRequest{ string domain = 1; string binding = 2; }
+// ★删绑定**只停算，不删已经写进实时库的结论点** —— 绑定是"要不要继续算"，
+//   结论点是"算过的历史"，顺手删点会把用户唯一能回看的东西抹掉。
+message DeleteBindingReply  { bool ok = 1; string message = 2; }
+
+// ───────────────────────── 日志（形状对齐 hs）─────────────────────────
+enum LogLevel {
+  Trace_LogLevel = 0;
+  Debug_LogLevel = 1;
+  Info_LogLevel  = 2;
+  Warn_LogLevel  = 3;
+  Error_LogLevel = 4;
+  Fatal_LogLevel = 5;
+  Off_LogLevel   = 6;
+}
+message LogRecord {
+  int32                     SequenceId = 1;
+  google.protobuf.Timestamp TimeStamp  = 2;
+  LogLevel                  LogLevel   = 3;
+  string                    Category   = 4;
+  string                    Message    = 5;
+  string                    MemberName = 6;
+  int32                     LineNumber = 7;
+  int32                     StatuCode  = 8;   // 拼写与 hs 契约一致（对方就是这么拼的）
+}
+message LogSubscribeReq {
+  LogLevel minLevel = 1;
+  string   category = 2;   // 空=不限；非空=**精确相等**（同 hs）
+  // 空=不限。Message 子串，**大小写不敏感**，但折叠**只作用于 ASCII A-Z/a-z**，
+  // 中文等非 ASCII 原样比较 —— 与 hs 1.9.199 起的判据逐字一致。
+  // ★与 QueryLogs 的 search **同一判据**：实时流与历史翻阅是同一个列表里上下相邻的行，
+  //   不许两套语义（hs 原话）。我方实现上两条路调同一个函数。
+  string   search   = 3;
+  int32    backlog  = 4;   // 先补发最近 N 条（0=不补）；补发段与实时段同一过滤
+}
+message LogStreamItem {
+  oneof item {
+    LogRecord record       = 1;
+    uint64    droppedTotal = 2;   // ★背压**不静默**：丢了多少要说，少几行的日志比没有日志更误导
+  }
+}
+message LogQueryReq {
+  google.protobuf.Timestamp fromTime = 1;   // 含下界（不设=不限）
+  google.protobuf.Timestamp toTime   = 2;   // 含上界（不设=不限）
+  LogLevel minLevel   = 3;
+  string   category   = 4;
+  string   search     = 5;
+  int32    offset     = 6;
+  int32    limit      = 7;
+  bool     newestFirst= 8;
+}
+message QueryLogsRes {
+  int32              TotalCount    = 1;   // ★**过滤后的真实匹配总数**，不是本页条数
+  repeated LogRecord Logs          = 2;
+  // 本页已含**内存环里**最早的一条。★与 hs 的一处**诚实差异**：hs 那边指"当前文件中最早可用记录"，
+  //   我方读内存环 —— 环挤掉过东西就**不报**到底（更早的只在磁盘文件里，本接口查不到）。
+  bool               ReachedOldest = 3;
+  int64              EvictedTotal  = 4;   // 被内存环挤掉的总条数；>0 说明历史翻阅已不完整
+}

@@ -1,0 +1,13 @@
+# 骨架的**全部**第三方依赖。就这两个。
+#
+# ★"骨架零重依赖"是个硬指标，不是口号：
+#   · 持久化用 sqlite3（标准库），不引 ORM；
+#   · HTTP 口用 http.server（标准库），不引 web 框架；
+#   · 测试用 unittest（标准库），不引 pytest；
+#   · 类型层连 numpy 都不 import —— 采样点用普通序列，模块自己转。
+#
+# 好处在发布那一侧：e52c 的 wheelhouse **不含 torch 时约 131 MB**（含则 674 MB）。
+# 域模块的重依赖（torch / onnxruntime / rknnlite / opencv…）按
+# `平台 × 后端` 单独打，不进本文件 —— 见 packaging/README.md。
+grpcio>=1.51
+protobuf>=4.21

@@ -64,8 +64,9 @@ class Scheduler:
         self._bindings = bindings
         self._points = points
         self._stop = threading.Event()
-        self._threads: list[threading.Thread] = []
+        self._threads: dict[tuple[str, str], threading.Thread] = {}
         self._last_tick: dict[tuple[str, str], datetime] = {}
+        self._sync_lock = threading.Lock()
 
     # ── 点表 ──────────────────────────────────────────────────────────────
     def ensure_points(self) -> int:
@@ -146,16 +147,39 @@ class Scheduler:
                 backoff = min(MAX_BACKOFF_SEC, backoff * 2 if backoff else 5.0)
             self._stop.wait(backoff if backoff else min(b.interval_sec / 4, 5.0))
 
+    # ── 与绑定表同步 ──────────────────────────────────────────────────────
+    def sync(self) -> int:
+        """建点 + 推快照 + 为**还没有线程**的启用绑定起线程。返回在跑的绑定数。
+
+        ★启动时调一次，**每次绑定变更后也要调** —— 否则运行期新加的绑定既不会建点、
+          也不会有线程跑它，界面上看着配好了、实际一拍都不走。
+          （这正是整机自检里"推送快照：0 个"暴露出来的那个缺口。）
+
+        幂等：重复调只会补齐缺的，不会重复建点（`PointMap.ensure` 恒回同一个 localId）、
+        也不会起第二个线程。
+        """
+        with self._sync_lock:
+            if self._stop.is_set():
+                return 0
+            self.ensure_points()
+            for b in self._bindings.list(only_enabled=True):
+                key = (b.domain, b.binding)
+                t = self._threads.get(key)
+                if t is not None and t.is_alive():
+                    continue
+                th = threading.Thread(target=self._loop, args=key,
+                                      name=f"sched-{b.domain}-{b.binding}", daemon=True)
+                th.start()
+                self._threads[key] = th
+            alive = sum(1 for t in self._threads.values() if t.is_alive())
+            logger.info("调度已同步：在跑 %d 个绑定", alive)
+            return alive
+
     def start(self) -> None:
-        for b in self._bindings.list(only_enabled=True):
-            t = threading.Thread(target=self._loop, args=(b.domain, b.binding),
-                                 name=f"sched-{b.domain}-{b.binding}", daemon=True)
-            t.start()
-            self._threads.append(t)
-        logger.info("调度已启动：%d 个绑定", len(self._threads))
+        self.sync()
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
-        for t in self._threads:
+        for t in list(self._threads.values()):
             t.join(timeout=timeout)
         self._threads.clear()
