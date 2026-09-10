@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+
+jobs:
+  contract:
+    name: proto 契约 + stub 冒烟
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install -r vision-infer/requirements.txt
+
+      # 契约是单一可信源：它编不过，Go 与 Python 两端就都塌了。
+      - name: Generate Python stubs from vision.proto
+        run: bash proto/buildPython.sh
+
+      # 生成物不入库（见 .gitignore），所以这里顺带确认脚本产出的路径没漂。
+      - name: Assert stub files exist
+        run: test -f vision-infer/app/vision_pb2.py && test -f vision-infer/app/vision_pb2_grpc.py
+
+      # 起真 server + 真 client 打一次 GetInfo：能挡住"改了 proto 忘了改 server"这类断裂。
+      - name: Stub smoke test (GetInfo over TCP)
+        run: python .github/scripts/smoke_getinfo.py

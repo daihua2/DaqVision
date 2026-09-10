@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 OUT="../vision-infer/app"
 echo "生成 Python 桩 -> $OUT"
-python -m grpc_tools.protoc \
+"${PYTHON:-python3}" -m grpc_tools.protoc \
   -I. \
   --python_out="$OUT" \
   --grpc_python_out="$OUT" \

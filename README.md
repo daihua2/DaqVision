@@ -4,6 +4,7 @@ daqgate 的 **AI 视觉**配套工程：以瑞芯微 RK3588(RKNN) 为算力，�
 通过 gRPC 汇入 daqgate 网关，复用其数据建模、存储、Web 展示与上云链路。
 
 > 计划与设计文档在 [`doc/`](doc/)：
+> - [AI四项目源码实测与AICloud整合预研.md](doc/AI四项目源码实测与AICloud整合预研.md) —— **AISERVER 上四个 AI 项目（v4/v5/meter-helmet/VFD）的现状实测与待议清单**
 > - [AI视觉识别研发计划.md](doc/AI视觉识别研发计划.md) —— 总路线图（阶段 0→6）
 > - [视觉算法gRPC交互方案_v1.md](doc/视觉算法gRPC交互方案_v1.md) —— Go⇄Python gRPC 契约设计
 > - 有色矿山机械AR+AI视觉质检方案_优化版.pptx —— 商务/分层方案书
