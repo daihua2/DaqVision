@@ -21,3 +21,10 @@ config/pipelines.yaml
 # 厂家手册/样本(体积大、非本项目产出;同目录的 md 摘录照常入库)
 doc/传感器资料/*.pdf
 doc/传感器资料/*.png
+
+# 方案书/客户样张/报告的二进制原件(pdf/pptx)不入库 —— 这几份共 14.8 MB，占了 .git 的几乎全部，
+# 且 pdf/pptx 无法 delta 压缩，每改一版就永久堆一个新 blob。结论与依据一律以同名 md 入库，
+# 原件留在本地/共享盘。2026-09-10 起停止跟踪(git rm --cached)，文件本身仍在 doc/ 下。
+doc/*.pdf
+doc/*.pptx
+doc/*.docx
