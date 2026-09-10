@@ -151,21 +151,38 @@ last(iout_u)         2026-09-18T10:13:05.502000128Z   ← 比现在超前 8 天
 后端内部反代把外部站搬到同源之下，再用同源 iframe 承载；页面跳转靠平台向 iframe
 注入脚本 / 发 `postMessage`。
 
-v5 走的是「绝对」模式（`mountMode=base`，`publicPath=/ai_diagnosis/v5/`），链路涉及**三处独立耦合**：
+> ## ★ 2026-09-10 订正：本节原写的"v5 是外部视图"是**错的**
+>
+> 原文写：「v5 走的是「绝对」模式（`mountMode=base`，`publicPath=/ai_diagnosis/v5/`）」，
+> 并据此列了**三处**耦合。**这一句没有取证**：我看见 nginx 里 `/ai_diagnosis/v5/` 的 alias，
+> 又读了 AICloud `docs/17` 的挂载模式表，**就按模式推断了实体的存在**，没有去查平台的库。
+>
+> AICloud 2026-09-10（`C-6 §3`）**实查两个库**（`aiportal` / `aiportal_dev`）：
+> **都没有 v5 的实体**。v5 由 **nginx 直接静态服务**，根本不在外部视图链路上，
+> 那套 `injectJs` / 挂载模式对它不生效。
+>
+> ⇒ **耦合只有两处（下表 1 与 3），第 2 处对 v5 不成立。**
+> ⇒ 教训：**跨项目断言，凡涉及对方库里的状态，一律请对方实查，不按模式推断。**
+
+v5 的嵌入链路涉及**两处独立耦合**：
 
 | # | 耦合点 | 实处 |
 | --- | --- | --- |
 | 1 | nginx location | `/etc/nginx/snippets/aicloud-locations.conf`：`/ai_diagnosis/v5/` → `alias …/frontend/dist_embed/`；`/ai_diagnosis/v5/api/` → `127.0.0.1:8014` |
-| 2 | 平台实体配置 | 外部视图实体的 `mountMode` / `publicPath` / `injectJs`，深链靠 `?aivPage=<页面Id>` |
+| ~~2~~ | ~~平台实体配置（`mountMode`/`publicPath`/`injectJs`，`?aivPage=`）~~ | **对 v5 不成立**，见上方订正。此列适用于 v4（实体 1075 / 1049） |
 | 3 | 应用侧页面键 | `v5/frontend/src/main.js`：`externalViewAliases` + `resolveExternalPageKey()`，收 `{__aiv:'page'}` 后回 `page-ack` |
 
-**三者任一漂移，跳转就静默失效**——这正是"上次修好了这次又出现"的结构性原因：
-它不是一个 bug，是一条没有单一可信源的三方约定。
+**两者任一漂移，跳转就静默失效**——它不是一个 bug，是一条没有单一可信源的约定。
 
-> 关于本次报告的跳转异常，**我没有复现，不下根因结论**。已排除的只有一条：
+> 关于本次报告的跳转异常，**我没有复现，不下根因结论**。已排除的一条：
 > `dist_embed/` 构建时间 `2026-09-05 15:10` **晚于** `src/main.js` 的 `2026-09-05 13:52`，
-> 所以不是"改了没发布"。剩余两处（平台实体的 `injectJs` / 页面 Id ↔ `externalViewAliases` 的键）
-> 需要在平台侧取证，而 AIBackend 近期确实在改（`/App-dev/AICloud/AIBackend` 有活跃构建）。
+> 所以不是"改了没发布"。
+>
+> AICloud 补充的实据（`C-6 §3`）：那份 nginx 配置**被另一个 AI（codex）反复改过** ——
+> `/etc/nginx/snippets/` 下有五份 `codex-*` 备份（`v5-to-direct`、`v5-cache-fix`、`v5-route-fix`…）。
+> ⇒ 用户怀疑的"老平台在改"**有实据，但改的不是平台，是 nginx**。
+>
+> ★按 2026-09-10 裁定（前端做进 AICloud、嵌入层作废），**这一层要拆掉，不值得再在嵌入层修**。
 
 ---
 
