@@ -143,12 +143,28 @@ def main() -> int:
     check("回读**数值**结论（受限连接用 localId）", len(back.get(num_lid, [])) >= 1,
           f"lid={num_lid} {len(back.get(num_lid, []))} 笔")
 
-    # ★已知问题（hs 侧，我方同一责任人）：**字符串点写入后、块提交前，历史查询看不到**；
-    #   数值点写完立刻就查得到。实测：立刻 0 笔、20 秒后仍 0 笔、优雅停机(checkpoint)后 2 笔。
-    #   这一条**不计入通过与否**，但每次都打出来 —— 别让它悄悄变成"本来就这样"。
+    # ★已知问题（hs 侧，根因已定位，见 doc/已知问题.md §1）：
+    #   离散点（字符串/时刻型）用 kRawData 查**恒回空** —— `AggregateDiscretePicks` 漏了
+    #   `Method::Raw`。**与落盘无关、不会自愈**。换 kLastValue 查得到，故下面顺带验一次：
+    #   数据确实在，只是 Raw 这条路被漏了。
+    #   本条**不计入通过与否**，但每次都打出来 —— 别让它悄悄变成"本来就这样"。
     ns = len(back.get(str_lid, []))
-    print(f"  [已知] 回读**字符串**结论：lid={str_lid} {ns} 笔"
-          + ("" if ns else " —— 符合已知现象（需块提交后才可见），见 doc/已知问题.md"))
+    print(f"  [已知] 字符串结论 kRawData 回读：lid={str_lid} {ns} 笔"
+          + ("" if ns else " —— 符合已知缺陷（AggregateDiscretePicks 漏了 Raw），见 doc/已知问题.md §1"))
+    if not ns:
+        from aiintegration.hsproto import historystore_pb2 as _hs
+        _req = _hs.HisDataQueryReq()
+        _req.hisReq.method = _hs.kLastValue
+        _req.hisReq.begTime.FromDatetime(tick - timedelta(minutes=5))
+        _req.hisReq.endTime.FromDatetime(tick + timedelta(minutes=5))
+        _req.pointsReq.add().id = str_lid
+        _res = client._unary(client._write_channel(), "QueryHistory", _req,
+                             _hs.VQTArrayRes, timeout=20)
+        _n = sum(len(a.VQTs) for a in _res.VQTs)
+        _v = [getattr(v, v.WhichOneof("Value")) if v.WhichOneof("Value") else None
+              for a in _res.VQTs for v in a.VQTs]
+        check("★换 kLastValue 查得到 —— 证明数据在库里，是 Raw 那条路的缺陷",
+              _n >= 1, f"{_n} 笔 {_v}")
     for k, vs in back.items():
         for v in vs:
             w = v.WhichOneof("Value")
