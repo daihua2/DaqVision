@@ -1,0 +1,29 @@
+# historystore 契约的 vendor 副本
+
+来源仓：historystore（同一责任人，但**是另一个仓**）
+来源提交：7e62d91
+取用日期：2026-09-10
+
+## 为什么 vendor 而不是构建时去拉
+
+与 AICloud 同一条理由（C-9 §2.1）：**发版机不能依赖"去某个它检不出的仓里拉一份"**。
+故 `.proto` 与生成物一并入库，构建可复现。
+
+## 权威副本
+
+**historystore 仓里那份是正本**，本目录是副本。不一致时以正本为准，
+且说明本目录漏更新了 —— 更新方式见下。
+
+## 更新方式
+
+    bash regen.sh        # 从 historystore 仓重新 copy + 生成，并刷新本文件里的 rev
+
+## 为什么只生成 _pb2.py、不生成 _pb2_grpc.py
+
+服务桩用 `channel.unary_unary(...)` 手接，方法路径形如
+`/HistoryStore.HistoryStoreGRPCService/<Method>`。这样只需要 **protoc**，
+不需要 grpc 的 python 插件（Debian 的 `protobuf-compiler` 装了就有 protoc，
+而 grpc 插件要另装）。少一个构建期依赖，e52c 那侧的发布也少一件事。
+
+★注意：`python3 -m grpc_tools.protoc` 捆的是 **libprotoc 3.5.1**（太老，proto3 `optional` 编不过），
+必须用**系统 protoc**（Debian 12 是 3.21.12）。这条踩过，见 memory: hs-mtls-verify-harness-gotchas。

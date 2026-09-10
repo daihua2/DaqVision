@@ -1,0 +1,1465 @@
+syntax = "proto3";
+import "google/protobuf/timestamp.proto";
+import "daqcontract.proto";
+package HistoryStore;
+option  csharp_namespace	= "DAQ.HistoryStore";
+option	cc_enable_arenas	= true;
+
+// ============================================================================
+// proto 归并(2026-06-16):原 daq.proto / domain.proto 已删除。
+// 基础数据原子(Status / VQT / LogRecord / LogLevel …)归 daqcontract.proto(package daq);
+// 以下为本服务私有的 RPC 信封,由原 daq.proto / domain.proto 迁入本文件(字段号不变,wire 兼容)。
+// 详见 daqgate/docs/historystore-proto-consolidation.md 与 2026-06-16-historystore-proto-归并交接.md。
+// ============================================================================
+
+// ---- 会话/鉴权信封(原 daq.proto)----
+message PingReq{
+	string request		= 1;
+}
+message PingRes{
+	string token		= 1;
+	// 本实例**实际绑上**的 gRPC 监听地址集(host:port),供从网关自动学习备用连接地址
+	// (daqgate 2026-08-06 §3.2)。能力位 features:"status-listen-addrs"。
+	// 语义(三条,缺一会让对端连错口):
+	//  ① 只列绑定成功的址 —— 配了但没绑上的(overlay 网卡起得比引擎晚是常态)不在列,
+	//     对端不必去试一个必然 refused 的口;
+	//  ② 回环址一并列出,不替对端过滤 —— 主控本机的 daqgate 走的正是回环口,
+	//     跨机侧自己判"回环对我没意义"即可;
+	//  ③ 监听址若是通配(0.0.0.0/::),按**调用时刻**的本机网卡地址展开成具体 IP
+	//     (通配口确实在这些地址上可达;报 "0.0.0.0:5400" 对端没法拨)。
+	// 空 = 老引擎或未知(对端按「缺失即不支持」处置,不要按空值猜)。
+	repeated string listenAddrs = 2;
+}
+message	ClusterToken
+{
+	int32	entityId	= 1;
+	string	entityName	= 2;
+}
+message DaqCollectorToken
+{
+	int32	collectorId	= 1;
+	string	token		= 2;
+}
+message	AccountsToken
+{
+	string	logName		= 1;
+	string	token		= 2;
+}
+message LoginReq
+{
+	oneof Token {
+		ClusterToken		clusterToken	= 1;
+		DaqCollectorToken	collectorToken	= 2;
+		AccountsToken		accountsToken	= 3;
+	}
+}
+message LoginRes
+{
+	daq.Status		result			= 1;
+	string			token			= 2;
+}
+
+// ---- VQT 响应信封(原 daq.proto)----
+message VQTRes
+{
+	daq.Status				Result		= 1;
+	repeated	daq.VQT		VQTs		= 2;
+	sint32					TagId		= 3;
+}
+message VQTArrayRes
+{
+	daq.Status				Result		= 1;
+	repeated	VQTRes		VQTs		= 2;
+}
+
+// ---- 日志记录(原 domain.proto;historystore 自有日志 schema)----
+// 注:与 daqgate 的 daq.LogRecord(zap 日志)是两套不同 schema,故归本服务而非 daqcontract;
+// daqgate 读取后转换为自家 daq.LogRecord 再转发前台(级别映射见 plan §1.5)。
+enum	LogLevel
+{
+	Trace_LogLevel	= 0;
+	Debug_LogLevel	= 1;
+	Info_LogLevel	= 2;
+	Warn_LogLevel	= 3;
+	Error_LogLevel	= 4;
+	Fatal_LogLevel	= 5;
+	Off_LogLevel	= 6;
+}
+message LogRecord
+{
+	int32			Id				= 1;
+	int32			ContainerId		= 2;
+	string			Name			= 3;
+	google.protobuf.Timestamp
+					TimeStamp		= 4;
+	int32			SequenceId		= 5;
+	string			TypeName		= 6;
+	LogLevel		LogLevel		= 7;
+	daq.StatusCode	StatuCode		= 8;
+	string			MemberName		= 9;
+	int32			LineNumber		= 10;
+	string			Message			= 11;
+	string			Category		= 12;
+}
+
+// ---- 日志查询响应信封(原 domain.proto)----
+message QueryLogsRes
+{
+	daq.Status				Result			= 1;
+	int32					TotalCount		= 2;
+	repeated	LogRecord	Logs			= 3;
+	bool					ReachedOldest	= 4;	// 本页已含当前文件中最早可用记录(更早的已轮转删除)
+}
+
+// ---- 实时日志流元素：一条日志记录,或一个背压信号(累计丢弃数)----
+message LogStreamItem
+{
+	oneof item {
+		LogRecord	record			= 1;
+		uint64		droppedTotal	= 2;	// 本订阅累计因队列满丢弃的条数(慢消费者背压提示)
+	}
+	// 文件内真实总记录数,随每条 record item 快照下发(oneof 之外,不与 record/droppedTotal 互斥)。
+	// daqgate 透传给前台「记录总数」,修正其原先用自累计伪造总数的失真。0 = 未填(旧版/背压 item)
+	// → daqgate 回退自累计,向后兼容。口径与 QueryLogsRes.TotalCount 一致(过滤后匹配总数)。
+	int64		totalCount		= 3;
+}
+
+// ---- 服务健康/状态(供 daqgate 状态栏:在线/版本/运行时长)----
+message ServerStatusReq {}
+message ServerStatusRes
+{
+	string	version			= 1;
+	int64	uptimeSeconds	= 2;
+	bool	started			= 3;	// 引擎是否已启动
+	uint64	totalRecords	= 4;	// 已提交「块」数(落盘成块才+1,非样本数;首次刷块前为0)
+	uint64	ingestedSamples	= 5;	// 已入库样本总数(实时,逐样本;gRPC PostVQT + NATS 两路合计)
+	reserved 6;						// 原 HistoryStoreStat stat(逐字段固定快照),已去 proto 硬绑,见下
+	reserved "stat";
+	// 运行指标快照(gauge,最新值语义),动态可扩展:每条 == self_metrics.h 清单逐条产值。
+	// 加指标只改清单一行,本契约零改动。契约见
+	// docs/2026-06-30-...-gauge快照动态容器化-去proto硬绑-协调.md(+daqgate/historystore 回执)。
+	repeated SelfMetricSample	metrics	= 7;
+	// 存储写健康:提交工作线程持续重试失败(磁盘/IO/索引损坏)时为 true —— 状态栏应据此转非绿并显示原因,
+	// 不再只凭进程存活报「在线」。degradeReason 为真实底层原因(如「database disk image is malformed」)。
+	bool	storeDegraded	= 8;
+	// 全部当前降级项拼成的一句话(存储写健康 + 监听/跨机口降级)。**不再只承载存储写健康** ——
+	// 老读者(只读这一个字段并透前端)无改动即可看到监听降级,这正是 daqgate 2026-07-30 §3 要的。
+	// 空 = 无降级(前提:对端已探到 features 里的 status-listen-degrade;缺失 = 未知,见下)。
+	string	degradeReason	= 9;
+
+	// ---- 监听/跨机口降级(daqgate 2026-07-30 §3;能力位 features:"status-listen-degrade")----
+	// 起因:现网一小时静默断流 —— 引擎启动时 overlay 地址还没落到网卡上,该址被剔除后只剩回环口,
+	// 三台从网关一台也连不上;引擎日志里两条 WARN 说得清清楚楚,但 GetServerStatus 回的是空字符串,
+	// 主控界面全绿 → 看现象的人去查从网关,真凶在主控。日志里说对了不算说了,机器读不到就是没说。
+	//
+	// 与 storeDegraded 的分工:storeDegraded 恒只表示**存储写健康**(语义不变,不借位);
+	// 监听降级另给 listenDegraded。两者可同时为真,degrades 逐条列出、degradeReason 是它们的拼接。
+	bool	listenDegraded	= 10;	// 监听地址未全绑上 / 注了 mTLS 证书却没有任何跨机口
+	// 逐条降级原因(机器可读;文字与日志里那两条 WARN 同源同措辞)。含存储写健康那条。
+	// 单条形态便于对端分类展示/告警去重,不必去切 degradeReason 那句拼接。
+	repeated string	degrades	= 11;
+
+	// 本实例**实际生效**的 --self-guid(daqgate 2026-07-30 §2.1;能力位 features:"status-effective-self-guid")。
+	// 空 = 未启用(主控仍是直存形态)。供 daqgate 拿「我写进 drop-in 的」与「它实际在跑的」对一次 ——
+	// 人工改过 / 投放半截 / 回滚到旧 drop-in 时那两者会不一致,而症状同样是静默的(主控的点显示成陌生网关)。
+	// 注意「空」有两义:引擎不认识本字段 vs 确实未启用 —— 靠 features 位区分,不要按空值猜。
+	string	effectiveSelfGuid	= 12;
+
+	// 本进程**实际生效**的启动参数集(daqgate 2026-08-07 r1;能力位 features:"status-effective-args")。
+	// 把「托管方写进 drop-in 的参数」与「引擎实际在用的参数」的对账,从逐字段特例变成一条通用规则。
+	// effectiveSelfGuid(12)保留不废弃 —— 它已在现网承担对账,新旧并存。
+	//
+	// ★这里报的是**归一后的生效值**,不是命令行原样(argv)。差别不是修辞:
+	//   e52c 的 drop-in 里没有 `--wal-max-mb`,而另一份手工 drop-in 用 `HS_WAL_MAX_MB=32` 等价兜住了 ——
+	//   报 argv 会让对端在一台**配置完全正确**的机器上报漂移。故每条另带 source 说明值从哪来
+	//   (cli/env/default/clamped),对端据此判「与我注入的不一致」是真漂移还是等价配置。
+	// 不含位置参数(store 路径 / 监听址 / http 端口):对端本就知道且不漂(daqgate r1 §2.3 明确可排除)。
+	repeated EffectiveArg	effectiveArgs	= 13;
+
+	// 本实例的 **id 空间纪元标识**(daqgate 2026-08-20 r10/r12;能力位 features:"status-id-space-epoch")。
+	// UUIDv4,存在 id_map.db(gid 空间的定义者)里:清库/删该库/从 1 重新分配 ⇒ 变;
+	// 整库连它一起迁移 ⇒ 不变。直存形态(无映射库)落在数据目录元数据,语义相同。
+	//
+	// 用途:gid 被外部**长期持久化**引用时(如组态图的数据绑定),库一旦重建,旧 gid 会落到
+	// 不同的物理点上 —— 画面看着一切正常、数值在动、不报任何错。持有方整体存一个 epoch、
+	// 打开时比一次,即可立刻检出并停下来,而不是静默错配。
+	// ★空有两义:引擎不认识本字段 vs 确实取不到 —— 靠 features 位区分,不要按空值猜。
+	string	idSpaceEpoch	= 14;
+
+	// 目录祖先链自检(daqgate 2026-08-20 r14 §3 / r16 §5;能力位 features:"status-ancestor-selfcheck")。
+	// ★给明细而不是一个 bool:ok/not-ok 在断链时会把排查打回原地(知道坏了、不知道哪条坏)。
+	AncestorSelfCheck	ancestorSelfCheck	= 15;
+
+	// 点表就绪(AISERVER r112;能力位 features:"point-table-readiness")。
+	// ★「"点表就绪"不是一个数,而是一个事件」—— 而那个事件**只有本引擎知道**
+	//   (实体配置流的全量快照什么时候提交完)。让每个消费方拿"数"去猜,就是让每个消费方
+	//   各踩一次同样的坑:对方第一版按"点表非空"判,在只有 44 个实时库性能指标到位时误判就绪,
+	//   693 个采集点还没到 ⇒ 1380 条标签解析不到,而日志里只有一行看着完全正常的 INFO。
+	// ★本口给**逐源明细**;聚合位与两个计数在 HTTP `/health` 上(轮询方用那份,不必开 gRPC)。
+	PointTableReadiness	pointTableReadiness	= 16;
+}
+
+// 点表就绪明细。
+// ★两条语义**必须一起读**,单看任何一条都会误判:
+//   ① 「已知源」随网关上线而变 ⇒ 本位**不保证终态**:新网关上线时 ready 由真转假是
+//      **正常且应当发生**的,不是故障。故聚合位一律与 committed/known 两个计数同发 ——
+//      看到 `3/4` 是"有新东西在来",看到一个突然变假的裸布尔像"出故障了"(AISERVER r112 §2)。
+//   ② ready=true **不表示**某个具体标签一定在点表里:点可能压根没配,也可能属于一台
+//      还没上线的网关。⇒ 消费方仍应按自己的清单逐个验;本位只回答"**什么时候开始验有意义**"。
+//      它改善的是**报错质量**:位未亮 ⇒ 安静等、不报错;位已亮而标签仍解析不到 ⇒
+//      当场断定是配置问题,不必等退避重试满 60 秒(r112 §3)。
+message PointTableReadiness {
+	bool	ready			= 1;	// 已知源都提交过至少一次**完整**快照;known=0 时恒 false
+	int32	sourcesCommitted	= 2;
+	int32	sourcesKnown		= 3;	// 0 = 本实例没有配置流来源(直存/尚未建流),不是"就绪"
+	repeated PointTableSource	sources	= 4;
+}
+
+// ★★**消费侧选型指引**(daqgate D-155 §2 实测踩到,写在这里免得下一个人再踩):
+//   · 「**我关心的那台网关**的点回填了吗」⇒ 用 `sources[]`:该 guid 在表里且 `committed=true`。
+//   · 「本实例**有没有**配置流来源」⇒ 用聚合位 `ready` + 两个计数。
+//   ★聚合位**不能**回答第一个问题:它的分母是"**当前已知的**源",而重启那一刻从网关还没连上来、
+//     根本不在分母里 —— daqgate 实测:重启后立刻读到 `true (1/1)` 而镜像点表只有本机 58 点,
+//     数十秒后三台从网关连上、变成 `true (4/4)`、点表 1335 点。**两次都是 true,中间差 1277 个点。**
+//     照聚合位"亮了就下结论"的消费方,会把那几十秒里从网关的每一条报警打成「点已移除」。
+//   ★为什么 hs **不给**"期望源数":那个数只有 daqgate 的组态知道。我方若按"历史见过的 guid"
+//     自己记一份,就是目录服务那条幽灵注册记录的翻版(停报即消失才是对的规则),不做。
+message PointTableSource {
+	string	guid			= 1;	// 来源网关 guid
+	// 已提交过至少一次**完整**快照。★半份快照(映射库故障/解析跳过若干条)**不算** ——
+	// 那正是"看着有点表、其实少一半"的来源,而消费方要的是"现在开始验有没有意义"。
+	//
+	// ★★**它足以断定"该网关的点已全部回填"**(daqgate D-155 §2.2 问、本方确认),因为全量快照
+	//   就是"这台网关此刻的全部点";之后的增删走增量帧,那是**配置变更**,不是"还没回填"。
+	//   但有三条限定:
+	//   ① **它只增不减**:置真之后流断也不清 —— 与"流断 ≠ 删点"同一条语义(断链时旧快照仍在,
+	//      所以不会出现"空表被判成已移除")。要判**此刻连没连着**,看 `lastSeenMs` / 断线告警,
+	//      **不要**拿本位当连通性。
+	//   ② 重连会重推全量快照:提交前旧快照仍在、提交是整体替换 + 差异事件,中间不存在"空窗"。
+	//   ③ **没连上来过的网关根本不在 `sources[]` 里**(建流才登记)⇒ 消费侧"不在表里就不下结论"
+	//      的判据是对的,那一格已被覆盖。
+	bool	committed		= 2;
+	// 最近一次完整快照的提交时刻(unix 毫秒);0 = 从没提交过。
+	// ★卡住的源与"刚上线还没轮到"的源,只有布尔时长得一模一样(AISERVER r112 §1.1 点名)。
+	int64	lastCommitMs		= 3;
+}
+
+// 祖先链自检结果。每个统计周期跑一次,覆盖 **_points 里的全部实体,含采集点**。
+// ★这里原来写的是"非采集点实体",与实现从来不符(实现一直是全量)——daqgate 2026-08-21 r49 逮到。
+//   现按**实现**改注释而不是反过来收窄实现,理由:`StoredPoint.ancestorIds` 就是发给采集点的,
+//   点的链断了是消费侧看得见的事,把它排除出自检等于"发出去的东西不自检"。
+message AncestorSelfCheck {
+	int64	lastRunMs	= 1;	// 上次自检时刻(unix 毫秒,hs 本机钟);0 = 尚未跑过
+	int32	entities	= 2;	// 参检实体数
+	// 指向表外**且不是 root** 的跳数。★这不等于「坏了」:按 r16 §1.4 的口径它被当作到顶处理,
+	// 只计数供观察 —— 约定之外的形态先看得见,再决定要不要收紧。
+	int32	danglingCount	= 3;
+	int32	cycleCount	= 4;	// 成环(含深度兜底):数据坏了,不是正常形态
+	int32	maxDepth	= 5;	// 最大链深;异常膨胀是成环的早期征兆
+	// 出问题的实体 id(gid 空间),截前 10 个 —— 即**链的起点**。
+	repeated int32	sampleBadIds	= 6;
+	// ★**断点** id(gid 空间),与 sampleBadIds **逐位对应**;该条不是 dangling(成环/深度兜底)时为 0。
+	// 能力位 features:"status-ancestor-selfcheck-missing-ids"。
+	//
+	// 为什么必须有它(daqgate 2026-08-21 r49 现场):起点 id 只回答"哪条链断了",
+	// 而排查要问的是"**缺的是谁**" —— 缺的那个多半根本没被推来,因为它的类别不在对端的
+	// `--entity-categories` 订阅集里(例:主控只订 {12,15,17} 时,挂在目录下的采集连接,
+	// 其容器目录行永远不会到,链必然止于表外)。拿着起点 id 去 ListEntityIdentities 查,
+	// 查到的是一条**完全正常**的实体行,查不出任何东西 —— 明细指错了一端,等于没有明细。
+	//
+	// ★止于表外**不等于数据坏了**:它同时是「容器未被订阅」(合法、且不可能修好)与
+	//   「真悬空」(数据坏了)两种情形的表现,hs 分不开 —— 拿到断点 id 的**类别**才分得开,
+	//   而那个类别只有对端知道。所以这个数字该由对端解释,不该由 hs 判死。
+	repeated int32	sampleMissingIds	= 7;
+}
+
+// 一条实际生效的启动参数(见 ServerStatusRes.effectiveArgs)。
+message EffectiveArg
+{
+	string	name	= 1;	// 长选项名,**不含**前导 `--`(如 "wal-max-mb");env/默认值来源的条目也用这个名字
+	// 生效值的字符串形态。数值按其自然单位的十进制(与 CLI 同单位,如 wal-max-mb = "32");
+	// 开关型为 "true"(未开启则整条不出现);路径原样。★`tls-key` 只报路径,不报内容。
+	string	value	= 2;
+	// 值的来源,固定词表(append-only,只增不改):
+	//   "cli"     —— 来自命令行该选项;
+	//   "env"     —— 命令行未给,由环境变量提供(sourceDetail 给变量名,如 "HS_WAL_MAX_MB");
+	//   "default" —— 命令行与环境都未给,用的是本二进制的出厂缺省;
+	//   "clamped" —— 给了(cli 或 env),但越界被钳到边界值;value 是**钳后**的真实生效值,
+	//                sourceDetail 给原始请求值。此时对端与自己注入的值比对**必然不等**,这正是要被看见的。
+	string	source	= 3;
+	string	sourceDetail	= 4;	// 补充说明(env 变量名 / 钳前原值);无则空
+}
+
+// 一条自指标的当前值样本。name/unit/des 等静态元数据归 daqgate 注册库(唯一权威),
+// 不在此 per-tick 重发;快照只承载易变的 value(机制 B / daqgate 回执 §2)。
+// value 为带类型的 daq.VQT:R8 gauge 取 R8(7) case,时间戳指标取 DateTime(19) case——
+// 「一条样本=一个 VQT」,任意后续值类型(bool/int/string…)零再改 proto。
+// 契约见 2026-06-30-...-时间戳作DateTime指标-daqgate确认.md §2(选 a)。
+message SelfMetricSample
+{
+	string	key		= 1;	// 稳定幂等键(清单 key,如 "recvRatePerSec");daqgate join 锚
+	int32	tagId	= 2;	// daqgate 分配的 TagId;0 = 注册未完成
+	daq.VQT	value	= 3;	// 当前值(带类型:R8 数值 / DateTime 时刻 …)
+}
+
+// ---- 历史存储编码(本服务私有,原即在此)----
+message	RecordPoint
+{
+	sint32	MicrosecondsOffset		= 1;
+	oneof	RecordPoint
+	{
+		daq.Status	Qua		= 2;
+		sint32	OffsetSeconds		= 3;
+		bool	EmptyValue			= 12;
+		bool	NullValue			= 11;
+		bool	Bool				= 8;
+		sint32	I1					= 17;
+		uint32	UI1					= 18;
+		sint32	I2					= 6;
+		uint32	UI2					= 13;
+		sint32	I4					= 5;
+		uint32	UI4					= 14;
+		sint64	I8					= 15 [jstype = JS_STRING];
+		uint64	UI8					= 16 [jstype = JS_STRING];
+		float	R4					= 4;
+		double	R8					= 7;
+		string  String				= 9;
+		bytes	Bytes				= 10;
+		google.protobuf.Timestamp
+				DateTime			= 19;
+		daq.VARVALARRAY
+				Array				= 20;
+	}
+}
+message HistoryRecord
+{
+	int32	 TagId					= 1;
+	google.protobuf.Timestamp
+			 BeginTimStamp			= 2;
+	daq.Status
+			 BeginQua				= 3;
+	repeated RecordPoint	Points	= 4;
+}
+
+// ============================================================================
+// ★★ 分桶查询的**输出契约**(能力位 `query-grid-complete`,hs 1.9.319 起)
+//
+//   一次查询 = 在网格上提了 **N = (EndTime-BegTime)/IntervalSeconds** 个问题,
+//   **回答也是 N 个** —— 凑不出值的桶给一个占位点,用**质量码**说明为什么,不再"什么都不发"。
+//   ★"不发点"不是回答,是拒绝回答,而它与"回答是:什么都没有"在线缆上一模一样。
+//
+//   ★不适用**发生时刻族**(kTrendData/kMinTime/kMaxTime/kFirstTime/kLastTime)与 kRawData:
+//     它们的时间戳是样本自身时刻、本就不锚栅格,补齐等于给一条不存在的栅格填格子。
+//
+//   质量码按**可信度**编,不按"怎么算出来的"编:
+//     · 两侧好断点夹住的插值/统计        → QualityGood(5000)     直接用(误差 ≤ compErr)
+//     · 依赖 SDT 门里尚未定案的那一笔    → QualityPending(5004)  **会被订正**(幅度 ≤ compErr)
+//     · 前沿之外(EndTime 越过最后一个样本)→ **不给值** NullValue + QualityPendingBad(-1027)
+//       ★不回落"最后一个已知值":那个值属于**它自己那一刻**,配到别的时刻上,在曲线上就是一段
+//         与真实数据一模一样的平直线,消费方读成"最新值就是这个"(daqgate D-146 §3 实测:
+//         5004 在其三处渲染判据里都落在"好值"区,无处表达"这不是那一刻的值")。
+//       ★而且它对消费方是冗余的:那个值就在前一个桶里,时间戳还是对的。
+//     · 跨坏值 / 采集中断的延续          → 中断码(如 -1007)      断线,别连过去
+//     · 前沿之内算不出                   → QualityBad            缺失
+//     · 空集上的统计(如 kStd)            → QualityStatisticsBad(-1028)  无定义,不是数据坏
+//   ★`QualityLocalOverride(5003)` **不在读路径出现**:它的语义是"值被本地覆盖/人工替代",
+//     而两侧夹住的重建就是信号本身;SDT 下几乎每点都落在断点之间,标了等于没标。
+//
+//   ★★**拿这些值写账的消费方必须按 `quality >= 0` 过滤**;要"一经写入不再改"的值,
+//     连 Pending(5004) 也要跳过。HTTP 口(/api/v3/query)的质量码**要显式要**:
+//     `?quality=1` 或 body `"quality": true`(缺省仍两列,不动 Grafana)。
+// ============================================================================
+
+enum	HisGetMethod
+{
+	kHisGetNone			= 0;
+	kRawData			= 1;
+	kTrendData			= 2;
+	kAverage			= 3;
+	kMinimum			= 4;
+	kMaximum			= 5;
+	kStd				= 6;
+	kTotal				= 7;
+	kCount				= 8;
+	kArithmeticMean		= 9;
+	kRawStd				= 10;
+	kRawTotal			= 11;
+	kMinTime			= 12;
+	kMaxTime			= 13;
+	kTimeGood			= 14;
+	kFirstValue			= 15;
+	kLastValue			= 16;
+	kFirstTime			= 17;
+	kLastTime			= 18;
+	kChangeCount		= 19;
+	kBeginInterpolated	= 20;
+	kEndInterpolated	= 21;
+	kMaxChanged			= 22;
+	kChanged			= 23;
+}
+message	HisDataReq
+{
+	HisGetMethod	method				= 1;
+	google.protobuf.Timestamp
+					begTime				= 2;
+	google.protobuf.Timestamp
+					endTime				= 3;
+	double			intervalSeconds		= 4;
+}
+message HisDataPointReq
+{
+	int32		id			= 1;
+	int32		cookie		= 2;
+	HisDataReq	hisReq		= 3;
+}
+message	HisDataQueryReq
+{
+	HisDataReq	hisReq						= 1;
+	repeated	HisDataPointReq	pointsReq	= 2;
+}
+
+message	DeleteTagReq
+{
+	int32	tagId			= 1;
+}
+message	DeleteTagRes
+{
+	daq.Status	result			= 1;
+	int32				groupsAffected	= 2;	// number of file groups that held the tag
+}
+
+// ---- 待确认删除清单(方案丁;daqgate D-213 §3 审过、D-214 §2 定案)------------------------
+//
+// ★为什么要它:配置流**表达不了意图** —— 「用户真删了」「网关推来一份错误的空快照」
+//   「点被改成订阅过滤器之外的类别」到达 hs 时**字节完全一样**(daqgate D-213 §1 用自己的代码
+//   判据坐实了第三种确实存在)。所以 hs 不猜:点从配置里消失 ⇒ 记进本清单、**存储一个字节不动**,
+//   由网关**明确确认**之后才真删并回收。
+// ★**默认不删**:没人来确认,就永远只是清单里的一行。代价是"盘上多留一份历史",
+//   而不是"历史被误删" —— 两者不对等(D-214 §2.1)。
+// ★清单**只收两类**(D-214 §2 定案):
+//     ① EXPLICIT_REMOVE —— 收到 op=2;
+//     ② SNAPSHOT_ABSENT —— **活着的源**推来的**完整快照**里的缺席。
+//   **不收**:源被收割/注销(点没被删,是**源**没了 —— 网关离线是常态事件,一次离线会制造几百行
+//   待确认,而人对长清单的天然反应就是批量确认,那等于"离线一段时间 = 历史被删");
+//   以及流断/重连期间的半份快照(维持"只合并不删除")。
+message	PendingDeletion
+{
+	enum Reason {
+		SNAPSHOT_ABSENT		= 0;	// 活源完整快照里缺席 —— ★只能人工确认,不许批量自动删
+		EXPLICIT_REMOVE		= 1;	// 收到 EntityConfigPush 的 REMOVE(op=2)
+	}
+	int32	globalId		= 1;
+	string	guid			= 2;	// 该点原属来源(主控直存段为空)
+	int32	localId			= 3;
+	string	name			= 4;	// 消失时点表里的名字 —— 消失之后无处可查,故在此留档
+	int64	disappearedAt	= 5;	// 观察到它消失的时刻(epoch 微秒)
+	Reason	reason			= 6;
+	int64	lastSampleAt	= 7;	// 盘上最后一笔的时刻(epoch 微秒;0=盘上没有)
+	int64	storedBytes		= 8;	// 该点在盘上占的字节(估算,判断回收收益用)
+}
+
+message	ListPendingDeletionsReq
+{
+	string	guid	= 1;	// 空 = 全部来源
+	int32	limit	= 2;	// 0 = 不分页
+}
+message	ListPendingDeletionsRes
+{
+	daq.Status					result	= 1;
+	repeated PendingDeletion	items	= 2;
+	int32						total	= 3;	// 清单总长(不受 limit 影响)——积压看它
+}
+
+message	ConfirmDeletionsReq
+{
+	enum Verdict {
+		DELETE	= 0;	// 真删并回收(墓碑 + 定向强制压实)
+		KEEP	= 1;	// 误报/保留历史,出清单,永不删
+	}
+	message Item {
+		int32	globalId	= 1;
+		Verdict	verdict		= 2;
+	}
+	repeated Item	items	= 1;
+}
+message	ConfirmDeletionsRes
+{
+	message Result {
+		int32		globalId		= 1;
+		daq.Status	result			= 2;	// Ok / 其它:该条没处理成功
+		int32		groupsAffected	= 3;	// verdict=DELETE 时该点曾落在几个文件组里
+	}
+	daq.Status			result	= 1;
+	repeated Result		results	= 2;
+}
+
+// ---- 日志：实时订阅 + 历史翻阅（daqgate 按需调用，转发前台）----
+// 条目复用共享契约 daq.LogRecord；历史响应复用本文件 QueryLogsRes（Status+TotalCount+repeated LogRecord）。
+message	LogSubscribeReq
+{
+	LogLevel		minLevel	= 1;	// 低于此级别丢弃
+	string			category	= 2;	// 空=不限（匹配 LogRecord.Category，精确相等）
+	// 空=不限。Message 子串，**大小写不敏感**（1.9.199 起；此前为区分大小写）。折叠只作用于
+	// ASCII A-Z/a-z，中文等非 ASCII 字节原样比较 —— 故中文关键词的行为与改动前完全一致。
+	// 与 QueryLogs 的 search 同一判据：实时流与历史翻阅是同一个列表里上下相邻的行，不许两套语义。
+	string			search		= 3;
+	int32			backlog		= 4;	// 同时先补发最近 N 条历史（0=不补）
+}
+message	LogQueryReq
+{
+	google.protobuf.Timestamp	fromTime	= 1;	// 含下界（不设=不限）
+	google.protobuf.Timestamp	toTime		= 2;	// 含上界（不设=不限）
+	LogLevel		minLevel	= 3;
+	string			category	= 4;	// 精确相等
+	string			search		= 5;	// Message 子串，大小写不敏感（同 LogSubscribeReq.search）
+	int32			offset		= 6;	// 跳过 N（分页）
+	int32			limit		= 7;	// 最多返回（0=服务端默认）
+	bool			newestFirst	= 8;	// true=最新在前
+}
+
+// ---- 存储采集点：点表快照 + 实时订阅（daqgate 中继前台「存储采集点」Tab）----
+// 一条服务端流承载快照与增量：先推全量点表（可分帧），再推增量（实时 VQT 变化 + 配置变更 + 删除）。
+message StoredPointsReq
+{
+	string	search		= 1;	// 可选：名称/备注模糊过滤（为空=全量）。首版可忽略，推全量。
+	// 是否在 upserts 里内嵌实时 VQT。**不设 = true = 现状**（老 daqgate 不设此字段，行为不变）。
+	// 新版 daqgate 传 false，把本流降成纯点表同步流：全量订阅的代价只剩元数据，元数据只在组态
+	// 变化时才动；实时值改走按需的 SubscribeVQTs（daqgate 2026-07-29 §3：两者的订阅范围天生不同，
+	// 元数据要全量、实时值要按需，现网 5490 个点却只有几十行可见）。
+	//
+	// ★为什么是 optional 而不是 daqgate 原议的裸 bool：proto3 的裸 bool 缺省解码成 false，
+	// 老客户端（不设此字段）会被判成"不要值" → 主控 UI 的实时值静默消失。缺省必须落在"保持现状"
+	// 那一侧 —— 与 features 契约同一条原则：缺失 = 未知/照旧，不是否定。
+	optional bool	withValues	= 2;
+}
+message StoredPoint
+{
+	int32		Id			= 1;	// tagId
+	string		Name		= 2;	// 点名（EntityConfig.Name）
+	string		Des			= 3;	// 采集点备注（Paras "Des"）
+	string		Unit		= 4;	// 工程单位（Paras "Unit"）
+	bool		persist		= 5;	// 是否落盘
+	int32		frozenSec	= 6;	// 冻结时间（秒）
+	// 压缩误差 E：**工程量的绝对偏差**（与该点的量纲同单位），= 旋转门(SDT)保证的最大重建误差。
+	// ★它**不是**"相对容限"、也不按量程缩放（`de = E/2` 恒定，实现在 swinging_door.cpp：
+	//   "Constant per run, NOT scaled by the value range"）。本注释 1.9.340 订正 ——
+	//   此前写作"旋转门相对容限"，AISERVER r110 §3 据此把 0.5 当"半个量程"去试，
+	//   而该点实值在 780~835 摆动 ⇒ 0.5 的死区滤不掉任何点，差点判成"改了没生效"。
+	//   0 = 不做 SDT 过滤（每采必存，另受 frozenSec 心跳约束）。
+	double		compErr		= 7;
+	daq.VQT		VQT			= 8;	// 当前缓存值（值/质量/时间戳）；无缓存值时不设。StoredPointsReq.withValues=false 时不填
+
+	// ---- 实体元数据（daqgate 2026-07-29 §2；均为已持有数据的暴露，非新数据源）----
+	// 受限连接（从网关）拿到的 guid 恒为它自己、localId 是它自己的 —— 与 1.9.169 (乙) 同一判据，
+	// 不需要额外授权分支：它本来就只看得见自己 guid 段的点。
+	int32		categoryId	= 9;	// 点位分类（区分自指标/过程点）— PointMeta::categoryId
+	int32		relationId	= 10;	// 关联的采集通道 Id（按通道聚合）— PointMeta::relationId
+	int32		seq			= 11;	// 展示序号（列表稳定排序）— PointMeta::seq
+	int32		hostId		= 12;	// 所属主机/网关 Id — PointMeta::hostId
+	bool		isTagPoint	= 13;	// 真正的采集标签点（滤掉目录/容器/模块等非点实体）
+	string		guid		= 14;	// 来源网关身份（多网关列表的分组主键）；主控直存段的点为空
+	int32		localId		= 15;	// 该网关自己的点 Id；受限连接下与 Id 同值（Id 已是 localId）
+	// 值类型（daqgate VARENUM：I4=3/R4=4/R8=5/VT_DATE=7/VT_BOOL=11/I8=20）。
+	// 来源是 EntityConfig.Paras 的 "Acc" —— 就是我一直用来判"是不是采集标签点"的那个键，
+	// 它的**值**正是 daqgate 自己下发的 VARENUM。0 = 该点 Paras 没带 Acc（非采集点）或解析不出。
+	int32		valueType	= 16;
+	// 阶跃重建标志(daqgate 2026-08-04 r2 §3.4)。采集点的来源是 daqgate 自己下发的 Paras "Step"
+	// (原样回吐,对端本就知道);**自指标的这一位归 hs**(清单缺省 + 现场可改),点表是对端唯一
+	// 能读到它的地方 —— 少了它,统一编辑器打开一个自指标就填不出「阶跃重建」这一栏。
+	// 仅整型点有意义:实型恒线性、布尔/时间戳恒阶跃,由值类型决定。
+	bool		step		= 17;
+	// 下控许可位(daqgate 2026-08-05 r1 §2.1)。来源 = 配置流下发的 Paras "CanCtrlDown",原样回吐,
+	// 与其它点位字段同一条路 —— 不为它另开查询口(两条路必然漂,而漂的方向恰好是最坏的
+	// "以为能控、其实不能")。裸 bool 不是 optional:缺省 false 正是我们要的安全侧方向
+	// (对比 StoredPointsReq.withValues —— 那一条的缺省必须落在"照旧显示值",故必须 optional;
+	// 原则相同、方向相反,别照抄)。
+	//
+	// 语义边界,三条,请勿反向理解:
+	//   ① 它是**"要不要给入口"的提示,不是授权依据**。授权判定留在点的属主网关:它才有权威配置、
+	//      才知道通道当下状态。hs 这份是副本,天然可能滞后(对端刚改成不可下控、同步还没到)。
+	//   ② **自指标恒 false**,由 hs 保证(实时库自产的只读观测量,没有下控这回事)。
+	//   ③ 不表达"当前是否可控"(通道断开/闭锁等运行态)——那是执行侧的瞬时状态,属于下控**结果**,
+	//      放进副本只会给出过期结论。
+	// 快照帧与增量帧都带(与其它元数据同一处理);许可位变化本身会触发增量帧,不会停在旧值。
+	bool		canCtrlDown	= 18;
+	// 上级容器 Id(EntityConfig.ContainerId)。采集点的容器 = 它所在的目录/设备。
+	// 与 localId 同一个 id 空间(见 EntityIdentity.containerId 的同名字段说明),翻不出时回 0。
+	// 能力位 "identity-container-seq" 同时覆盖本字段与身份行那两个。
+	int32		containerId	= 19;
+	// 点位的协议寄存器/类型标识(daqgate 2026-08-17 r1 §2.1)。来源 = 配置流下发的 Paras "Reg",
+	// **原样回吐,hs 不解释**。这是"原样回吐"类字段的第四个(前三:valueType←"Acc"、step←"Step"、
+	// canCtrlDown←"CanCtrlDown"),处理方式与它们完全一致:同一条配置流进来,不另开查询口;
+	// 快照帧与增量帧都带,改了类型跟着走、不停在旧值。
+	//
+	// ★语义**按 categoryId 分派**,不是一个统一含义的数:
+	//     categoryId=19(IEC60870 采集点)→ ASDU TypeId(M_SP_NA_1 / C_SC_NA_1 …),对端的下控面板
+	//       整个由它分派(单点遥控/双点遥控/步调节/设定值/比特串,以及 SOE 时标与选择预备);
+	//     Modbus / DLT645 / DLT698 / SNMP 等 → 各自协议的寄存器类型码。
+	//   跨 producer 同名不同义 —— hs **不校验、不归一、不按协议分表**,统一了就一定错一半。
+	// 0 = 该点 Paras 没带 "Reg"(非采集点、自指标、或该协议没有这一维)。对端侧 0 = 画不出下控面板
+	// = 不给执行,与 canCtrlDown 缺省 false 同一取舍(安全侧),故裸 int32 不用 optional。
+	// 能力位 "point-reg"。
+	int32		reg			= 20;
+
+	// 目录祖先链快照(daqgate 2026-08-20 r14 §2.3 定;能力位 features:"point-ancestor-ids")。
+	// ★★ **gid 空间** —— 它是本消息里【唯一】的 gid 空间容器字段;旁边的 relationId / hostId /
+	//    containerId 全是 localId 空间。拿它去 join 那三个字段是静默错配。写死在此,勿凭直觉推断。
+	// 顺序:**由近及远** —— [父, 祖父, …, 最外层];root 不入列。前端面包屑反着渲即可。
+	// ancestorTruncated = **这条链已知不完整**:上溯没走到 root 就断了(容器不在实体表里),
+	//    或撞上成环/深度兜底。消费侧据此知道"最外层可能还有目录没给出"。
+	//    ★绝不在链中间塞 0 —— 链中间的 0 会被消费侧当 root 提前终止,静默丢外层目录。
+	// ★空数组有两义:「老引擎不发」与「该点直挂 root」都合法且处置相反 ——
+	//    判据必须**探能力位**,不能比版本号、也不能看数组是否为空。
+	// ★★与 `AlarmEvent.AncestorIds`（alarm.proto）**同名、同为 gid、同为由近及远，唯独起点不同**：
+	//    · 本字段：从**这个点**的 containerId 起算（目录树视图）；
+	//    · AlarmEvent.AncestorIds：从**归属节点**（采集通道/目录）起算，且恒有 [0] == GFolderId。
+	//    两者不可互推、不可互相照抄读法（daqgate 2026-08-20 r22 §7 请求在此回指）。
+	// ★★2026-08-25 起是**网关根四层规范链**(点→通道→连接→网关;自指标段三跳,跳过"连接"层),
+	//   不再是目录链。口径与 AlarmEvent.AncestorIds **逐字一致**(两处共用同一份实现)。
+	//   能力位 "ancestry-gateway-rooted";链长不固定,不得按下标取跳。
+	//   ★"四跳/三跳"是**连采集点一起数**的路径形态,而**本数组不含该点** ⇒ **数组长度**是
+	//     主形态 **3** = [通道, 连接, 网关]、自指标段 **2** = [虚拟通道, 网关]
+	//     (1.9.299 现场实测 AISERVER 737 点:{3: 693, 2: 44})。
+	//   ★**末端那一跳是网关本身**(自指标段则是本设备)。旧目录链里 root 不入列,是因为它是无意义的
+	//     共同祖先;网关相反 —— 它是这条链存在的理由,不给这一跳,消费侧就说不出"这个点属于哪台设备",
+	//     只能另走 guid → 身份表 这条第二机制(AICloud r101 实测:737 个点的链里网关跳一个都没有)。
+	repeated int32	ancestorIds	= 21;
+	// 上一字段是否因某一跳翻不出而被截断。false = 完整到顶。
+	bool	ancestorTruncated	= 22;
+	// 同一条链的 **localId 空间**副本,与 ancestorIds **逐位一一对应**(下标 i 是同一跳)。
+	// 消费侧按自己手上的键选用:身份表按 (guid, localId) join 就用这个;
+	// 拿 gid(AlarmEvent.tagId / ancestorIds)反解就用上面那个 + EntityIdentity.globalId 桥字段。
+	// ★这里的 **0 = 该跳翻不出该网关的 localId**,不是 root —— 链的权威长度以 ancestorIds 为准,
+	//   本数组只是逐位映射,故允许中间出现 0 而不会被误当成提前到顶(与 containerId 的
+	//   "翻不出回 0" 同义)。两数组要么等长,要么本数组为空(老引擎不发)。
+	repeated int32	ancestorLocalIds	= 23;
+	// 该点采集通道的 **gid**(2026-08-20;能力位 "point-gchannel-id")。
+	//
+	// ★与旁边的 relationId(字段 10)是**同一个通道的两个 id 空间**:relationId 是该网关的
+	//   localId(原样透传、不翻译),本字段是经 hs 映射后的全局号。两者并存、各司其职:
+	//   relationId 给本机视图,gChannelId 给**跨网关分组**。
+	// ★为什么必须有它:报警事件的归属(AlarmEvent.GFolderId)恒是 gid。点表若只给 localId,
+	//   云平台按它分组会把两台网关的同号通道**合并成一组**,而且合并出来的那组看着完全正常
+	//   —— 报警看板与点表分属两套号,"看着都对、就是合不到一起"(daqgate r20 §3)。
+	// 0 = 该点不挂通道 / 映射查不到(**绝不回退吐 localId**:对端会把它当 gid 用)。
+	// ★这两义**分得开** —— 与 relationId(字段 10)**成对读**(AISERVER r113 §2.2 问、本方确认):
+	//   · relationId == 0            ⇒ 该点**本来就不挂通道**(正常形态,归"未分组"即可);
+	//   · relationId > 0 且本字段 0  ⇒ **映射查不到**(该修:那台网关的通道配置还没到,
+	//                                   或该点的归属 guid 与映射库对不上)。
+	//   ⇒ 消费侧不必为此新开口子,也不该把两者混成一句"不可分组"。
+	// ★与报警的对齐关系:**对同一采集点、在同一时刻**,本字段 == 该点报警事件的
+	//   AlarmEvent.GFolderId(两处按同一套三分支算:自指标虚拟通道原样、有映射查映射、直存段即 gid)。
+	//   ★但报警事件里的那个号是**事件发生当时的快照**(历史不回改) —— 通道事后被改挂/映射变过之后,
+	//     老事件仍带旧号。⇒ 拿"当前点表"去 join"历史报警"时,这一格可能对不上,那是**预期**,不是缺陷。
+	int32	gChannelId	= 24;
+	// 该点**配没配报警**(daqgate D-202;能力位 "point-alarm-enabled")。
+	//
+	// ★判据(D-202 §4.1,我方取甲):该点上**存在**报警配置 —— **含**"配了但引擎装不成
+	//   condition"那一档(PointAlarmStatus.POINT_ALARM_CONFIG_ERROR)。理由是用户确实配过,
+	//   把它算成"未启用"会让人再去配一遍才发现本来就配过。
+	//   ⇒ 与 PointAlarmStatus 的对应关系:NOT_CONFIGURED ⇒ false;其余四档(CONFIG_ERROR/
+	//   NORMAL/ABNORMAL/RESUMED_UNACKED)⇒ true。★UNKNOWN 那一档**在本流里不存在** ——
+	//   点表流是按点表自己构造的,能出现在这条流里的点就一定在点表内(见下一条)。
+	// ★判定与报警引擎装载 condition **同源、同一个函数、同一份 alarmCfg 字节**
+	//   (core/alarm/alarm_config.h 的 PresenceOfSerializedAlarmConfig,三个消费方共用)。
+	//   两处各写一套的表现是"界面说已配、引擎没装"或反之,而**两边各自看都正常**。
+	//
+	// ★**它与 PointAlarmStatus 是两维,不是一维**(D-202 §3 请求即在此):本位说"配没配"(组态),
+	//   SubscribePointAlarmState / ListAlarmedPoints 说"此刻在不在报"(运行结论)。
+	//   把组态缺口显示成运行结论,正是 D-202 §1 用户点出的那条。两维并存,谁也不替代谁。
+	//
+	// ★自指标(categoryId=自指标段)**照实给**,不是恒 false —— 与 canCtrlDown 那一位相反,
+	//   别照抄它:自指标可以配报警(SelfMetricParas.alarm,能力位 "selfmetric-alarm-config"),
+	//   恒 false 会让它们在这一列上永远筛不出来,而用户明明配过。
+	// ★非采集点实体(目录/通道/连接;isTagPoint=false)恒 false:报警只挂在采集点上。
+	//
+	// ★变更时机(D-202 §4.4):报警配置**增/删/改**都会触发该点的一条增量帧 —— 与
+	//   canCtrlDown / reg 完全同路(本流每 tick 比对整条 StoredPoint 的序列化字节,
+	//   任一出向字段变了就进 upserts)。⇒ 对端镜像里这一位**不会停在配置变更前的值**。
+	// ★裸 bool 不是 optional:缺省 false = "没配报警",落在安全侧(与 canCtrlDown 同一取舍);
+	//   "老引擎不发"与"真的没配"靠**能力位**分开,不靠字段是否存在(D-202 §4.2)。
+	bool	alarmEnabled	= 25;
+}
+
+message StoredPointsRes
+{
+	repeated StoredPoint	upserts		= 1;	// 新增/更新（快照帧=点表；增量帧=变化点，含实时 VQT）
+	repeated int32			removes		= 2;	// 已删除点的 Id
+	bool					snapshot	= 3;	// true=一次完整快照的开始（多帧快照仅首帧置 true）
+	// 快照事务边界（daqgate 2026-07-31 §2.1）：true = 本帧是该快照的**最后一帧**。
+	// 快照是分帧发的（每帧 ≤800 点），中途断流会让"先清空再填一半"的消费者留下一份**残表**且不自知
+	// —— 与"点凭空消失"是同一种症状，用户无从分辨。故消费者应：收到 snapshot=true 起**缓冲**，
+	// 收到 snapshotEnd=true 才**原子替换**整表；没等到 END 就断 = 丢弃本轮、保留旧表。
+	// 与上行 EntityConfigPush 的 SNAPSHOT_BEGIN…END 同形态。
+	// 老引擎（1.9.183 及以前）恒为 false —— 见 --capabilities 的 storedpoints-snapshot-end 能力位，
+	// 不要把"字段恒 false"误判成"这个快照永远没结束"。
+	bool					snapshotEnd	= 4;
+}
+
+// ---- 按需实时值订阅（daqgate 2026-07-29 §3.2；与点表流分离）----
+// 单向流 + 客户端重订（daqgate 倾向的形态，与其既有实时订阅范式一致，不引入新状态机）：
+// 可见集变化时客户端重建流，服务端每次重发快照，客户端按时间戳去重。
+//
+// id 空间与点表流一致（这是硬约束，两者错开就是静默错配）：受限连接（从网关）传的是它自己的
+// localId、收到的 VQT.tagId 也回显它的 localId；全量来源（回环）用 globalId。判定收敛在
+// src/rpc/read_scope.h 一处，不散在调用点上（daqgate 2026-07-29 §3.2 要求；云端管理端将来是
+// 那里的第四类，加一个枚举值即可，本 rpc 不用改）。
+message VQTSubscribeReq
+{
+	repeated int32	ids		= 1;	// 要订的点；空 = 不订任何点（立即空快照后静默保持，不报错）
+}
+
+// 多网关共库:从网关清盘/水位丢后 reconcile 反查本 guid 的 localId 高水位(见多网关契约定稿)。
+// guid 从 mTLS 客户端证书取(空请求体、只反查自己段);仅跨机从网关调,回环单网关主控直存不用。
+message	MaxLocalIdReq	{}
+message	MaxLocalIdRes	{	int32	maxLocalId	= 1;	}	// 该 guid localId 高水位;空段 0
+
+// 批量 localId → globalId 换算(daqgate 2026-07-29 定 (b) 后的配套)。
+//
+// 背景:主控停直存后,hs 侧一律用 globalId,而 daqgate 的领域模型/前端/视图持久化一律用它自己的
+// 实体 Id(localId)。翻译层落在 daqgate 的 hs 客户端层(它一处做对即可,不上浮到前端)。本 rpc 就是
+// 那一处需要的换算源。批量形态是必须的:一个趋势视图几十支笔,单点形态会退化成几十次 RPC。
+//
+// guid 语义:全量来源(回环/白名单)可查任意 guid(主控要为所有网关翻译);带 cert guid 的跨机连接
+// 只能查自己那段(留空或填自己的 guid,填别人一律 PERMISSION_DENIED)。
+//
+// 「未分配」必须可表达:点刚建、还没推过 VQT 时没有映射,此时返回 **0** —— 调用方据此判定"查不到
+// 历史",绝不能拿 0 去查、更不能拿 localId 兜底查(那就退回被否掉的 (a) 方案、会静默查到别人的点)。
+// 只查不分配:查询不产生副作用。
+message	LookupGlobalReq	{
+	string			guid		= 1;	// 空 = 用本连接 cert 的 guid;全量来源可指定任意 guid
+	repeated int32	localIds	= 2;
+}
+message	LookupGlobalRes	{
+	repeated int64	globalIds	= 1;	// 与入参【同序等长】;0 = 该 localId 尚未分配映射
+}
+
+// 【已退役 2026-07-29】RegisterConfigSource / DeregisterConfigSource(方案 C 从网关自注册 +
+// hs 反向连边缘 :5410 取配置)。配置面翻转完成后边缘改主动推 PushEntityConfigs,反向连整条路作废,
+// 两个 rpc 与其消息一并删除(daqgate v1.0.10-227 已撤边缘跨机口并删除客户端封装)。
+// 保留字段号占位以防将来撞号:曾用 rpc 名见本注释,消息号未复用。
+
+// ── 配置面方向翻转(daqgate 2026-07-28《tagId空间定案与配置面方向翻转》§3)────────────────────
+// 边缘网关**主动推**实体配置,替代「hs 反向连边缘 :5410 取 SubscribeEntityConfigs」。云形态下边缘
+// 多在 NAT 后、云侧连不进去,且让存储去维护上千条出向连接职责反了。翻转后边缘只需一条出向 mTLS
+// 长连接(与 PostVQT 同一条),上行数据 + 上行配置。
+//
+// 事件模型**原样复用** daq.EntityConfigEvent(SNAPSHOT_BEGIN/PUT/REMOVE/SNAPSHOT_END/HEARTBEAT),
+// 语义与 SubscribeEntityConfigs 逐字相同,只是方向反过来 —— 双方的解析/提交代码都不用改。
+// guid 仍从该连接的 peer cert SAN URI 取(不进 body、不自报),与 PostVQT 完全一致。
+//
+// 已钉死的语义(hs 回执 §3.3):
+//   ① 流断 ≠ 删点:只标记不活跃,删点只认「长期无 VQT 且无配置流」的超时兜底;
+//   ② 同一 guid 并发两条流:后到者胜,先到的那条被 hs 主动关(CANCELLED),避免两份快照互相覆盖;
+//   ③ SNAPSHOT_BEGIN…END 之间断流 = 半份快照,hs 丢弃并保留旧快照 —— 重连后必须【重推全量】;
+//   ④ 单 guid 快照规模有上限,超限拒流(见 hs 侧 kMaxSnapshotEntities)。
+// 事件本体在**本文件**定义,不 import daqgate 的 daqinternal.proto —— 那是 daqgate 的**内部**契约,
+// 翻转完成后 SubscribeEntityConfigs 连同该文件都会退役;若把它 import 进 hs 的对外契约,
+// 我的公开接口就会随对方内部文件的存废而动。字段号/类型与 daq.EntityConfigEvent **逐字对齐**(wire 兼容),
+// daqgate 侧可直接复用同一套序列化,只换 message 名。
+message	EntityConfigPush {
+	enum Op {
+		SNAPSHOT_BEGIN	= 0;	// 全量快照开始:hs 先缓冲,勿即时删旧
+		PUT				= 1;	// 新建/更新单实体(带 entity)
+		REMOVE			= 2;	// 删除单实体(仅带 id)
+		SNAPSHOT_END	= 3;	// 全量快照结束:hs【原子提交】,本轮未出现的旧实体一律删除
+		HEARTBEAT		= 4;	// 保活空事件
+		// 网关自报身份(daqgate 2026-07-29:网关名在 config.json 里、根本不是实体,推不上来)。
+		// 建流后先发一条,不属于快照事务(不受 SNAPSHOT_BEGIN/END 约束、不参与原子提交)。
+		// 只带 gateway 字段;guid 仍从 peer cert 取(不进 body、不自报,与 PostVQT 同一条纪律)。
+		IDENTITY		= 5;
+		// 类别名录整份(daqgate r85 定形态、r89 出帧)。**一帧一整棵树**,不是一行一帧:
+		// 一帧整份 ⇒ "重报即覆盖"就是一次整体替换,不需要判"这一轮发完没有";拆成多帧就得
+		// 另立开始/结束标记,而那正是快照事务在干的事,与"不进事务"直接冲突。
+		//
+		// ★不属于快照事务:不受 SNAPSHOT_BEGIN/END 约束、不参与原子提交、不因流断而清空。
+		//   建流后先发一条,重报即覆盖(同一源恒一份),不落盘 —— 与 IDENTITY 逐条同规矩。
+		// ★载荷不带 guid:归属由 hs 按源定(本流是 peer cert 的 guid),不存在自报面。
+		// ★hs **只搬运不解释**:不判类别、不上溯、不排序、不校验行数,存下来在
+		//   ListCategoryNames 原样回。
+		// ★**不得硬编码行数**。2026-08-24 实证:daqgate 源码里 61 行(含 6 行注释掉的停用类别)、
+		//   现场库里 55 行,任一侧写死都会错 —— 发多少收多少。
+		CATEGORY		= 6;
+	}
+	Op					op		= 1;
+	int32				id		= 2;	// REMOVE 用;PUT 时冗余带 = entity.Id
+	daq.EntityConfig	entity	= 3;	// PUT 用;其余 op 为空。hs 按【内容】去重(不信 Version)
+	GatewayIdentity		gateway	= 4;	// IDENTITY 用;其余 op 为空
+	// 类别族根(daqgate 2026-08-11 §3 方案 B,本方回执采纳)。语义与 daq.EntityConfigEvent 的
+	// 同名字段**逐字一致**:最近的、落在 {12,15,17,21,0} 内的祖先(含自身),**不是**上溯到顶层。
+	// PUT 用;其余 op 为 0。hs 不解释,存下来在 ListEntityIdentities 原样回。
+	// ★**显式 presence**(AICloud 2026-08-21 presence 立项,daqgate r7 收下):
+	//   缺席 = 产生该行的固件根本没算这个值 ⇒ 消费侧退回自己的 fallback 判据;
+	//   存在且为 0 = 算了,但该行不属任何声明类别 ⇒ **不再 fallback**,直接跳过。
+	//   裸 int32 时这两义共用 0,而处置相反 —— 2026-08-20 现场就是这么误建 5 个实体的。
+	optional int32		categoryRootId	= 5;
+	CategoryCatalog		catalog	= 6;	// CATEGORY 用;其余 op 为空
+}
+
+// 类别名录的一行。字段号/类型与 daq.CategoryEntry **逐字对齐(wire 兼容)**:两条入口
+// (同机主控经 SubscribeEntityConfigs 拉、从网关经本文件的 PushEntityConfigs 推)载荷完全一致,
+// hs 只需一套处理。
+//
+// ★containerId 的**空间**必须与 EntityIdentity 的同名字段分清:两者同名、同类型、
+//   同一个 per-gateway id 空间,**用途相反**,而且互相 join **能 join 上且不报错** —— 禁止互 join。
+//     · 本字段(名录)      :这个**类别**的父**类别**是谁(类别树);
+//     · EntityIdentity 的  :这条**实体**挂在哪条实体下(实体归属)。
+//   不写清,日后必有人拿名录的 containerId 去 join 身份表(hs r84 §4,daqgate r85 §4 同判)。
+message	CategoryEntry {
+	int32	categoryId	= 1;	// join 键。与点上的 categoryId、身份行的 categoryId 同一空间
+	string	name		= 2;	// 显示名
+	int32	containerId	= 3;	// **父类别的 categoryId**(类别树),口径见上
+	string	des			= 4;	// 描述,有就带(daqgate 侧目前恒空:类别行只有 Name)
+}
+
+// 类别名录整份。一帧一整棵树,理由见 EntityConfigPush.Op.CATEGORY。
+message	CategoryCatalog {
+	repeated CategoryEntry	entries	= 1;
+}
+
+// 网关自身身份。hs **不解释**其中任何一个字段:存下来、在 ListEntityIdentities 里原样回。
+// 生命周期跟着配置源走 —— 与点同一条规则(流断 ≠ 删;源被显式注销/长期无 VQT 被 reap 才消失)。
+// 不落盘:重启后由网关重连时重报,绝不做"我这边留一份"的持久化(那正是幽灵注册记录的成因)。
+message	GatewayIdentity	{
+	string				name	= 1;	// 网关名称(显示用)
+	string				des		= 2;	// 描述
+	// 主机名/固件版本/项目名…… 任意补充属性,hs 原样存回。放 map 而不是逐个开字段:这些是
+	// daqgate 的领域概念,每加一个就要动我的对外契约一次,而我又不理解它们的语义。
+	map<string, string>	attrs	= 3;
+}
+
+message	PushEntityConfigsRes	{
+	int32	accepted	= 1;	// 本条流内被接收(已应用)的事件数,仅诊断
+}
+
+// 自指标清单(hs 自管,替代 daqgate /listhistorystoremetrics)。返回全清单元数据 + hs 自分配 id;
+// 前端据此发现自指标并用 id 走 QueryHistory/GetServerStatus 画曲线。任何网关(含从网关)均可查。
+message	ListSelfMetricsReq	{}
+message	SelfMetricInfo {
+	int32	id			= 1;	// hs 经 id_map 分配的 globalId(保留段 2026-07-31 已取消,与采集点同一序列;
+								// 0 = 映射库不可用、尚未分配)。★不跨库恒定,持久化引用一律锚 key。
+	string	key			= 2;	// 稳定幂等键
+	// name/description/unit 自 1.9.197 起**可写**(daqgate 2026-08-04 r1 §3.1):这里回的是生效值
+	// (清单缺省 or 现场改过的,不区分来源),缺省另见 defaultName/defaultDescription/defaultUnit。
+	string	name		= 3;	// 显示名
+	string	description	= 4;
+	string	unit		= 5;	// 工程单位
+	string	group		= 6;	// 中文分组(只读,清单组织)
+	int32	valueType	= 7;	// VARENUM (I4/R4/R8/VT_DATE/VT_BOOL)(只读,值域定义)
+	int32	ordinal		= 8;	// 清单序号(前端排序)(只读)
+	string	trueLabel	= 9;	// VT_BOOL 值=1 显示(只读)
+	string	falseLabel	= 10;	// VT_BOOL 值=0 显示(只读)
+	// ---- 存储参数的**当前生效值**(daqgate 2026-08-04 协调 r1 §5)----
+	// 6-10 是只读的清单组织/值域定义,这几项是存储行为:它们就是引擎摄取该点时实际施加的死区/落盘
+	// 策略(清单缺省 or 经 SetSelfMetricParas 改过的值,不区分来源)。缺省值另见 defaultXxx。
+	bool	persist		= 11;	// 是否落盘
+	int32	frozenSec	= 12;	// 冻结时间(秒);0 = 关心跳,后果见 SetSelfMetricParas
+	// 压缩误差 E:**工程量的绝对偏差**(与该指标同单位),= SDT 保证的最大重建误差;
+	// **不按量程缩放**。口径与 StoredPoint.compErr 同一条,详见那里的订正说明(1.9.340)。
+	double	compErr		= 13;
+	// 出厂缺省(清单里写死的那份)。回出来是为了让对端能显示"已改过"并做恢复缺省的预览,
+	// 而不必在 daqgate 侧复制一份 hs 的缺省(复制迟早漂,daqgate r1 §6.5)。
+	bool	defaultPersist		= 14;
+	int32	defaultFrozenSec	= 15;
+	double	defaultCompErr		= 16;
+	// 阶跃重建标志(daqgate 2026-08-04 r2 §3.4)。语义与采集点的 Paras.Step 完全一致:聚合查询对
+	// 好值包夹的空桶插值时,true = 保持前值(零阶保持),false = 线性。**仅整型点(I4/I8)有效** ——
+	// 实型恒线性、布尔/字符串恒阶跃,由值类型决定,与本标志无关(见 bus/metadata_store.h)。
+	// 清单缺省对单调累计量(接收总数/丢块累计/…)已置 true:线性会在空桶里插出从未发生过的中间值。
+	bool	step		= 17;
+	bool	defaultStep	= 18;
+	// 描述性字段的出厂缺省。与 default{Persist,FrozenSec,CompErr} 同一用途:让对端显示"已改过"
+	// 并预览恢复缺省的结果,而不必在 daqgate 侧复制一份 hs 的清单文案。
+	string	defaultName			= 19;
+	string	defaultDescription	= 20;
+	string	defaultUnit			= 21;
+	// ---- 报警配置的**回读**(1.9.361)。SetSelfMetricParas 从 1.9.246 起就收 alarm,但读出面一直
+	// 没有它 —— 于是"配得进去、读不回来":组态界面重开一次就显示不出已配的报警,只能靠用户自己记得。
+	// 写入面有的项,读出面必须有(H-162 的教训:出向缺一项,对端就得在别处猜)。
+	// 不填 = 该自指标没有报警配置(与 EntityConfig.Alarm 的"不填 = 没配"同一口径)。
+	daq.AlarmConfig	alarm		= 22;
+	// ---- 转换器(1.9.361,用户裁定 2026-08-29)。回的是**生效值**;不填 = 该点没有转换器。
+	SelfMetricConvertor	convertor	= 23;
+	// **生效的结果值类型**:配了转换器 = 转换器的 resultType,没配 = 上面的 valueType。
+	// ★这一项是给组态界面用的:状态表/限值的那一列该画成复选框还是文本框,取决于**转换后**的类型
+	//   (daqcontract.proto AlarmConfig 上方那条口径:别拿原始采集类型去校验 StateLo/StateHi)。
+	//   valueType 保持"原始声明类型"不变 —— 两个都要有,合成一个就答不出"它被转过没有"。
+	int32	resultValueType	= 24;
+}
+message	ListSelfMetricsRes	{	repeated SelfMetricInfo	metrics	= 1;	}
+
+// ================== 自指标转换器(用户裁定 2026-08-29;推翻我方 H-162 §1)==================
+//
+// ★H-162 §1 曾答 daqgate"Convertor 不会进写入面",理由是"自指标声明类型即结果类型,中间没有可插
+//   转换的位置"。**该结论已被用户推翻**:同一个采集标签点编辑器服务两类点,自指标少一个页签,
+//   用户就得记住"哪些点能转、哪些不能" —— 这与 r2 §2 定下的"写入面比读出面窄一截就要在界面上
+//   分叉出四处特例"是同一条理由,而那条理由当初正是我方自己接受的。
+//
+// **形态照抄 daqgate 的运行期实现**(ProtocolGate/tagpoint/{line,table}convertor.go),不是照抄
+// daq.proto 里那个 `LineConvert`(InputLo/InputHi/OutputLo/OutputHi):
+//   ① daq.proto 的 ConvertorConfig/LineConvert **全项目零引用** —— 它不是任何一条活着的路径;
+//   ② daqgate 真正执行的是 Paras JSON 里的 `Line{ResultType,Scale,InOffSet,OutOffSet}`,
+//      编辑器的「转换设置」页签产出的就是这一份。照它,daqgate 的页签**原样**提交即可,
+//      两侧不必各写一遍映射。
+//
+// ★求值发生在**转换之后**(daqcontract.proto AlarmConfig 上方那条口径)。对采集点,转换在 daqgate
+//   侧做、hs 拿到的已是工程值;对自指标,产值的是 hs 自己 ⇒ **转换也由 hs 做**,且做在落库之前:
+//   落盘的、订阅推的、报警求值的、查历史查到的,是同一个转换后的值。不存在"库里存原始值、
+//   界面上转一遍"的第二套路径 —— 那会让历史曲线与实时值对不上。
+// ★**不提供 Bits 转换**:daqgate 的 CheckBitsConvertor 要求原始类型恒为 VT_UI2,而自指标清单里
+//   没有也不会有 UI2 点(I4/R4/R8/I8/BOOL/DATE)。给一个恒不可用的页签比不给更糟。
+enum	SelfMetricConvertResultType	{
+	// 取值 = daqgate 的 VARENUM(domain/config.go),**不是**字段号,也不是 daq.proto 里那个
+	// 同名 enum(它把 Interger 写成 3=VT_I4,而 daqgate 的 IsValidResultType 根本不收 I4)。
+	ConvertResultNone	= 0;	// VT_EMPTY:不是合法结果类型,带它 = 配置错误(整批拒)
+	ConvertResultR4		= 4;	// VT_R4
+	ConvertResultR8		= 5;	// VT_R8
+	ConvertResultString	= 8;	// VT_BSTR
+	ConvertResultBool	= 11;	// VT_BOOL
+	ConvertResultI8		= 20;	// VT_I8
+	// ★没有 I4(=3):daqgate 的 IsValidResultType 只放行 {BOOL,BSTR,R4,R8,I8} 五种,这里逐字一致。
+	//   要整型结果请用 I8 —— 与其两侧的合法集合差一个值(那种差异只会在现场以"这个点转换配不上"
+	//   的形态爆出来),不如缺一个能用 I8 顶掉的类型。
+}
+// 线性转换:out = (in + inOffset) * scale + outOffset,再按 resultType 定型。
+// (逐字对应 lineconvertor.go 的 `(indb+InOffSet)*Scale + OutOffSet`。)
+message	SelfMetricLineConvert	{
+	SelfMetricConvertResultType	resultType	= 1;	// 必填且必须合法
+	double	scale		= 2;	// ★不得为 0(daqgate: ConvertorScaleInvalidZero);缺省不给 = 0 = 拒
+	double	inOffset	= 3;	// 入偏移(先加)
+	double	outOffset	= 4;	// 出偏移(后加)
+}
+// 转换表的一行。四个边界用 daq.VARVAL(契约里已有的变体值),对应 daqgate ConvertItem 的
+// Domain.Varaint —— 边界既可能是数(区间映射),也可能是字符串/布尔(枚举映射)。
+// 求值规则逐字对应 tableconvertor.go 的 TableConvertor.Convert:
+//   ① 四个边界齐全且入值可转成 double ⇒ 命中 [inputLo, inputHi] 就按两点线性内插;
+//   ② 否则拿 inputLo 与入值**按值相等**比 ⇒ 相等就直接输出 outputLo(枚举/状态码映射走这一支);
+//   ③ 逐行都不命中 ⇒ 用第一条 exceptionItem 兜底(它按 force 内插、或直接输出其 outputLo);
+//   ④ 连兜底行都没有 ⇒ **不转换、原样落库**,并按坏值口径打质量码(见下)。
+message	SelfMetricConvertItem	{
+	daq.VARVAL	inputLo		= 1;
+	daq.VARVAL	inputHi		= 2;
+	daq.VARVAL	outputLo	= 3;
+	daq.VARVAL	outputHi	= 4;
+	bool	exceptionItem	= 5;	// 兜底行:所有行都不命中时用它
+}
+message	SelfMetricTableConvert	{
+	SelfMetricConvertResultType	resultType	= 1;	// 必填且必须合法
+	repeated SelfMetricConvertItem	convertors	= 2;	// ★至少一行,空表整批拒
+}
+// 转换器本体。oneof:一个点上只能有一种转换器(与 daqgate 的 Convertor 一致 —— 它虽是三个可空
+// 指针,Convert() 也是按 Line→Table→Bits 取第一个非空,等价于 oneof)。
+// ★**带一个 convertor 都不设的空 SelfMetricConvertor = 显式清除转换器**(与 alarm 那一项同口径);
+//   不带 convertor 这一项 = 不动它。两者语义相反,别合并 —— daqgate 自己踩过这个坑
+//   (tagpoint/convertor.go 的 IsEmptyConvertorParas:表单把 Convertor 削成 {} 发上来,
+//   按"显式无转换"处理就把用户已存的配置静默清空了)。
+message	SelfMetricConvertor	{
+	oneof	convertor	{
+		SelfMetricLineConvert	line	= 1;
+		SelfMetricTableConvert	table	= 2;
+	}
+}
+
+// ---- 自指标参数可配(daqgate 2026-08-04 协调 r1;写入面对齐采集标签点 r2)----
+// 只改参数,不增删点:自指标清单归 hs 自管,本 rpc 无法新建/删除其中任何一项。
+//
+// 寻址用 key 不用 id(daqgate r1 §6.1,我方同意):key 是清单里永不改名的幂等锚,而 id 是 id_map
+// 分配的、随库而异 —— 用 id 存配置,换个库/换台设备同一份配置就套到别的指标上了。
+//
+// **写入面 = 采集标签点编辑器能改的那一组**(r2 §3):除三项存储参数外,name/description/unit/step
+// 也可写。理由是 r2 §2:写入面比读出面窄一截,对端就得在编辑器里按"这行是不是自指标"分叉出置灰、
+// 跳校验、换提交目标四处特例 —— 而自指标是不是 daqgate 的实体,只该决定**写往哪里**,不该决定
+// **界面能改什么**。改名不动身份:寻址恒按 key,历史恒跟 id/key 走。
+//
+// 各项均为 optional:不带 = 不动那一项。reset=true = 该点**全部**可写项回到清单缺省(与"带值"
+// 互斥,同时给按 reset 处理并忽略带的值)。
+message	SelfMetricParas	{
+	string	key			= 1;	// 自指标 key(ListSelfMetrics 回的那个);未知 key 整批拒绝
+	optional bool	persist		= 2;
+	optional int32	frozenSec	= 3;	// ★ 0 = 关闭心跳:值不变就再也不落点,曲线只剩首点。
+									// 合法取值,hs 接受并在 Status.message 回一条 warning(不阻断)
+	optional double	compErr		= 4;
+	bool	reset		= 5;	// true = 该点恢复出厂缺省(忽略其余各项)
+	// ---- 描述性字段(r2 §3.1)。空串 = "改成空",不是"不带";不想动就别带这一项。----
+	optional string	name		= 6;	// 显示名。非空、且不得与清单里别的自指标重名(整批拒)
+	optional string	description	= 7;	// 备注(现场排查笔记)
+	optional string	unit		= 8;	// 工程单位(纯显示,不参与任何计算)
+	// 阶跃重建(r2 §3.4)。仅整型点有效;非整型点带了也接受并存下,只是重建时不看它 ——
+	// 寻址正确、字段不适用 = 静默接受,不回 INVALID_ARGUMENT(r2 §3.2 的口径,我方采纳)。
+	optional bool	step		= 9;
+	// 报警配置(2026-08-20,用户裁定"SelfMetricParas 收 Alarm";daqgate 组态补记问的就是这条)。
+	// ★自指标点**不经 daqgate 的实体配置流**(它们是 hs 自产的观测量,不在 EntityConfig 里),
+	//   所以过程点那条路 —— EntityConfig.Alarm 字段 14 —— 对它们不存在。本字段是**唯一入口**。
+	// ★为什么自指标值得配报警:alarmDropped(报警在丢)/alarmQueueDepth(待落库接近容量)/
+	//   natsDropped/diskDaysRemaining 这类坏起来是**静默的**,现在没有任何机制会喊。
+	// 语义与其它项一致:不带 = 不动;带一个**空的 AlarmConfig** = 显式清空(该点不再报警)。
+	// 类型直接用契约里那个 message,不用 bytes —— 对端的 Go/TS 桩由此拿到强类型,
+	// 也不必两侧各写一遍"这坨字节是什么"。
+	optional daq.AlarmConfig	alarm	= 10;
+	// 转换器(2026-08-29 用户裁定;推翻 H-162 §1 那句"不会进写入面")。语义与 alarm 那一项**逐字一致**:
+	// 不带 = 不动;带一个**空的 SelfMetricConvertor**(oneof 一支都不设)= 显式清除该点的转换器。
+	// ★与采集点的分工:采集点的转换在 daqgate 侧做(setDAQValue 第一句 Config.Convert),推给 hs 的
+	//   已是工程值;自指标的值是 hs 自己产的,所以**这一份由 hs 在落库前施加** —— 落盘/订阅/报警求值/
+	//   查历史看到的是同一个转换后的值,不存在第二套路径。
+	// ★合法性整批校验(与本 message 其余项同一条原子规则):resultType 不合法 / 线性 scale=0 /
+	//   转换表空 / 某行 inputLo==inputHi 或 outputLo==outputHi ⇒ **整批拒**(INVALID_ARGUMENT)。
+	//   这几条与 daqgate 的 CheckLineConvertor / CheckTableConvertor / CheckConvertItem 逐条对应。
+	optional SelfMetricConvertor	convertor	= 11;
+}
+message	SetSelfMetricParasReq	{
+	repeated SelfMetricParas	items	= 1;
+	// 【已废弃,1.9.197 起忽略】frozenSec=0 的显式确认位。原为防"自指标曲线一片空白"事故而设,
+	// 未置位即整批拒。r2 §Q1 指出:同一个输入框,填 0 对采集点直接过、对自指标要弹窗,统一编辑器
+	// 里没有这个位置,解释不通 —— 而 daqgate 自己的点 frozenSec=0 本就是合法常规取值。故改为
+	// **接受 + 回 warning**(Status.code 仍 Ok,message 带说明;服务端同时 WARN 一条)。
+	// 字段保留不删:老调用方带着它不报错,也不影响行为。
+	bool	confirmZeroFrozen	= 2 [deprecated = true];
+}
+// 整批原子:任一条不合法(未知 key / frozenSec<0 / compErr<0 / name 为空或重名)→ 全批不应用。
+// 反过来:**寻址正确但字段不适用一律不算不合法**(r2 §3.2)——对端把整份采集点表单原样映射过来时,
+// hs 只取自己认得的这几项,不因为"带了用不上的东西"而拒批。要响的只有"寻错址"(未知 key)。
+// 受限连接(带 cert guid 的从网关)一律 PERMISSION_DENIED:自指标是实时库全局数据(daqgate
+// 2026-07-31 §1 已如此约定),从网关本就看不到,更不该改。
+
+// ================== 下控中转(daqgate 2026-08-05 定案 + historystore r2 形态)==================
+//
+// hs 在这条链上是**哑管道**:不理解命令内容、不做授权判断、不改任何字段、不自动重发、不缓存不补发。
+// 它只做两件事 —— 按 guid 送到那台网关,把结果原样带回来。
+//
+// ★为什么 hs 能做、也该做这件事:远程网关的实时值,主控今天就是从 hs 订回来的
+//   (daqgate 的 mirrorvalues.go 走 SubscribeVQTs)。控制面与数据面走同一条已建好的路:
+//   连接由网关发起(不穿 NAT/不开防火墙)、跨机 mTLS 与 ReadScope 现成、配一次、与拓扑无关。
+//
+// ★路由形态在 2026-08-17 r2 改了(旧形态保留兼容,见 CtrlDownRelayReq):
+//   现推荐**只给 globalId**,由 hs 查自己的映射表解析出 (目标网关, localId)。
+//   8-05 立的那条"hs 一个 id 都不翻译、拿 globalId 路由必然写到别人身上"针对的是
+//   **daqgate 在它自己的 id 空间里翻译 hs 的号**(翻出来的是无关的本机实体,对端为此栽过一次);
+//   而 globalId 本就是 hs 发的号、映射表就在 hs 手里 —— 由发号者解析,恰恰是唯一不可能算错的一侧。
+//   让每个消费者拿自己那份可能滞后的镜像去凑 (guid,localId),才是把风险摊出去。
+//   翻译结果只用于选投递目标 + 填 cmd.localId,命令内容仍一个字节都不碰。
+//
+// ★目标是**托管本实例的那台网关**(--self-guid)时不走命令流,走 --daq-addr 那条回连口
+//   (daqgate 2026-08-17 r2 §2.2):它与 hs 同机、由它把 hs 拉起来并注入 --daq-addr,
+//   身份自始就不成问题(拨这个地址过来的一定是那台网关),不需要证书、不需要它开命令流。
+//   跨机从网关完全不变:仍按客户端证书 SAN 的 guid 选流,"guid 只从 peer cert 取"这条铁律不动。
+message	CtrlDownCmd
+{
+	string	requestId	= 1;	// 幂等键,主控生成,全程原样透传。hs 只用它做关联与"同一条在飞时拒第二次"
+	int32	localId		= 2;	// 该网关自己的 tagId(hs 不翻译)
+	// 下控值。**只用 daq.VQT 的值 oneof**:T/Q 不参与下控(daqgate 2026-08-05 §2.2 ①,请勿把
+	// 时间戳当命令时间用 —— 命令时间是下面的 expireAtUnixMs)。值类型须与目标点 valueType 一致,
+	// 不一致由**执行侧**拒;hs 不校验、更不做隐式数值转换(整型点收到浮点值一律拒,不四舍五入 ——
+	// 控制输出上的"贴心"都是隐患)。
+	daq.VQT	value		= 3;
+	int32	timeOutMs	= 4;	// 原下控协议的 timeOut,原样透传;hs 也用它算等待上限
+	bool	deActivation		= 5;	// 原协议字段,hs 不解释
+	bool	parameterActivation	= 6;	// 原协议字段,hs 不解释
+	string	extra		= 7;	// 原协议字段,语义归 daqgate,hs 原样透传(第一步为空串)
+	// 命令的过期时刻(发起方给)。**网关收到已过期的命令必须拒绝执行** —— 一条晚到十分钟才执行的
+	// 输出比不执行危险得多。hs 侧同样把关:已过期的命令根本不发出去。0 = 发起方没给,hs 不替它编。
+	int64	expireAtUnixMs	= 8;
+
+	// ---- 操作审计三字段(daqgate 2026-08-21 r55 §2 提,本方 r57 接受)------------------------
+	// ★★**hs 一律原样透传:不解释、不校验、不改写、更不得自己填。**
+	//   尤其 originGuid:hs 手上有 mTLS 客户端证书的 guid,顺手拿它填是很自然的动作 —— **不要**。
+	//   一填,这三个字段就从"发起方自报的审计信息"变成"hs 做的身份判定",而哑管道这条定位是
+	//   两侧反复加固过的地基(daqgate r55 §2)。空不空由两端负责。
+	// ★★与 PostEventItem.Guid 那条**看似相反、实则不冲突**的铁律并存,别混:
+	//   · 本处三项 = **操作是谁发起的**(审计信息,发起方自报,hs 透传不碰);
+	//   · PostEventItem.Guid = **事件是谁产生的**(身份,必须取 peer cert,不信自报)。
+	//   前者链路不验证、后者链路必须验证 —— 两者回答的不是同一个问题。
+	// ★信任模型(daqgate r55 §3,本方背书,写进契约以免日后被当授权用):
+	//   这三项是**审计信息,不是授权凭据**。授权只由命令流的 mTLS 与 ReadScope 决定。
+	//   执行侧**不得**依据它们做任何放行/拒绝判断 —— 它们回答"事后查是谁干的",不是"现在准不准干"。
+	// ★★字段号 9/10/11 必须与 daq.CtrlDownLocalReq **同步新增**(见 daqinternal.proto 那条
+	//   "字段号逐字对齐是契约的一部分"):只加一侧的话,同一条命令换一条投递路就丢掉操作者,
+	//   而**丢的那一侧完全静默** —— 审计里少了记录,看的人只会以为那次操作没发生。
+	string	operator	= 9;	// 操作者「账号名(Id)」,与 AlarmEvent.Operator / AlarmAckItem.Accounts 同形态
+	string	originGuid	= 10;	// 发起方所在网关的 guid(主控发起时为主控自己的 guid)
+	string	originIp	= 11;	// 发起该操作的客户端 IP(纯 IP、不带端口)
+}
+
+// 网关 → hs 的执行结果。requestId 与命令一一对应。
+message	CtrlDownAck
+{
+	string	requestId	= 1;
+	int32	statusCode	= 2;	// daqgate CtrlDownResult.Status 的码,原样回,hs 不解释
+	string	message		= 3;
+}
+
+message	CtrlDownRelayReq
+{
+	// ---- 路由:两种形态,globalId 优先(daqgate 2026-08-17 r2 §2.1)----------------------------
+	// ★推荐形态:只给 globalId(hs 发的号),由 **hs 查自己的映射表**解析出 (目标网关, localId)。
+	//   理由是 id 权威在 hs 这边:StoredPoint{Id(globalId), guid, localId} 这张表就是 hs 发的,
+	//   让每个消费者(主控/平台/将来任何想下控的东西)拿自己那份**副本**去凑 (guid,localId),
+	//   等于把权威解析摊给了一堆可能滞后的镜像。8-05 那句"拿 globalId 路由必然写到别人身上"
+	//   说的是 **daqgate 不能在自己的 id 空间里翻译 globalId**(它翻出来的是无关的本机实体),
+	//   不是"谁都不能翻译" —— 由发号者自己翻,是这条链上唯一不可能算错的做法。
+	// 0 = 不走这条路(退回下面的老形态)。
+	int32		globalId	= 3;
+	// 目标网关。**globalId>0 时它降级为可选校验位**:给了就核(与解析结果不符 → 直接拒,
+	// 绝不"按其中一个继续"),不给就纯按解析结果投。
+	// globalId=0 时它仍是唯一路由锚(老形态,保留兼容):空 = 拒,hs 不猜"大概是哪台"。
+	string		guid	= 1;
+	// 原样转发的载荷。走 globalId 形态时,cmd.localId **由 hs 按解析结果填**;发起方要么留 0,
+	// 要么填得与解析结果一致 —— 不一致一律拒(两个都可能对的值摆在一起,挑哪个都是猜)。
+	CtrlDownCmd	cmd		= 2;
+}
+message	CtrlDownRelayRes
+{
+	// ★四态可分辨(daqgate r1 §4.3)。投递层与执行层分开表达,**绝不合并成一个"失败"**:
+	//   NOT_DELIVERED = 确定没执行(可以直接重试);TIMEOUT = 执行与否未知(必须到现场确认)。
+	//   两者给用户的下一步完全相反,合并了就等于把这个判断推给用户去猜。
+	enum Delivery {
+		DELIVERED			= 0;	// 送到且拿到结果 → 看 statusCode
+		NOT_DELIVERED		= 1;	// 该 guid 当前没有命令流 / 流已断 / 背压满 —— **确定没执行**
+		TIMEOUT				= 2;	// 送出去了但没等到结果 —— **执行与否未知**
+		REJECTED_BY_RELAY	= 3;	// 中转层自己拒:重复 requestId 在飞 / 命令已过期 / 正在停机
+	}
+	Delivery	delivery	= 1;
+	int32		statusCode	= 2;	// delivery=DELIVERED 时有意义,原样带回执行侧的码
+	string		message		= 3;
+}
+
+// ---- 实体身份表(daqgate 2026-07-29 §2:主控要显示「网关名 / 采集通道名」而非两个数字)----
+// 走单独 rpc 而不是给每个 StoredPoint 塞名字 —— daqgate 的倾向,我方同意:名称是低频、低基数数据
+// (网关数十、通道数百),跟着几千个点重复下发是浪费,而它天然适合镜像层做一次 join。
+//
+// 数据从哪来:网关本来就在 PushEntityConfigs 里推实体,只要把采集通道/网关身份实体也推进来,hs 就
+// 已经存着了(非采集点实体一直被缓存、只是被点表流按 isTagPoint 过滤掉,不入库、不计点数)。本 rpc
+// 只是把它们原样吐回去 —— hs 不理解其语义,不做校验、不排序、不假设类别号的含义。
+//
+// join 键:(guid, localId) —— 与 StoredPoint 的 (guid, relationId) / (guid, hostId) 同一命名空间。
+// 这是硬约束:点上的 relationId/hostId 是**该网关自己的实体 Id**(未翻译),所以身份表也必须回
+// localId,回 globalId 就是静默错配。主控直存段的实体 guid 为空、localId = 其 Id。
+//
+// 低频调用:名称只在组态变更时才动,对端按需/定期拉即可(遇到未知 relationId 时补拉一次最自然)。
+message	EntityIdentityReq	{
+	repeated int32	categoryIds	= 1;	// 只要这些类别(空 = 全部非采集点实体)。hs 不解释类别号
+	string			guid		= 2;	// 只要这个网关的(空 = 全部可见的)。受限连接填别人一律 PERMISSION_DENIED
+}
+message	EntityIdentity	{
+	string	guid		= 1;	// 来源网关;空 = 主控直存段(不属任何从网关)
+	int32	localId		= 2;	// 该网关自己的实体 Id —— 与点的 relationId / hostId 直接对得上
+	string	name		= 3;	// 实体名称(EntityConfig.Name)
+	string	des			= 4;	// 描述(Paras "Des")
+	int32	categoryId	= 5;	// 实体类别(daqgate 定义,hs 原样回)
+	int32	relationId	= 6;	// 该实体自身的上级关联(如通道→其 Link),0 = 无
+	int32	hostId		= 7;	// 该实体所属主机/网关 Id
+	// ---- 网关自身身份(daqgate 2026-07-29:网关名不是实体,daqgate 侧无法自足)----
+	// 这条不是实体,是网关经 EntityConfigPush 的 IDENTITY 事件自报的身份。判别用**显式标记**,
+	// 不要按 localId==0 猜(魔数迟早被误用);localId 恒 0,与点上恒为 0 的 hostId 自洽。
+	bool				isGateway	= 8;
+	map<string, string>	attrs		= 9;	// 自报的补充属性(主机名/固件版本…),hs 原样回,不解释
+	// ---- 上级容器与展示序号(2026-08-11;能力位 "identity-container-seq")----
+	// containerId = EntityConfig.ContainerId,**与 localId 同一个 id 空间**(该网关自己的实体 Id)。
+	// 采集通道的容器就是它所属的采集连接 —— 这正是"通道 302 挂在连接 301 下"那层关系的载体。
+	// hs 只搬运不解释:不判类别、不推导语义,翻不回 localId 时回 0 而不是吐一个 globalId 冒充。
+	// ★不要用 relationId 来表达这件事:那个字段对采集点是"它的通道",两处含义会打架。
+	int32	containerId	= 11;
+	// seq = EntityConfig.Seq,组态里的展示序号。hs 一直存着(点表 StoredPoint.seq 早就在回),
+	// 只是身份行没开口子,于是通道/连接列表只能按 id 或名字排,与组态里的顺序对不上。
+	int32	seq			= 12;
+	// ---- 类别族根(2026-08-11;能力位 "identity-category-root")----
+	// = 该实体最近的、落在 {12 采集点, 15 采集连接, 17 采集通道, 21 输出适配器, 0 未知} 内的
+	// 祖先类别(含自身)。**由 daqgate 算好推来**(EntityConfigPush.categoryRootId),hs 只搬运:
+	// 不解释类别、不上溯、不校验 —— 类别树只在 daqgate 手里,单看 categoryId 谁也分不出
+	// 「51 是连接、161 是通道」。定义不是"上溯到顶层":21 输出适配器整支挂在 17 下,按顶层算会把
+	// MQTT/ModBus/IEC104 **输出适配器**判成采集通道。
+	//
+	// 唯一由 hs 自填的行:categoryId=162 的「实时库性能指标采集通道」(hs 自合成的虚拟实体,
+	// daqgate 全树零引用、推不到)→ 恒 17。
+	//
+	// ★0 的两义与能力位边界:能力位 "identity-category-root" 只表示**本引擎会转发该字段**,
+	// **不表示产生该行的网关固件够新**。多网关共库时一台 hs 同时接新旧固件网关,同一张身份表里
+	// 必然 0 与非 0 混着,而能力位是 per-engine 的,per-row 的 0 用它区分不了。
+	// ⇒ **缺席**时消费侧一律退回自己原有的硬编码判据(fallback),不要按"未知"显示 ——
+	// 那会让接了老网关的新引擎把一整批正常连接/通道显示成未知,比 fallback 差。
+	//
+	// ★★2026-08-21 起本字段有**显式 presence**(AICloud presence 立项,daqgate r7 收下):
+	//   上面那段"0 的两义"到此为止 —— 两义已被拆开,**present-0 不再触发 fallback**:
+	//     缺席        = 产生该行的固件没算 ⇒ fallback(即旧行为,老网关那批行走这条);
+	//     存在且为 0  = 算了,该行不属任何声明类别 ⇒ 无族根就是无族根,直接跳过,别猜;
+	//     存在且非 0  = 族根说了算。
+	//   能力位的 per-engine 边界仍成立(多网关共库时新旧固件的行混在同一张表里),
+	//   但那正是 presence 要解的:**per-row 的差别只有 per-row 的标记分得开**。
+	optional int32	categoryRootId	= 13;
+	// 该实体在 **gid 空间**的号(hs 的 id 映射本来就持有;daqgate 2026-08-20 r14 §2.2)。
+	// ★这是**附加桥字段,不是 join 键** —— join 仍必须用 (guid, localId)。
+	//   点上的 relationId / hostId / containerId 都是 localId 空间,拿 globalId 去 join 它们
+	//   仍是静默错配。本字段唯一用途:把 gid 空间的 StoredPoint.ancestorIds 与 AlarmEvent.tagId
+	//   反解成这一行(目录不在点表里,这一跳原本是断的)。
+	// 翻不出回 0(与 containerId 的既定处置一致:宁可空,绝不吐一个冒充的号)。
+	// 能力位 features:"identity-global-id"。
+	int32	globalId	= 14;
+	// hs **观测到**的最后一次听到该网关的时刻(unix 毫秒,UTC,hs 本机钟)。仅 isGateway=true 的行有意义。
+	// 取 max(配置流活动, PostVQT) —— 两条流哪条有动静都说明它活着(daqgate 2026-08-02 r1 §4.1 (c))。
+	// **0 = hs 无记录**(刚重启、该网关还没连上来…),绝不用"当前时刻"兜底:那会让早已掉线的网关
+	// 永远显示"刚刚上报"。用观测方(hs)的钟,不用网关钟 —— 现场 e52c 无 RTC,未校时的钟会给出 1970/未来。
+	// 探测位:capabilities features 的 "identity-last-seen"(否则 0 有"引擎不认识"与"确无记录"两义)。
+	int64				lastSeenMs	= 10;
+	// hs **观测到**的对端 IP:这台网关最近一次连进来时,连接的另一头是什么地址
+	// (AICloud 2026-09-05 r174 立项)。仅 isGateway=true 的行有意义。
+	//
+	// 与 lastSeenMs **同性质、同一条理由**:不是网关自报的 —— NAT 之后网关并不知道自己在对端眼里
+	// 长什么样,只有接收方看得见。而 hs 恰好是唯一同时握着「它是谁」(客户端证书 guid)与
+	// 「它从哪来」(连接对端)两半事实的一方。
+	//
+	// 口径:
+	//   · **只有 IP,没有端口**。那个端口是网关**出方向**的临时口,对"平台回连它的 Web 管理口"
+	//     毫无意义,给了必被误当成可回连的端口。IPv4-mapped(::ffff:a.b.c.d)已还原成裸 IPv4,
+	//     好让消费侧能与网关自报候选(attrs.webUrlInfos 里写的是裸 IP)逐条比对。
+	//   · 更新时机:**建流时记一次 + 重连即刷新**,不逐帧刷(地址只在连接重建时才会变)。
+	//   · **空串 = hs 无记录**:老引擎、直存形态、或该源走的是回环明文口(那条路上的 127.0.0.1
+	//     属于平台自己,记下来等于给一个假答案)。★消费侧此时退回自己原有的候选排序,
+	//     绝不据空串下任何结论 —— 同 lastSeenMs 的 0,没有正确答案时不编地址。
+	//   · 它是**强线索、不是保证**:NAT/防火墙之后"它连得进来"推不出"你连得回去",
+	//     最终判据仍是消费侧的逐条探测(AICloud r174 §5 自己也是这么约的)。
+	// 探测位:capabilities features 的 "identity-peer-addr"(空串有"引擎不认识"与"确无记录"两义)。
+	string				peerAddr	= 15;
+}
+message	EntityIdentitiesRes	{	repeated EntityIdentity	identities	= 1;	}
+
+// 类别名录查询(AICloud 2026-08-24 立项、daqgate r85 定形态)。
+//
+// 起因:类别 **id** 平台到处都拿得到,类别 **名** 只有 daqgate 有 —— 平台没有 /getprofiles,
+// 于是采集点/采集连接/采集通道三类类别在界面上一律显示数字(「16」而不是「OPC标签点类别」)。
+// hs 已经在替各方汇聚身份行,类别名是同一类东西,故经 hs 转发。
+//
+// ★hs 的口径:**只搬运,不解释**。名录是 daqgate 给的,hs 存下来原样回 ——
+//   不判类别、不上溯、不排序、不校验行数。
+// ★为什么不做成 EntityIdentity 每行加 categoryName:同一个字符串重复几千遍,且类别名的
+//   生命周期(几乎不变)与实体(增删改频繁)完全不同。更硬的一条:类别定义**本身就是实体**,
+//   12/15/17 就是它们在该网关的实体 Id —— 混进身份表后,点上的 categoryId=16 与身份行的
+//   localId=16 同型同空间且能 join 上而不报错(hs r84 §2,AICloud r2 复核属实)。
+//   两张表分开 = 同一 id 空间的两个不相交视图,join 键不混。
+//
+// 能力位 features:"category-catalog"。缺位 ⇒ 消费侧退回自己的静态兜底表(= 今天的行为),
+// 不报错、不显示"未知"。
+// 自报身份并铸出**自身 gid**（AICloud r98 立项、我方 r99 定案）。
+//
+// 起因：`PushEntityConfigs` 的 guid 恒取自 peer cert（"不进 body、不自报"，与 PostVQT 同一条铁律），
+// 而**本机明文回环**连接没有客户端证书 ⇒ 纯消费端（云平台）发 IDENTITY 恒被拒。
+// 而给它配一张带 guid 的证书会把它的**读连接一并降级成受限**
+// （`ReadScope::For`：certGuid 非空 ⇒ 只看得见自己那段），而平台没有点 —— 取数/报警/点表当场废掉。
+// ⇒ 另开本口。**`PushEntityConfigs` 的铁律一个字不改**：那条口子仍然只认 cert guid。
+//
+// ★仅**全量来源**可调（无 cert guid 的回环，或在 `--full-access-guid` 白名单里）。
+//   跨机部署时平台若走 mTLS 口，它就有 cert guid 了 ⇒ 该走 `PushEntityConfigs` 的 IDENTITY，
+//   本口对它不再可用 —— 有证书就该用证书。
+// ★**幂等**：同一 guid 恒回同一个 gid（`(guid,"__gateway self__")` 是持久映射，跨重启不变），
+//   重复调只更新 Name/Attrs。调用方可在**每次启动**无脑调一次，不必判"调过没有"。
+// ★身份行**不落盘**：hs 重启后它消失，靠调用方再调一次回来（与网关"重连重报"同构）——
+//   所以请放在启动路径里，不是装机时调一次就完事。
+// ★本口**不**创造"能推数据的源"：不开推流、不收实体、不收 VQT。调完它**不能** PostVQT。
+message	EnsureSelfGidReq	{
+	string				Guid	= 1;	// 自报的身份 guid。★不得是任何**已带流的配置源**的 guid，见 res 说明
+	string				Name	= 2;	// 显示名
+	map<string, string>	Attrs	= 3;	// hostName / version …… hs 不解释,原样存回
+}
+// ★为什么要挡"guid 是已有配置源"：SetIdentity 是**重报即覆盖**。不挡的话，本机任一进程可以拿
+//   某台网关的 guid 调本口，把那台网关身份行的 Name/Attrs 悄悄改掉 —— 现场表现是运维看板上
+//   某台网关"改名了"，而没有任何错误、没有任何日志说是谁干的（我方 r99 §4.1）。
+//   命中即 PERMISSION_DENIED，提示走 PushEntityConfigs 的 IDENTITY。
+// ★★拒绝的**机读短码**走 gRPC trailing metadata 的 `hs-reason` 键（AICloud r100 §2）。
+//   三档拒绝的处置**完全不同**，共用一句笼统的 permission denied 会让对端只能一律重试，
+//   而 `guid-in-use` 那一档**重试一万次也不会好**，现场表现只是"平台身份始终不出现"。
+//   按提示语子串判太脆（措辞一改就失效），故给稳定短码；提示语仍带人读的细节（撞的是谁）。
+//
+//   | hs-reason         | gRPC 码              | 含义与建议处置 |
+//   |-------------------|----------------------|----------------|
+//   | `guid-in-use`     | PERMISSION_DENIED    | 该 guid 已是带流的配置源（网关）⇒ **配置错，不要重试**：本端 guid 与某台网关撞了 |
+//   | `not-full-access` | PERMISSION_DENIED    | 本连接带客户端证书 ⇒ 不该走本口，改走 `PushEntityConfigs` 的 IDENTITY |
+//   | `guid-required`   | INVALID_ARGUMENT     | Guid 空 |
+//   | `no-idmap`        | （OK + Result.Error）| 本实例没启用映射库（直存形态），铸不出号 |
+//
+//   ★这张表是**契约**：短码只增不改。新增档次追加新短码，不复用旧的 —— 复用等于让老消费方
+//     把新情形当成旧情形处置，而它们的处置恰恰不同（这正是本表存在的理由）。
+message	EnsureSelfGidRes	{
+	daq.Status	Result		= 1;
+	int32		GlobalId	= 2;	// 铸出(或既有)的自身 gid —— 省得调用方再拉一次 ListEntityIdentities
+}
+
+message	CategoryNamesReq	{
+	// 只要这个网关的(空 = 全部可见的)。受限连接填别人一律 PERMISSION_DENIED,同身份行。
+	string	guid	= 1;
+}
+// ★**按 guid 分组,不合并**:同一个 categoryId 在不同网关上可以是不同的名字(固件版本不同)。
+//   实践中各网关一致(现场 5 台逐字相同),但契约上不合并 —— 理由同身份行。
+message	CategoryNamesGroup	{
+	string					guid	= 1;	// 来源网关;空 = 主控直存段
+	repeated CategoryEntry	entries	= 2;	// 该网关的整份名录,原样回
+}
+message	CategoryNamesRes	{	repeated CategoryNamesGroup	groups	= 1;	}
+
+// ══════════════ 存储维护(daqgate D-173/D-174,2026-08-30)══════════════
+//
+// 主控网关「实时数据库 → 存储维护」页。两组各一个能力位:
+//   `history-filegroup-maintenance`(时序库) / `alarm-history-compact`(报警库,在 alarm.proto)。
+// 两位**分开**给:实现与风险完全不同,合成一位会让"只上了一半"变得无法表达。
+//
+// ★★这一组是**破坏性操作**。服务端一律做三件事,消费侧可以依赖:
+//   ① 事前把"要删什么"写进日志(组名/id/真实跨度/块数/占用),事后写"实际删了什么、释放多少、用时";
+//   ② 一律 WARN 级 —— 这是**丢历史**,不是常规维护动作;
+//   ③ 先删注册表行并 checkpoint 落盘、再 unlink 文件(顺序不可颠倒)。
+message FileGroupInfo {
+	int32	fileId		= 1;	// 稳定标识,移除时用它指名
+	string	name		= 2;
+	// 覆盖的真实起止(epoch **纳秒**)。★取的是**索引里的真实起止**,不是建组时的整点对齐窗口 ——
+	// 后者永远停在整点上,拿它判断"这组该不该删"会判错。
+	//
+	// ★★单位是 **ns**,与报警侧(HistoryEarliestNs / CutoffNs)一致 —— daqgate D-175 §3 问出来的:
+	//   同一个"存储维护"页同时显示这两组时刻,一个 µs 一个 ns 差 1000 倍,而**换算错在界面上
+	//   不会报错**,只会显示成一个看起来也挺合理的时刻,是最难被发现的那类。
+	//   (初版写的是 µs —— 那是存储层的内部单位被顺手照搬进契约,不是有意的契约决定;
+	//    趁外面还没有任何调用点改掉,代价为零。存储层内部仍是 µs,在出向处一次换算。)
+	int64	beginNs		= 3;
+	int64	endNs		= 4;
+	int64	blocks		= 5;
+	// spanFromIndex=false ⇒ 索引读不出跨度,上面两个是建组窗口值(不是真实数据跨度)。
+	// ★说出来而不是假装准确:这一组多半索引有问题,界面上宜提示"跨度存疑"。
+	bool	spanFromIndex	= 6;
+	// 盘上占用(字节,整数)。★**totalBytes ≠ dataBytes + indexBytes**:还有 .offset 与索引的
+	//   -wal/-shm 边车(写高峰时不小)。「总计」列请直接用 totalBytes,**不要前端相加** ——
+	//   相加会偏小,而"删了却没释放这么多"是最难解释的那类反馈。
+	int64	dataBytes	= 7;
+	int64	indexBytes	= 8;
+	int64	totalBytes	= 9;
+	string	dir			= 10;	// 在哪块盘(主盘/副盘)
+	bool	active		= 11;	// 正在写入的那组:**不可移除**,界面上请直接不给选
+	// ★跨度**读出来了、但值本身不可信**(daqgate D-187 §5 要求:不复用 spanFromIndex)。
+	//
+	// 为什么另开一位而不是把 spanFromIndex 置 false:那一位表达的是「**读不出**跨度,给的是建组
+	// 窗口值」,处置是"跨度只是估的,按它判断删到哪一组要当心";本位表达的是「读出来了,但这一组的
+	// 索引里**有坏值**」,处置是**报修**。一位承载两义时,界面要么写一句两种情况都不准确的话、
+	// 要么去猜是哪一种 —— 而**猜错不报错**。这正是「一枚字段定一格」。
+	// 两位可以同时为 false(正常),但不会同时为 true(读不出就谈不上值可不可信)。
+	bool	spanSuspect	= 12;
+	// 机器可读的短码 + 人话,便于界面直接展示与日志检索。当前取值:
+	//   "end-before-begin"  结束时刻早于开始时刻(自相矛盾)
+	//   "end-in-future"     结束时刻在未来(超过取数时刻 1 天的容差)
+	// ★短码是**可增补**的:消费侧遇到不认识的短码,按"跨度存疑"通用文案展示即可,别写死枚举。
+	// ★人话部分只说**是什么**,不断言**为什么**(daqgate D-190 §4):候选有采集侧时钟
+	//   (无 RTC / 未校时 / 时钟跳变)与写入编码两类,而现场那一组的算术签名指向后者且**未坐实**。
+	//   把候选写成结论会把排查引到死路 —— 现场按"查时钟"去查,查到"时钟没问题"线索就断了。
+	//   无论成因是哪一类,引擎都照实存 VQT 的 T,不改写、不丢样本(用户裁定:不擅自变更设计语义)。
+	string	spanSuspectReason	= 13;
+}
+message	ListFileGroupsReq	{}
+message	ListFileGroupsRes	{
+	repeated FileGroupInfo	groups	= 1;	// 按时间升序(最旧在前)
+	daq.Status		result	= 2;
+}
+
+// 移除"到 throughFileId 为止(含)"的全部更早文件组。
+// ★**只收一个边界,不收任意 id 集合**(daqgate D-174 §1.2 同意):收集合就必须校验连续性,
+//   而校验总有写错的一天,写错的后果是历史里被挖个洞、且查询看不出来。收边界,
+//   "跳着删"这件事在契约层面就不存在。
+// ★活跃组不可删:把它包进来 ⇒ 整条拒(要清空请走 InitializeHistoryStore)。最少保留 1 组。
+// ★幂等:已经删过再发一次 ⇒ removed 为空、Ok(不是错)。
+message	RemoveFileGroupsReq	{	int32	throughFileId	= 1;	}
+message	RemovedFileGroup	{
+	int32	fileId	= 1;
+	string	name	= 2;
+	int64	bytes	= 3;	// 该组释放的字节(含边车)
+}
+message	RemoveFileGroupsRes	{
+	repeated RemovedFileGroup	removed		= 1;
+	int64	freedBytes		= 2;
+	int64	elapsedMs		= 3;	// ★真实耗时:现场 eMMC 上到底多久,只有这个数说得出
+	int32	remainingGroups	= 4;
+	daq.Status	result	= 5;
+}
+
+// 清空整库(= 删掉全部文件组,含活跃组)。
+// ★★**不动 id_map**:点→globalId 的映射、分配水位、idSpaceEpoch 全部原样保留 ——
+//   数据没了、编号体系还在,重新采集即续上。若哪天真要连编号一起重置,那是**第三个口**、
+//   另行协调;绝不藏在这个口里(daqgate D-173 §2.3 最担心的正是编号被顺带重置:
+//   趋势笔/报警配置/镜像点表会整体错位,而且两边都不报错)。
+// ★confirm 必须逐字等于 "INITIALIZE",否则拒。它挡不住误点(真正的护栏是对端的两次确认),
+//   但它挡得住"参数默认值恰好触发"这一类。
+// ★按网关**整台移出**(daqgate D-223 立项、D-224/D-225/D-226 定稿;用户裁定原话:
+//   「移出网关时,历史数据一起删!」)。
+//
+// 场景:网关改了投递目标实时库,不再向本库发数据。原库这边只有两种正当处置 ——
+// **原样留着**(什么都不做,今天的行为),或**整台移出**。两者都由**人**在托管本库的主控上决定,
+// **绝不由"改配置"这个动作自动触发**:那是改一个地址就抹掉历史,错一次无法挽回。
+//
+// 本口做的是后者,**连历史数据一起删**。两段:
+//   ① 摘源(同步):源出注册表 ⇒ 名下点离开点表、身份行消失、lastSeenMs/peerAddr 抹、
+//      每条**已装载**的报警 condition 各产一条「报警禁用·未确认」(不在活动表里的不发 ——
+//      一台 800 点、3 个在报警的网关移出,对端收到 3 条而不是 800 条);
+//      同一步删掉该 guid 的 id_map 行。
+//   ② 清存储(异步、分批、可续、幂等):按①**就地快照**的 id 集合逐个打墓碑 + 定向强制压实。
+//
+// ★顺序是**硬约束**,不是偏好:反过来先删存储,点还在点表里 ⇒ 每一条 DeleteTag 都会被
+//   它自己的安全联锁(D-213 §4.1「仍在点表里的点删不了」)拒掉,成功率是 0。
+// ★**不可逆**:同一 guid 日后再连回来 = **新网关、新号、历史从零**(D-225 用户裁定)。
+//   旧 globalId 从此**不再分配给任何人,包括它自己**(id_map 删行不回退水位:AUTOINCREMENT
+//   的号永不复用)。随之 MaxLocalId(guid) 回 0 —— 对端清盘时的水位兜底对该 guid 就没有了,
+//   这是本裁定的必然结果、不是缺陷(daqgate D-226 §3 已认下)。
+// ★「留数据、只摘在册」是已作废的方案 C,**不做**,更不做进这个口。
+// ★竞态(移出途中那台网关又连回来)**不设互斥**:它重连拿新号、②清的是旧号,两批不相交。
+//   保证在实现层:②用的 id 集合是受理那一刻**值传递**下来的快照,不是运行期再问注册表。
+//
+// 权限:**全量门**(受限从网关一律拒 —— 从网关不托管引擎,更不该移出别人)。
+// confirm 必须**逐字等于 guid**:它挡不住误点(真正的护栏是对端界面的二次确认),
+// 但挡得住"参数默认值恰好触发"这一类。
+// 能力位 features:"gateway-removal"。
+message	RemoveGatewayReq	{
+	string	guid	= 1;
+	string	confirm	= 2;	// 必须逐字 == guid
+}
+message	RemoveGatewayRes	{
+	// 本次圈定的点数(= 摘源那一刻该源名下的 globalId 个数)。**同步回执只保证"已受理"**:
+	// 清存储是异步的,进度看自指标 gateway_removal_pending_points / gateway_removal_cleared_total
+	// (进度条 = 1 - pending/本数)。接不上指标就只显示"已受理",别编造进度。
+	int32		acceptedPoints	= 1;
+	int32		purgedMappings	= 2;	// 作废的 id_map 行数(诊断;-1 = 映射库不可用)
+	daq.Status	result			= 3;
+}
+
+message	InitializeHistoryStoreReq	{	string	confirm	= 1;	}
+message	InitializeHistoryStoreRes	{
+	int32	droppedGroups	= 1;
+	int64	freedBytes		= 2;
+	int64	elapsedMs		= 3;
+	daq.Status	result	= 4;
+}
+
+service HistoryStoreGRPCService {
+	rpc	Ping(PingReq)											returns (PingRes);
+	rpc	MaxLocalId(MaxLocalIdReq)								returns (MaxLocalIdRes);
+	rpc	LookupGlobal(LookupGlobalReq)							returns (LookupGlobalRes);
+	rpc	ListSelfMetrics(ListSelfMetricsReq)						returns (ListSelfMetricsRes);
+	rpc	SetSelfMetricParas(SetSelfMetricParasReq)				returns (daq.Status);
+	rpc	ListEntityIdentities(EntityIdentityReq)					returns (EntityIdentitiesRes);
+	rpc	ListCategoryNames(CategoryNamesReq)						returns (CategoryNamesRes);
+	rpc	EnsureSelfGid(EnsureSelfGidReq)							returns (EnsureSelfGidRes);
+	rpc	Login(LoginReq)											returns (LoginRes);
+	rpc	QueryHistory(HisDataQueryReq)							returns (VQTArrayRes);
+	rpc PostVQT(daq.VQTs)										returns (daq.Status);
+	rpc	DeleteTag(DeleteTagReq)									returns (DeleteTagRes);
+	// 待确认删除清单(方案丁)。两口都走与 DeleteTag 同一道全量门(回环/白名单 guid)。
+	rpc	ListPendingDeletions(ListPendingDeletionsReq)			returns (ListPendingDeletionsRes);
+	rpc	ConfirmDeletions(ConfirmDeletionsReq)					returns (ConfirmDeletionsRes);
+	rpc	SubscribeLogs(LogSubscribeReq)							returns (stream LogStreamItem);
+	rpc	QueryLogs(LogQueryReq)									returns (QueryLogsRes);
+	rpc	GetServerStatus(ServerStatusReq)						returns (ServerStatusRes);
+	// ── 存储维护(daqgate D-173/D-174)。能力位 `history-filegroup-maintenance`。
+	//    三个口都走全量门(受限连接一律拒:从网关不托管引擎,更不该删主控的历史)。
+	rpc	ListFileGroups(ListFileGroupsReq)						returns (ListFileGroupsRes);
+	rpc	RemoveFileGroups(RemoveFileGroupsReq)					returns (RemoveFileGroupsRes);
+	rpc	InitializeHistoryStore(InitializeHistoryStoreReq)		returns (InitializeHistoryStoreRes);
+	// 按网关整台移出(数据+点+身份行一起清;全量门 + confirm 逐字等于 guid)。见上方消息注释。
+	rpc	RemoveGateway(RemoveGatewayReq)						returns (RemoveGatewayRes);
+	rpc	SubscribeStoredPoints(StoredPointsReq)					returns (stream StoredPointsRes);
+	rpc	SubscribeVQTs(VQTSubscribeReq)							returns (stream daq.VQTs);
+	rpc	PushEntityConfigs(stream EntityConfigPush)				returns (PushEntityConfigsRes);
+	// ---- 下控中转(daqgate 2026-08-05 定案:控制流走 hs)----
+	// 网关侧:开一条双向流等命令。身份取**客户端证书里的 guid**,不自报。
+	rpc	CtrlDownChannel(stream CtrlDownAck)						returns (stream CtrlDownCmd);
+	// 主控侧:发一条命令,同步等结果。全量口(受限连接不得发起)。
+	rpc	CtrlDown(CtrlDownRelayReq)								returns (CtrlDownRelayRes);
+}

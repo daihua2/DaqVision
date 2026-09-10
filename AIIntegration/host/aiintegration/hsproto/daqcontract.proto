@@ -1,0 +1,468 @@
+syntax  = "proto3";
+package daq;
+option  go_package="protocolgate/proto/contract;contract";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
+
+// ============================================================================
+// daqcontract.proto —— daqgate 与 historystore / ProtocolWeb 共享的「基础公共数据契约」
+//
+// 单一可信源在 daqgate/ProtocolGate/proto，由 daqgate 负责管理；编译后由 build.sh
+// 拷贝至 historystore/proto 与 ProtocolWeb/src/protos 重新编译。**严禁在拷贝端改本文件**。
+//
+// 约定：字段号一经分配永不复用/变更（wire 兼容是微服务总线的根，见 daqgate/docs/）。
+// 内含：Status(状态) / VARVAL·VQT(值与质量时戳) / VTI·BCR·SCD(VQT 超集用到的 IEC61850 值)
+//       / EntityConfig(实体元数据，总线 KV 注册契约)。
+// 详见 daqgate/docs/proto-contract.md。
+// ============================================================================
+
+// ---- 状态码与状态 (StatusCode / Status) ----
+enum	StatusCode
+{
+	None						= 0;
+	Ok							= 1;
+	Linking						= 2;
+	Doned						= 3;
+	Loading						= 5;
+	NormalCancelled				= 6;
+	LogIn						= 7;
+	LogOut						= 8;
+	Running						= 9;
+	Starting					= 10;
+	Started						= 11;
+	
+	Info						= 12;
+	IdleRun						= 13;
+	Changed						= 14;
+	Loaded						= 15;
+	WaitLink					= 16;
+	Linked						= 17;
+	StreamBegin					= 18;
+	Init						= 19;
+	StreamData					= 20;
+	Created						= 21;
+	GotoBreak					= 22;
+	
+	QualityGood 				= 5000;
+	QualityInitial				= 5001;
+	QualityNo					= 5002;
+	QualityLocalOverride		= 5003;
+	QualityPending				= 5004;
+	QualitySubstituted			= 5005;
+
+	Uncertain					= 6000;
+
+	Warn						= 8000;
+	ShutdownRequest				= 8001;
+	Closed						= 8002;
+	NoConfig					= 8003;
+	Suspeended					= 8004;
+	Test						= 8005;
+
+	BeginSignal					= 8006;
+	EndSignal					= 8007;
+	
+	StreamEnd					= 8008;
+	Stopping					= 8010;
+	Stopped						= 8011;
+	Wait						= 8012;
+
+	QualityUncertain			= 9000;
+	QualityLastUsable			= 9001;
+	QualityOutputOpen			= 9002;
+	QualityWaitSyn				= 9003;
+	QualitySensorCal			= 9004;
+	QualityEGUExceeded			= 9005;
+	QualitySubNormal			= 9006;
+	QualityInputOpen			= 9007;
+	QualityConvertErr			= 9008;
+	QualityNotTopical			= 9009;
+	QualityEI					= 9010;
+
+	Fail						= -1;
+	NotImplement				= -2;
+	Deny						= -3;
+	ConfigError					= -4;
+	Exception					= -5;
+	NotExist					= -6;
+	Invaild						= -7;
+	InvalidParameter			= -8;
+	InvalidState				= -9;
+	Cancelled					= -10;
+	Unknown						= -11;
+	TimeOut						= -12;
+	AlreadyExists				= -13;
+	ResourceExhausted			= -14;
+	FailedPrecondition			= -15;
+	Aborted						= -16;
+	OutOfRange					= -17;
+	Internal					= -18;
+	DataLoss					= -19;
+	Unauthenticated				= -20;
+	AllUsed						= -21;
+	LoadErrored					= -22;
+	DNSInvaild					= -23;
+	ConnectFailed				= -24;
+	LoadFailed					= -25;
+	PointConfigError			= -26;
+	Broken						= -27;
+	Error						= -28;
+	CommFault					= -29;
+	UnSupportedType				= -30;
+	Disable						= -31;
+	BuffOveren					= -32;
+	RangeExceeded				= -33;
+	VerificationFailed			= -34;
+	ErrToken					= -35;
+	StreamSubscribeError		= -36;
+	OptimisticLockFailed		= -37;
+	Removed						= -38;
+	CantRemove					= -39;
+	NotInState					= -40;
+	NotReady					= -41;
+	UnRegisted					= -42;
+
+	QualityBad					= -1000;
+	QualityConfigError			= -1001;
+	QualityNotConnected			= -1002;
+	QualityDeviceFailure		= -1003;
+	QualitySensorFailure		= -1004;
+	QualityLastKnown			= -1005;
+	QualityCommFailure			= -1006;
+	QualityOutofService			= -1007;
+	QualityNoPermission			= -1008;
+	QualityOutRange				= -1009;
+	QualityCalErr				= -1010;
+	QualityUndefValue			= -1011;
+	QualityOutputOpenBad		= -1012;
+	QualityInputOpenBad			= -1013;
+	QualityNoneValue			= -1014;
+	QualityConvertErrBad		= -1015;
+
+	ModBusCommIllgalFun			= -1016;
+	ModBusCommIllgalAddr		= -1017;
+	ModBusCommIllgalVal			= -1018;
+	ModBusCommDeviceFail		= -1019;
+	ModBusCommAcknowledge		= -1020;
+	ModBusCommDeviceBusy		= -1021;
+	ModBusCommNegAcknowledge	= -1022;
+	ModBusCommParityErr			= -1023;
+	ModBusCommGateFail			= -1024;
+	ModBusCommGateResponseErr	= -1025;
+	ModBusUnknownErr			= -1026;
+
+	QualityPendingBad			= -1027;
+	QualityStatisticsBad		= -1028;
+
+	QualityInvalidBad			= -1029;
+	QualityBlockedBad			= -1030;
+	QualityOverFlowBad			= -1031;
+	QualityOverHighBad			= -1032;
+	QualityOverLowBad			= -1033;
+}
+message Status
+{
+	StatusCode 	Code 	= 1;
+	string 		Message = 2;
+}
+
+// ---- 变体值 (VARVAL / VARVALARRAY) ----
+message VARVAL
+{
+	oneof		Value
+	{
+		bool	EmptyValue		= 12;
+		bool	NullValue		= 11;
+		bool	Bool			= 8;	
+		sint32	I1				= 17;
+		uint32	UI1				= 18;
+		sint32	I2				= 6;
+		uint32	UI2				= 13;
+		sint32	I4				= 5;
+		uint32	UI4				= 14;
+		sint64	I8				= 15 [jstype = JS_STRING];
+		uint64	UI8				= 16 [jstype = JS_STRING];
+		float	R4				= 4;
+		double	R8				= 7;
+		string  String			= 9;
+		bytes	Bytes			= 10;
+		google.protobuf.Timestamp
+				DateTime		= 19;
+	}
+}
+message VARVALARRAY
+{
+	repeated VARVAL	ItemVal		= 1;
+}
+
+// ---- IEC61850 值类型 (VTI / BCR / SCD) + VQT 超集 ----
+message VTI {
+	sint32	Value				= 1;
+	bool 	Transient 			= 2;
+}
+message BCR {
+	sint32	Counter				= 1;
+	sint32 	SQ 					= 2;
+	bool    IV 					= 3;
+	bool    CY 					= 4;
+	bool    CA 					= 5;
+}
+message SCD {
+	uint32  STn 				= 1;
+	uint32  CDn 				= 2;
+}
+message	VQT {
+	int32		TagId			= 1;
+	oneof		Value
+	{
+		bool	EmptyValue		= 12;
+		bool	NullValue		= 11;
+		bool	Bool			= 8;	
+		sint32	I1				= 17;
+		uint32	UI1				= 18;
+		sint32	I2				= 6;
+		uint32	UI2				= 13;
+		sint32	I4				= 5;
+		uint32	UI4				= 14;
+		sint64	I8				= 15 [jstype = JS_STRING];
+		uint64	UI8				= 16 [jstype = JS_STRING];
+		float	R4				= 4;
+		double	R8				= 7;
+		string  String			= 9;
+		bytes	Bytes			= 10;
+		google.protobuf.Timestamp
+				DateTime		= 19;
+		VARVALARRAY	
+				Array			= 20;
+		uint32  SPI 			= 22;
+		uint32  DPI 			= 23;
+		VTI		VTI				= 24;
+		BCR     BCR				= 25;
+		uint32  SPE				= 26;
+		uint32  SEP				= 27;
+		uint32  OCI 			= 28;
+		uint32  BIT32 			= 29;
+		SCD 	SCD				= 30;
+		uint32  STEP 			= 31;
+	}
+	Status		Quality			= 2;
+	// ★★**落到实时库之后,时刻的分辨率标称「微秒」**(2026-08-30 用户裁定,方案甲)。
+	//
+	// ★2026-08-30 订正:本段原先写的两条理由**都是错的**(hs H-188 更正,裁定本身不变):
+	//   ① 原写"纳秒尾数是编码副产物而非测量事实" —— **错**。见下 §A;
+	//   ② 原写"Gorilla 把 T 压到微秒"导致折叠 —— **成因指错了**。见下 §B。
+	//
+	// ── §A 源头的分辨率是**设计好的**,不是副产物 ─────────────────────────
+	// Windows 源走 `GetSystemTimeAsFileTime`,一个 tick = **100 ns**,故 `nanos` 恒为 100 的整数倍;
+	// Linux 源走 `std::chrono::system_clock`,是任意纳秒。**"时间戳精度"不是一个数,取决于哪一路。**
+	// ★由此得一条排查判据(说明这笔数据是哪台采的):
+	//     nanos % 100 == 0  ⇒ FILETIME 路(Windows,100ns tick)
+	//     nanos % 100 != 0  ⇒ chrono 路(Linux 网关)
+	// ⇒ 取甲的真正理由**不是"源头没那么准",而是「源头的 100 ns 我方主动不保证」**:
+	//   现场毫秒级轮询,微秒够用;要保住它得让 Gorilla 也存纳秒 ⇒ **动盘上格式**
+	//   (老块按纳秒读会变成 1970,须加版本位双路解码),代价大于收益。
+	//
+	// ── §B 等值样本被折叠的真机制:**块内增量截断**,与选哪个编码器无关 ──────
+	// 写入侧 `innerAdd` 把「本笔 T − 上一笔 T」**向零截断到微秒**存成偏移;
+	// 相邻两笔间隔 100 ns 时该偏移 = 0 ⇒ **两笔被存成同一个时刻**。
+	// **这一步发生在选编码器之前**,gzip 块同样如此;Gorilla 只是额外把**块基准**也截到微秒。
+	// ⇒ **不要以为"避开 Gorilla 就能留住亚微秒"** —— 留不住。
+	//
+	// ★于是后果分两档(2026-08-30 实测,隔离实例,同一微秒内写 20 笔、间隔 100 ns):
+	//     值各不相同 ⇒ 回 **20 笔**(时刻只剩 2 个)—— 丢精度,**不丢样本**;
+	//     值全部相同 ⇒ 回 **2 笔**(18 笔被静默折叠)—— **丢样本**。
+	//   先由块内增量把 20 笔压到 2 个时刻,**再**由读路径的去重键(整笔 T+V+Q 全等,
+	//   hs 为不吃掉停机中断锚点特意选的)把等值的折叠掉。两步都对,叠在一起才丢。
+	//
+	// ── §C 消费侧可以/不可以假设什么(照此写断言,别自己推) ────────────────
+	//   **可以**:同点同块内两个**不同**时刻至少相差 1 µs;
+	//             存下来的时刻**只会偏早不会偏晚**(向零截断),偏差落在 (-1 µs, 0];
+	//   **不可以**:`nanos % 1000 == 0`(gzip 块驮着基准的纳秒零头,实测成组出现);
+	//               跨块两笔的时刻差 ≥ 1 µs(实测有 900 ns 的相邻两笔);
+	//               "同一微秒内能区分出多笔"(见 §B)。
+	//   ⇒ 需要亚微秒分辨率的场景,**在 T 之外另带序号**,不要指望存储层替你保住尾数。
+	//
+	// ★写入侧有一处**做对了、容易被顺手优化掉**的设计,一并记下:偏移截断后
+	//   `_lastTimestamp` **只前进截断后的量**,不足 1 µs 的零头留在下一次的差值里(残余进位)
+	//   ⇒ 每笔的误差恒 < 1 µs 且**不随点数累积**。若改成"基准直接跳到样本时刻",
+	//   1.5 µs 间隔跑 1000 点就会偏 500 µs 且越跑越偏。**别动它。**
+	//
+	// 全链路逐层单位与证据见 historystore 仓 docs/storage-architecture.md §11。
+	google.protobuf.Timestamp		
+				TimStampUtc		= 3;
+	google.protobuf.Any  		
+				ExtraData   	= 21;
+}
+message	VQTs
+{
+	repeated VQT VQTs			= 1;
+}
+
+// ---- 实体元数据 (EntityConfig) ----
+// 以 daqgate 定义为准。
+//
+// ★ChildrenCount(12) 与 RightBits(13) 已作废(2026-08-11 双方核对确认)：
+// 当初按 historystore 的需求预留，但**两侧都从未读写** —— daqgate 全树零引用(注释原本就写着
+// "daqgate 不填这两个字段即可")，historystore 侧 `ec.childrencount()` / `ec.rightbits()` 亦各 0 处。
+// 属于"提了需求没落地"，现标 deprecated。
+//   - **字段号 12/13 保留不复用**：它们在两侧生成码里存在过，回收号只会给跨版本兼容埋雷；
+//   - ★将来若真要做访问控制,**不要复活 RightBits**,另开新字段并写清语义 —— 一个曾以"权限位"
+//     之名存在、却一位都没被读过的字段,复活它最容易让人误以为"历史上一直在鉴权"。
+// 协调见 docs/2026-08-11-回hs-Q1不走relationId捷径-Q2两字段确认作废-*.md。
+message EntityConfig
+{
+	int32	Id							= 1;
+	string	Name						= 2;
+	string	URI							= 3;
+	int32	ContainerId					= 4;
+	int32	CategoryId					= 5;
+	int32	RelationId					= 6;
+	int32	Seq							= 7;
+	int32	HostId						= 8;
+	string	Paras						= 9;
+	string	Version						= 10;
+	string	Error						= 11;
+	int32	ChildrenCount				= 12 [deprecated = true];	// 已作废：两侧从未读写(见上方说明)
+	uint64	RightBits					= 13 [jstype = JS_STRING, deprecated = true];	// 已作废：同上；将来做鉴权请另开新号
+	// 报警配置。随实体配置流下发，与点位其余配置**同一时序、同一事务**（2026-08-19 r2 §4 定案：
+	// 不另开推送 RPC —— 另开会引入"点配置到了、报警配置没到"的不一致窗口）。
+	// ★不填 = 该实体没有报警配置 ⇒ 引擎不对它求值、不产生任何事件。message 字段天生有 presence，
+	//   不必也不要加 optional。
+	AlarmConfig	Alarm					= 14;
+}
+
+// ============================================================================
+// 报警配置（2026-08-20 r18 §1.1 定案：本半段**必须**定义在本文件里）
+//
+// ★为什么不放 alarm.proto：AlarmConfig 挂在上面的 EntityConfig 字段 14，而 alarm.proto 需要本文件的
+//   Status/VQT —— 两个文件互相 import 就是循环，protoc 直接编不过。事件与服务留 alarm.proto，
+//   配置留这里，依赖方向单一。
+// ★三态一律用 optional：布尔/数值用零值表达不了"未设置"与"设为 0/false"的区别。
+//   反例就在下面 LimitBand.Limit —— 0.0 是完全合法的限值。
+// ============================================================================
+
+// 单档限值。四档（LL/LO/HI/HH）复用同一形状 —— 老实现把 16 个字段平铺，
+// 正是"改一档忘了另一档"的温床。
+message LimitBand
+{
+	optional bool	Enable				= 1;
+	string			Label				= 2;	// 显示文本，可改，不参与身份
+	optional uint32	Severity			= 3;	// 1~1000，见 AlarmEvent.Severity 的映射表
+	optional double	Limit				= 4;	// ★必须 optional：0.0 是完全合法的限值
+}
+
+message LimitAlarm
+{
+	optional bool	Enable				= 1;
+	string			Category			= 2;	// 纯显示，不参与身份
+	// 死区：**绝对工程值，与 Limit 同量纲**（老实现里它直接与限值相加减，全程无量程参与）。
+	// ★★它是**单向滞回**，不是"限值上下各留半个不灵敏带"的对称死区：
+	//     未报警 → 报警：值 >= Limit           （死区不参与）
+	//     已报警 → 恢复：值 <= Limit - DeadBand（死区只在这一侧生效）
+	//   组态界面按**迟滞**呈现（标出"恢复阈值"而非上下包络），否则用户会以为报警点被抬高了。
+	optional double	DeadBand			= 3;
+	string			NRLabel				= 4;	// 恢复态显示文本
+
+	optional LimitBand	LL				= 5;
+	optional LimitBand	LO				= 6;
+	optional LimitBand	HI				= 7;
+	optional LimitBand	HH				= 8;
+
+	// 时间去抖（ISA-18.2 的 on/off delay）。**未设置 = 设为 0 = 不去抖**，两者等价。
+	//
+	// ★★**参照系是时间轴，不是采样密度**（2026-08-26 用户裁定，hs H-120 认账并已修）：
+	//   语义是「条件**持续保持真达 N 秒**」。曾经的实现把"持续满足"落成"等下一条样本来作证"，
+	//   于是同一个「1 秒」在 1 秒周期的点上推迟 1 秒、在 60 秒周期的点上推迟 **60 秒** ——
+	//   而界面上那个数字完全无法预示这一点。现场实测：`OnDelaySec=1` 的 60 秒周期点，
+	//   报警晚 60.5 秒（daqgate D-118/D-119）。**那是缺陷，不是粒度。**
+	//   修法：条件成立即挂待决态并按**单调钟**（steady_clock）定时，到期即提交，不等样本；
+	//   期间来了相反的样本即撤销（这正是去抖要吃掉的抖动）。能力位 **"alarm-debounce-timer"**。
+	//   缺位（1.9.307 以前的引擎）⇒ 退回"等下一个采样点"的老行为，长周期点上等价于等一个周期。
+	// ★**按采样时间推进而非墙钟**这条只约束**补录/回放**那条路（那里要的是可重放的确定性，
+	//   且不受无 RTC 设备校时前的错时间戳影响）；**实时路径用单调钟** ——
+	//   墙钟向前跳会让去抖提前提交（抖动没滤掉），向后跳会让它永远不到期（报警丢了）。
+	// ★★`OccurNs` 取**条件成立那一刻**，不是提交时刻（同一轮修的另一条，独立于上面）：
+	//   否则历史时间轴是错的 —— 追溯"几点停的"会晚一拍、与同点位曲线对不齐、
+	//   多点关联时因果次序可能颠倒（采样密的点看着先报）。
+	//   一并带出的值与质量也必须是**触发那条样本**的（VQT 铁律：V 与 Q 成对且同源）。
+	optional uint32	OnDelaySec			= 9;
+	optional uint32	OffDelaySec			= 10;
+}
+
+message StateItemCfg
+{
+	// ★组态生成、**创建后不可编辑**的稳定标识。引擎当它是不透明串：不解析、不排序、不比较大小，
+	//   只做相等比较。**唯一性范围 = 该 StateAlarm 内**。
+	//   老实现用数组下标拼 STATE_n，组态中间插删会让编号整体平移，而确认正是按它匹配当前态
+	//   ⇒ 确认张冠李戴。这是结构性缺陷，不是编码笔误。
+	string			StateKey			= 1;
+	// 区间边界。两侧均可缺省 = 该侧不约束。
+	// NullValue/EmptyValue 在此上下文按"配置非法"处理并出 ConfigError，不静默忽略。
+	optional VARVAL	StateLo				= 2;
+	optional VARVAL	StateHi				= 3;
+	string			StateLabel			= 4;
+	optional uint32	StateSeverity		= 5;
+	optional bool	ExceptionItem		= 6;
+}
+
+message StateAlarm
+{
+	optional bool	Enable				= 1;
+	string			Category			= 2;
+	optional double	DeadBand			= 3;
+	string			NRLabel				= 4;
+	// ★顺序即优先级，首个命中即止。全都不命中时：
+	//   ① 表中有 `ExceptionItem = true` 的项 ⇒ **采用它**（多于一项取顺序最靠前的），
+	//      按普通状态项走它的 StateKey/StateLabel/StateSeverity；**此时不打"未覆盖全域"提示**
+	//      —— 配了兜底就不是缺陷，还告警等于把正常配置报成问题；
+	//   ② 没有兜底项 ⇒ **落 NR 并产出一条 RESUME 事件**（不是"不产事件、保持上一个当前态"；
+	//      与老引擎 StateAlarm.cs:287~300 同口径），并**一次性**提示"状态表未覆盖全域"
+	//      （按 condition 只报一次、配置变更后重置 —— 否则这条提醒自己会变成新的风暴源）。
+	//      ★该提示**只进服务端日志，不进事件流**：它说的是"组态可能漏了一行"，
+	//        不是一次状态迁移；进事件流会让它在看板上被当成故障去查。
+	//      ★★**Bool 值豁免，不打这条提示**（daqgate D-113 §2 甲案，2026-08-26 定）：
+	//        状态表里**没有"正常项"这个概念** —— 每一行都是被点名的异常状态，
+	//        正常只有一种表达：不命中 ⇒ NR。开关量全域就两个值，配一行（异常那一侧）
+	//        **就是覆盖全了**；照打的话每一个按缺省配出来的开关量报警都被报成"配置有问题"，
+	//        而用户什么都没配错。这条提示防的是**字符串/枚举**点（转换表输出五个值、
+	//        状态表只配四个，第五个静默显示"正常"），那一类照打不误。
+	//      ★**别给开关量补一行 `true→运行` 来"覆盖全域"**：那会把正常运行变成一条持续报警
+	//        （老实现能靠 severity=0 消音，本契约 Severity 恒 ≥ 1，那条路走不通）。
+	// ★★为什么必须实现 ExceptionItem 而不是照抄老实现留着不读：状态表要覆盖全域就得穷举
+	//   所有可能值，漏一个 ⇒ 那个值出现时显示"**正常**"。把未知状态显示成正常，
+	//   比显示成未知糟得多 —— 落 NR 是个危险的缺省。
+	//   （老实现两侧都只存不读:C# 侧只有 Json/AlarmConvert 读写它、引擎零处；实时库侧同样。）
+	// ★★**开关量(Bool)只允许 1 行状态行**（用户裁定 2026-08-26）。
+	//   每一行 = 一个被点名的**异常值**，没被点名的值 = 正常（不命中 ⇒ NR）。
+	//   开关量全域只有两个值 ⇒ 点名一个、另一个自动是正常，**这就是完整覆盖**；
+	//   两行都点名 = 声明"该点没有正常态" —— 它会永远挂在报警态、永不恢复，
+	//   Retain 恒 true，确认了也出不了表。
+	//   ⇒ 组态侧**限制只能配 1 行**；引擎侧多于 1 行判 **NC 配置错误**（不静默取第一行）。
+	//   能力位 "alarm-bool-single-state-row"。
+	repeated StateItemCfg	States		= 5;
+	// 时间去抖：口径与 LimitAlarm.OnDelaySec 那段**逐字相同**（参照系是时间轴、单调钟定时、
+	// OccurNs 取条件成立时刻、能力位 "alarm-debounce-timer"）。两支共用同一套语义，
+	// 别只改一处 —— 上一轮的缺陷正是限值与状态两支一起中招的。
+	optional uint32	OnDelaySec			= 6;
+	optional uint32	OffDelaySec			= 7;
+}
+
+// ★两个 optional 而非 oneof（2026-08-19 r4 §2.1）：报警身份已经为"同一个点同时配限值与状态报警"
+//   做好了准备，用 oneof 反而把这个能力锁掉。
+//   本期实现口径：两个都给 ⇒ 报 ConfigError 且**不求值**，并以 StateItem="NC" 的事件显形
+//   （显眼地坏，不静默只跑一个，也不让这条错只活在日志里）。
+// ★★求值发生在**转换之后** —— 这是实时库求值的前提，两侧都是既成事实，先前一直没写下来：
+//   daqgate 侧 `setDAQValue` 第一句就是 `Config.Convert(val)`，转换后才写回并推送，
+//   **无例外路径**（没配转换器时 Convert 是恒等，所以不存在两套路径）；
+//   实时库侧不做任何转换，推来什么就比什么。
+// ⇒ `LimitBand.Limit` / `StateItemCfg.StateLo` / `StateHi` 全部是**工程值**，与点的工程单位同量纲，
+//   与 `LimitAlarm.DeadBand`"绝对工程值"的口径一致。
+// ⇒ ★**状态表的值类型按"转换后的结果类型"定**，不是点的原始采集类型。
+//   组态界面据此决定那一列画成复选框/文本框/数值框（例:布尔点经转换表输出字符串 ⇒ 画文本框）。
+//   ★消费侧**不要**拿 `StoredPoint.valueType`（来源 Paras 的 "Acc"，是**原始**采集类型）去校验
+//   StateLo/StateHi —— 那样凡是配了转换的点都会被判成类型不符。区间比较一律按 VQT 自身携带的值类型分派。
+message AlarmConfig
+{
+	optional LimitAlarm	Limit			= 1;
+	optional StateAlarm	State			= 2;
+}
