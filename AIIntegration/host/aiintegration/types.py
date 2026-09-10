@@ -102,6 +102,9 @@ class Sample:
     t: datetime
     value: Value
     quality: Quality
+    status_code: int = 0
+    """上游原始状态码，**原样留着**。骨架只把它折成好/不好两档给 `quality`，
+    要细分（区分"通讯失败"与"设备故障"）的模块自己看这一格。"""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "t", _require_utc(self.t, "Sample.t"))

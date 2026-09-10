@@ -59,6 +59,18 @@ class Quality(enum.Enum):
         """映射到 `daq.StatusCode`。见模块头：对不上的一律折叠成 QualityBad，不挪用。"""
         return _TO_STATUS[self]
 
+    @staticmethod
+    def from_status_code(code: int) -> "Quality":
+        """**入向**：上游点值的状态码 → AI 侧质量。
+
+        ★只分"好/不好"两档，**不试图把 hs 那四十来个码映射进我方这七档** ——
+        那等于替上游发明语义（"设备故障"和"通讯失败"到了我方都只影响一件事：
+        这笔输入不可信）。原始码由 `Sample.status_code` 原样留着，要细分的模块自己看。
+
+        判据与 hs 一致：**只有 `Ok(1)` 算好**，其余一律不可信。
+        """
+        return Quality.OK if code == STATUS_OK else Quality.INPUT_BAD
+
 
 _TO_STATUS: dict[Quality, int] = {
     Quality.OK: STATUS_OK,
