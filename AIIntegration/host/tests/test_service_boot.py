@@ -81,7 +81,7 @@ class TestServiceBoot(unittest.TestCase):
 
     def test_没有写路径也起得来且域装上了(self):
         info = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
-        self.assertEqual(info.proto_version, "1.2")
+        self.assertEqual(info.proto_version, "1.3")
         self.assertEqual(info.domain_count, 1)
         self.assertTrue(info.guid, "首启该自己生成 guid")
 
@@ -111,6 +111,21 @@ class TestServiceBoot(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertNotIn("只读", r.message, "回了'只读'说明 rediagnose 没传进去")
         self.assertIn("没有绑定", r.message)
+
+    def test_训练执行器也装上了(self):
+        """★同 §工作台那条：没传 trainer ⇒ 回"未接"，而每个件的单测照样全绿。
+
+        这里用一个**不支持训练**的域去开训：装上了才会回"能力位里没有 train"，
+        没装上会回"未接训练执行器"。两句话区分得开，才证明装配到位。
+        """
+        ds = self.call("PutDataset", pb.PutDatasetReq(domain="boot_probe", name="训练自检集"),
+                       pb.MutateRes)
+        r = self.call("StartTraining",
+                      pb.StartTrainingReq(domain="boot_probe", dataset_id=ds.id),
+                      pb.MutateRes)
+        self.assertFalse(r.ok)
+        self.assertNotIn("未接", r.message, "回了'未接'说明 trainer 没传进去")
+        self.assertIn("能力位", r.message)
 
     def test_日志两口照常并且能看见启动那几行(self):
         res = self.call("QueryLogs", pb.LogQueryReq(limit=200), pb.QueryLogsRes)

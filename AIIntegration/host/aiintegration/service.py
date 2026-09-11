@@ -31,6 +31,7 @@ from .logstore import LogStore, LogStoreHandler
 from .pointmap import PointMap
 from .runner import run_domain
 from .scheduler import Scheduler
+from .trainer import Trainer
 from .types import Frame
 from .workbench import Workbench
 
@@ -103,6 +104,12 @@ class Service:
             ca_file=cfg.ca_file, cert_file=cfg.cert_file, key_file=cfg.key_file))
         sched = Scheduler(client=client, fetcher=Fetcher(client), domains=domains,
                           bindings=bindings, points=points)
+        # 训练执行器：串行一条，排队顺序 = 建任务顺序（见 trainer 模块头 §2）。
+        # ★没有写路径也照起 —— 训练只读实时库、只写本地工件，与结论回流无关。
+        trainer = Trainer(workbench=workbench, bindings=bindings, domains=domains,
+                          fetcher=Fetcher(client),
+                          artifacts_dir=cfg.data_dir / "artifacts")
+        trainer.start()
 
         if can_write:
             try:
@@ -145,7 +152,8 @@ class Service:
                              domains=domains, bindings=bindings, load_errors=load_errors,
                              # 绑定一变就重新同步：建点、推快照、起线程。
                              on_bindings_changed=(sched.sync if can_write else None),
-                             workbench=workbench, rediagnose=rediagnose)
+                             workbench=workbench, rediagnose=rediagnose,
+                             trainer=trainer)
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
                              handlers=(api.build_handler(svc),))
         if server.add_insecure_port(cfg.api_listen) == 0:
@@ -175,6 +183,7 @@ class Service:
 
         logger.warning("收到停止信号，正在停…")
         sched.stop()
+        trainer.stop()
         http.shutdown()
         http.server_close()
         server.stop(3).wait()

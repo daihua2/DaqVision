@@ -71,7 +71,11 @@ service AIIntegrationService {
   // ── 训练任务（★可查询状态的任务，不是阻塞调用；C-11 §3.3）──
   rpc ListTrainJobs (ListTrainJobsReq) returns (ListTrainJobsRes);
   rpc GetTrainJob   (IdReq)            returns (TrainJob);
-  // ⚠️ `StartTraining` **本版未开** —— 理由见文件末尾「1.2 未开的两件」。
+  // 1.3 开：建一条待跑任务**立刻返回**，后台串行跑。★不是阻塞调用 —— 界面随便关。
+  rpc StartTraining (StartTrainingReq) returns (MutateRes);
+  // 取消。★回执会**如实说**实际发生了什么：排队中的当场取消；正在跑的只是"请求取消"，
+  //   算法不检查取消标志就会跑完当前这次训练才停 —— 我方不谎报"已取消"。
+  rpc CancelTrainJob(IdReq)            returns (MutateRes);
 
   // ── 片段归档与报告 ──
   rpc ListSegments  (ListSegmentsReq) returns (ListSegmentsRes);
@@ -393,6 +397,14 @@ message TrainJob {
   string started_at   = 12;
   string finished_at  = 13;
 }
+message StartTrainingReq {
+  string domain     = 1;
+  int64  dataset_id = 2;
+  // 作用对象。空 = 训一个**全域通用**的模型；给了就是"这台设备专用"（v5 是每传感器一个）。
+  string binding    = 3;
+  // 想用哪个算法。★**由域解释**，骨架不枚举 —— 域自己在 `capabilities`/文档里说它认哪几个。
+  string algo       = 4;
+}
 message ListTrainJobsReq { string domain = 1; string status = 2; int32 offset = 3; int32 limit = 4; }
 message ListTrainJobsRes { repeated TrainJob items = 1; int32 total = 2; }
 
@@ -448,14 +460,22 @@ message FindingItem {
   google.protobuf.Timestamp t = 7;
 }
 
-// ═══════════ 1.2 未开的两件（不是遗漏，是"没做完就不给口"）═══════════
+// ═══════════ 训练那几口的三条使用说明（1.3）═══════════
 //
-// 1. **`StartTraining`** —— 训练执行还没落（要先定 `Dataset`/`Artifact` 怎么交给算法模块，
-//    以及数据集怎么从实时库组装）。任务表、状态机、工件表**都已就位**，
-//    故 `ListTrainJobs` / `GetTrainJob` / `ListArtifacts` 现在就能接。
-//    ★**故意不给一个永远 pending 的 `StartTraining`** —— 那比没有更坏：
-//      界面上看着开训了，实际没人跑，而且不报错。
+// 1. **`StartTraining` 只对声明了 `train` 能力位的域成立**，其余当场拒（`ok=false` 带原因）。
+//    ⇒ 请**按能力位渲染**：没有 `train` 的域根本不该出现训练入口。
 //
-// 2. **报告生成** —— v5 的深度报告是 LLM 出的，而"LLM 出网"这条还没定。
-//    报告的**存储与下载已就位**（`ListReports` + HTTP `GET /reports/<path>`），
-//    缺的只是"谁来生成"。定了加一个 RPC 即可，**加方法不破兼容**。
+// 2. **新训出来的工件不自动启用**。启用是人的决定 —— 自动启用等于"训一次就换一次现场模型"，
+//    而训练常常只是拿新标注试试看。界面上给"启用"按钮（`ActivateArtifact`）。
+//
+// 3. ★**"用了多少条样本"要显示出来**。样本记的是一段时间范围，等到训练时那段可能已经
+//    被实时库滚存删掉了；取不到的样本**不进**训练集，但丢了几条、为什么丢，
+//    我方写在 `TrainJob.message` 里，也在工件的 `meta_json` 里留一份。
+//    「用 200 条训出来的」与「以为用 200 条、实际只用了 3 条」是**两个模型**，
+//    而后者在界面上看起来和前者一模一样。
+//
+// ═══════════ 仍未开的一件 ═══════════
+//
+// **报告生成** —— v5 的深度报告是 LLM 出的，而"LLM 出网"这条还没定。
+// 报告的**存储与下载已就位**（`ListReports` + HTTP `GET /reports/<path>`），
+// 缺的只是"谁来生成"。定了加一个 RPC 即可，**加方法不破兼容**。

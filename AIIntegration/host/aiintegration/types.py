@@ -258,6 +258,108 @@ def _reject_dup(values: list[str], what: str) -> None:
         seen.add(v)
 
 
+# ═════════════════════ 训练面（2026-09-11）═════════════════════
+#
+# 分界文档 §3 里 `Domain.train(dataset, report) -> Artifact` 那一行的三个类型。
+#
+# ★同一条分界：**模块只懂算法**。它拿到的是"已经取好、对齐好、带标签的帧"，
+#   交回的是"一坨字节 + 几个说明"。它不知道这些帧从哪个库取的、工件存到哪、
+#   谁在看进度 —— 那些都是骨架的事。
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class LabeledFrame:
+    """一条训练样本：一帧数据 + 人给的标签。"""
+
+    frame: Frame
+    label: str
+    """★入集那一刻的**快照**，不是标注的当前值 —— 否则"这个模型是用什么训的"没有答案。"""
+
+    sample_id: int = 0
+    """工作台里的样本 id。模块用不着，但出错时骨架要能指出是**哪一条**。"""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Dataset:
+    """交给 `Domain.train()` 的训练集。骨架已经按标注把数据取好、成帧。
+
+    ★**取不到数据的样本不会出现在这里**（hs 里那段已被滚存删掉是常态），
+      但**丢了多少、丢了哪些，骨架记在任务上**（`skipped`），不静默 ——
+      "用 200 条训出来的"和"以为用 200 条、实际只用了 3 条"是两个模型。
+    """
+
+    domain: str
+    binding: str
+    """空 = 这个训练集跨对象（模型全域通用）。"""
+
+    name: str
+    items: tuple[LabeledFrame, ...]
+
+    skipped: tuple[tuple[int, str], ...] = ()
+    """`(sample_id, 原因)`。取不到数的那些。模块通常不看，但它有权知道自己少拿了多少。"""
+
+    def label_counts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for it in self.items:
+            out[it.label] = out.get(it.label, 0) + 1
+        return out
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TrainedArtifact:
+    """`Domain.train()` 交回来的东西。**骨架负责存储与版本，模块不碰文件系统**。"""
+
+    blob: bytes
+    """工件本体。模块自己序列化（joblib / json / onnx 都行，骨架不解释一个字节）。"""
+
+    algo: str
+    """用了什么算法。会显示在界面上（v5 那套是"决策树 / SVM / 神经网络"）。"""
+
+    accuracy: float | None = None
+    """★**没测就给 `None`，不许给 0**。"没测过"与"测出来是 0"在界面上必须分得开。"""
+
+    feature_count: int = 0
+    meta: dict[str, str] = dataclasses.field(default_factory=dict)
+    """随便挂。骨架原样存进 `artifacts.meta_json`，**只搬运不解释**。"""
+
+    suffix: str = ".bin"
+    """落盘时的扩展名。只影响文件名与下载时的 Content-Type。"""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.blob, (bytes, bytearray)) or not self.blob:
+            raise ValueError(
+                "TrainedArtifact.blob 不能为空 —— 空工件会被存成一个「看着训好了」的模型，"
+                "加载时才炸，而那时已经没人记得是这次训练的事")
+        if not self.algo:
+            raise ValueError("TrainedArtifact.algo 必填：界面要显示「这个模型是怎么训出来的」")
+        if self.accuracy is not None:
+            a = float(self.accuracy)
+            if not math.isfinite(a) or not (0.0 <= a <= 1.0):
+                raise ValueError(
+                    f"TrainedArtifact.accuracy 必须在 [0,1] 或为 None，收到 {self.accuracy!r}"
+                    "（没测过就给 None，别拿 0 或 NaN 顶）")
+
+
+class ProgressSink:
+    """训练进度回传口。模块调它，骨架把进度写进任务，界面才看得见。
+
+    ★**模块可以完全不调它** —— 那样进度就一直是 0，但任务状态照常流转。
+      不强制，是因为"为了报进度把算法拆碎"比看不见进度更坏。
+    """
+
+    def __init__(self, on_progress=None) -> None:
+        self._on = on_progress
+        self.canceled = False
+        """骨架置位。★长训练**应该**时不时看一眼它 —— 看了就能被叫停，不看就只能等它跑完。"""
+
+    def report(self, progress: float, message: str = "") -> None:
+        if self._on is not None:
+            self._on(max(0.0, min(1.0, float(progress))), message)
+
+
 def as_dict(obj: Any) -> dict:
     """给 HTTP/日志用的浅序列化（枚举转值、datetime 转 ISO）。"""
     def _conv(v: Any) -> Any:

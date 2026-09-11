@@ -26,7 +26,7 @@ from .logstore import LogFilter, LogLevel, LogStore
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.2"
+PROTO_VERSION = "1.3"
 
 
 def _ts(dt: datetime) -> object:
@@ -56,7 +56,8 @@ class ApiService(WorkbenchApiMixin):
     def __init__(self, *, guid: str, version: str, logstore: LogStore,
                  domains: dict[str, LoadedDomain], bindings: BindingStore,
                  load_errors: list[tuple[str, str]] | None = None,
-                 on_bindings_changed=None, workbench=None, rediagnose=None) -> None:
+                 on_bindings_changed=None, workbench=None, rediagnose=None,
+                 trainer=None) -> None:
         self._guid = guid
         self._version = version
         self._logs = logstore
@@ -70,6 +71,8 @@ class ApiService(WorkbenchApiMixin):
         self._wb = workbench
         # 回溯判别的执行器（片段 → [(Finding, 显示名)], 备注）。没接则该口如实回"只读模式"。
         self._rediagnose = rediagnose
+        # 训练执行器。没接则 StartTraining/CancelTrainJob 如实回"未接"，**不建注定没人跑的任务**。
+        self._trainer = trainer
 
     # ── 身份与域 ──────────────────────────────────────────────────────────
     def GetInfo(self, request, context):

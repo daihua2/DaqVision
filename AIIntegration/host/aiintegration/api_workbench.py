@@ -49,7 +49,11 @@ def _guard(fn):
 
 
 class WorkbenchApiMixin:
-    """挂到 `ApiService` 上。要求宿主提供 `self._wb`（Workbench）与 `self._rediagnose`。"""
+    """挂到 `ApiService` 上。
+
+    要求宿主提供 `self._wb`（Workbench）、`self._rediagnose`、`self._trainer`。
+    后两个可以是 `None` —— 那时对应的口**如实回"未接"**，不假装成功。
+    """
 
     # ── 标注 ──────────────────────────────────────────────────────────────
     @staticmethod
@@ -216,6 +220,25 @@ class WorkbenchApiMixin:
             sample_count=j.sample_count, artifact_id=j.artifact_id or 0,
             created_at=j.created_at, started_at=j.started_at, finished_at=j.finished_at)
 
+    @_guard
+    def StartTraining(self, request, context):
+        """建一条待跑任务，**立刻返回**。★不阻塞 —— 界面随便关。"""
+        if self._trainer is None:
+            return pb.MutateRes(
+                ok=False, message="本实例未接训练执行器（只读模式），无法开训")
+        jid = self._trainer.submit(domain=request.domain, dataset_id=request.dataset_id,
+                                   binding=request.binding, algo=request.algo)
+        return pb.MutateRes(ok=True, id=jid, message="已排队；用 GetTrainJob 查进度")
+
+    @_guard
+    def CancelTrainJob(self, request, context):
+        if self._trainer is None:
+            return pb.MutateRes(ok=False, message="本实例未接训练执行器（只读模式）")
+        # ★回执原样透出执行器那句话：三种情形（排队中/正在跑/已终态）结果不同，
+        #   笼统回一句"已取消"会让界面说谎。
+        return pb.MutateRes(ok=True, id=request.id,
+                            message=self._trainer.cancel(request.id))
+
     def GetTrainJob(self, request, context):
         job = self._wb.get_job(request.id)
         if job is None:
@@ -330,6 +353,8 @@ def method_specs(pb_mod, svc):
         "ActivateArtifact":  (svc.ActivateArtifact, pb_mod.IdReq, pb_mod.MutateRes),
         "DeleteArtifact":    (svc.DeleteArtifact, pb_mod.IdReq, pb_mod.MutateRes),
         "ListTrainJobs":     (svc.ListTrainJobs, pb_mod.ListTrainJobsReq, pb_mod.ListTrainJobsRes),
+        "StartTraining":     (svc.StartTraining, pb_mod.StartTrainingReq, pb_mod.MutateRes),
+        "CancelTrainJob":    (svc.CancelTrainJob, pb_mod.IdReq, pb_mod.MutateRes),
         "GetTrainJob":       (svc.GetTrainJob, pb_mod.IdReq, pb_mod.TrainJob),
         "ListSegments":      (svc.ListSegments, pb_mod.ListSegmentsReq, pb_mod.ListSegmentsRes),
         "PutSegment":        (svc.PutSegment, pb_mod.PutSegmentReq, pb_mod.MutateRes),
