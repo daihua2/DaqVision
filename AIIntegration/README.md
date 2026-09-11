@@ -40,8 +40,12 @@
 | 运行代码（AISERVER） | **`/home/Project/AIIntegration`** |
 | **往来文档**（协调文/回执/知会） | **`AISERVER:/home/Project/AIIntegration/docs/`**（用户定 2026-09-10；命名规范见该目录 README，编号前缀 `AI-`） |
 
-> 注意 AISERVER 上 `/home/ruiteng` 与 `/root/ruiteng` 是两份真实副本（不是软链），
-> 原有项目的运行态在 `/root` 那份下；本目录与它们**没有任何路径交集**，别混。
+> ★**订正（2026-09-11 现场核实）**：原先这里写的是「`/home/ruiteng` 与 `/root/ruiteng` 是两份真实副本（不是软链），
+> 运行态在 `/root` 那份下」—— **是错的**。实况：`/root/ruiteng/2026/ai_diagnosis/` 下**只有一个软链** `v4 -> /home/ruiteng/2026/ai_diagnosis/v4`
+>（8-20 建），**四个项目的进程 cwd 全在 `/home/ruiteng` 下**（v4 `:8013` → `.../v4/backend`、v5 `:8014` → `.../v5/backend`、
+> meter `:7860` → `.../meter_service/platform`、VFD `:18012` → `.../VFD/app`）。`/root/ruiteng` 不是副本。
+> 本目录与它们**没有任何路径交集**，这一点不变。
+> ★教训：从 `/root/ruiteng/.../v4` 起 `find` 会**什么都扫不到**（默认不进入作为起点的软链），空结果不等于没有。
 
 ## 3. 与 daqvision 既有件的关系
 
