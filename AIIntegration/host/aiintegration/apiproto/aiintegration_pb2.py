@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13\x61iintegration.proto\x12\raiintegration\x1a\x1fgoogle/protobuf/timestamp.proto\"\r\n\x0bInfoRequest\"\xa5\x01\n\tInfoReply\x12\x17\n\x0fservice_version\x18\x01 \x01(\t\x12\x15\n\rproto_version\x18\x02 \x01(\t\x12\x0c\n\x04guid\x18\x03 \x01(\t\x12\x0f\n\x07runtime\x18\x04 \x01(\t\x12\x14\n\x0c\x64omain_count\x18\x05 \x01(\x05\x12\x33\n\x0bload_errors\x18\x06 \x03(\x0b\x32\x1e.aiintegration.DomainLoadError\"/\n\x0f\x44omainLoadError\x12\x0c\n\x04\x66ile\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\x10\n\x0e\x44omainsRequest\":\n\x0c\x44omainsReply\x12*\n\x07\x64omains\x18\x01 \x03(\x0b\x32\x19.aiintegration.DomainInfo\"\xa7\x01\n\nDomainInfo\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x0f\n\x07\x64isplay\x18\x02 \x01(\t\x12\x0f\n\x07version\x18\x03 \x01(\t\x12\x14\n\x0c\x63\x61pabilities\x18\x04 \x03(\t\x12(\n\x06inputs\x18\x05 \x03(\x0b\x32\x18.aiintegration.InputSpec\x12*\n\x07outputs\x18\x06 \x03(\x0b\x32\x19.aiintegration.OutputSpec\"N\n\tInputSpec\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x0c\n\x04unit\x18\x02 \x01(\t\x12\x10\n\x08required\x18\x03 \x01(\x08\x12\x13\n\x0b\x64\x65scription\x18\x04 \x01(\t\"a\n\nOutputSpec\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x0f\n\x07\x64isplay\x18\x02 \x01(\t\x12\x12\n\nvalue_type\x18\x03 \x01(\t\x12\x0c\n\x04unit\x18\x04 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x05 \x01(\t\"\xdf\x01\n\x07\x42inding\x12\x0e\n\x06\x64omain\x18\x01 \x01(\t\x12\x0f\n\x07\x62inding\x18\x02 \x01(\t\x12\x30\n\x05roles\x18\x03 \x03(\x0b\x32!.aiintegration.Binding.RolesEntry\x12\x14\n\x0cinterval_sec\x18\x04 \x01(\x01\x12\x12\n\nwindow_sec\x18\x05 \x01(\x01\x12\x0f\n\x07\x65nabled\x18\x06 \x01(\x08\x12\x18\n\x10missing_required\x18\x07 \x03(\t\x1a,\n\nRolesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"%\n\x13ListBindingsRequest\x12\x0e\n\x06\x64omain\x18\x01 \x01(\t\"=\n\x11ListBindingsReply\x12(\n\x08\x62indings\x18\x01 \x03(\x0b\x32\x16.aiintegration.Binding\"<\n\x11PutBindingRequest\x12\'\n\x07\x62inding\x18\x01 \x01(\x0b\x32\x16.aiintegration.Binding\".\n\x0fPutBindingReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"7\n\x14\x44\x65leteBindingRequest\x12\x0e\n\x06\x64omain\x18\x01 \x01(\t\x12\x0f\n\x07\x62inding\x18\x02 \x01(\t\"1\n\x12\x44\x65leteBindingReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"\xd7\x01\n\tLogRecord\x12\x12\n\nSequenceId\x18\x01 \x01(\x05\x12-\n\tTimeStamp\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12)\n\x08LogLevel\x18\x03 \x01(\x0e\x32\x17.aiintegration.LogLevel\x12\x10\n\x08\x43\x61tegory\x18\x04 \x01(\t\x12\x0f\n\x07Message\x18\x05 \x01(\t\x12\x12\n\nMemberName\x18\x06 \x01(\t\x12\x12\n\nLineNumber\x18\x07 \x01(\x05\x12\x11\n\tStatuCode\x18\x08 \x01(\x05\"o\n\x0fLogSubscribeReq\x12)\n\x08minLevel\x18\x01 \x01(\x0e\x32\x17.aiintegration.LogLevel\x12\x10\n\x08\x63\x61tegory\x18\x02 \x01(\t\x12\x0e\n\x06search\x18\x03 \x01(\t\x12\x0f\n\x07\x62\x61\x63klog\x18\x04 \x01(\x05\"[\n\rLogStreamItem\x12*\n\x06record\x18\x01 \x01(\x0b\x32\x18.aiintegration.LogRecordH\x00\x12\x16\n\x0c\x64roppedTotal\x18\x02 \x01(\x04H\x00\x42\x06\n\x04item\"\xe8\x01\n\x0bLogQueryReq\x12,\n\x08\x66romTime\x18\x01 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12*\n\x06toTime\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12)\n\x08minLevel\x18\x03 \x01(\x0e\x32\x17.aiintegration.LogLevel\x12\x10\n\x08\x63\x61tegory\x18\x04 \x01(\t\x12\x0e\n\x06search\x18\x05 \x01(\t\x12\x0e\n\x06offset\x18\x06 \x01(\x05\x12\r\n\x05limit\x18\x07 \x01(\x05\x12\x13\n\x0bnewestFirst\x18\x08 \x01(\x08\"w\n\x0cQueryLogsRes\x12\x12\n\nTotalCount\x18\x01 \x01(\x05\x12&\n\x04Logs\x18\x02 \x03(\x0b\x32\x18.aiintegration.LogRecord\x12\x15\n\rReachedOldest\x18\x03 \x01(\x08\x12\x14\n\x0c\x45victedTotal\x18\x04 \x01(\x03*\x92\x01\n\x08LogLevel\x12\x12\n\x0eTrace_LogLevel\x10\x00\x12\x12\n\x0e\x44\x65\x62ug_LogLevel\x10\x01\x12\x11\n\rInfo_LogLevel\x10\x02\x12\x11\n\rWarn_LogLevel\x10\x03\x12\x12\n\x0e\x45rror_LogLevel\x10\x04\x12\x12\n\x0e\x46\x61tal_LogLevel\x10\x05\x12\x10\n\x0cOff_LogLevel\x10\x06\x32\xb8\x04\n\x14\x41IIntegrationService\x12?\n\x07GetInfo\x12\x1a.aiintegration.InfoRequest\x1a\x18.aiintegration.InfoReply\x12I\n\x0bListDomains\x12\x1d.aiintegration.DomainsRequest\x1a\x1b.aiintegration.DomainsReply\x12T\n\x0cListBindings\x12\".aiintegration.ListBindingsRequest\x1a .aiintegration.ListBindingsReply\x12N\n\nPutBinding\x12 .aiintegration.PutBindingRequest\x1a\x1e.aiintegration.PutBindingReply\x12W\n\rDeleteBinding\x12#.aiintegration.DeleteBindingRequest\x1a!.aiintegration.DeleteBindingReply\x12O\n\rSubscribeLogs\x12\x1e.aiintegration.LogSubscribeReq\x1a\x1c.aiintegration.LogStreamItem0\x01\x12\x44\n\tQueryLogs\x12\x1a.aiintegration.LogQueryReq\x1a\x1b.aiintegration.QueryLogsResb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13\x61iintegration.proto\x12\raiintegration\x1a\x1fgoogle/protobuf/timestamp.proto\"\r\n\x0bInfoRequest\"\xa5\x01\n\tInfoReply\x12\x17\n\x0fservice_version\x18\x01 \x01(\t\x12\x15\n\rproto_version\x18\x02 \x01(\t\x12\x0c\n\x04guid\x18\x03 \x01(\t\x12\x0f\n\x07runtime\x18\x04 \x01(\t\x12\x14\n\x0c\x64omain_count\x18\x05 \x01(\x05\x12\x33\n\x0bload_errors\x18\x06 \x03(\x0b\x32\x1e.aiintegration.DomainLoadError\"/\n\x0f\x44omainLoadError\x12\x0c\n\x04\x66ile\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\x10\n\x0e\x44omainsRequest\":\n\x0c\x44omainsReply\x12*\n\x07\x64omains\x18\x01 \x03(\x0b\x32\x19.aiintegration.DomainInfo\"\xd1\x01\n\nDomainInfo\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x0f\n\x07\x64isplay\x18\x02 \x01(\t\x12\x0f\n\x07version\x18\x03 \x01(\t\x12\x14\n\x0c\x63\x61pabilities\x18\x04 \x03(\t\x12(\n\x06inputs\x18\x05 \x03(\x0b\x32\x18.aiintegration.InputSpec\x12*\n\x07outputs\x18\x06 \x03(\x0b\x32\x19.aiintegration.OutputSpec\x12(\n\x06params\x18\x07 \x03(\x0b\x32\x18.aiintegration.ParamSpec\"\xad\x01\n\tParamSpec\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x0f\n\x07\x64isplay\x18\x02 \x01(\t\x12\x12\n\nvalue_type\x18\x03 \x01(\t\x12\x0f\n\x07\x63hoices\x18\x04 \x03(\t\x12\x17\n\x0f\x63hoice_displays\x18\x05 \x03(\t\x12\x0f\n\x07\x64\x65\x66\x61ult\x18\x06 \x01(\t\x12\x10\n\x08required\x18\x07 \x01(\x08\x12\x0c\n\x04unit\x18\x08 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\t \x01(\t\"N\n\tInputSpec\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x0c\n\x04unit\x18\x02 \x01(\t\x12\x10\n\x08required\x18\x03 \x01(\x08\x12\x13\n\x0b\x64\x65scription\x18\x04 \x01(\t\"a\n\nOutputSpec\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x0f\n\x07\x64isplay\x18\x02 \x01(\t\x12\x12\n\nvalue_type\x18\x03 \x01(\t\x12\x0c\n\x04unit\x18\x04 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x05 \x01(\t\"\xc2\x02\n\x07\x42inding\x12\x0e\n\x06\x64omain\x18\x01 \x01(\t\x12\x0f\n\x07\x62inding\x18\x02 \x01(\t\x12\x30\n\x05roles\x18\x03 \x03(\x0b\x32!.aiintegration.Binding.RolesEntry\x12\x14\n\x0cinterval_sec\x18\x04 \x01(\x01\x12\x12\n\nwindow_sec\x18\x05 \x01(\x01\x12\x0f\n\x07\x65nabled\x18\x06 \x01(\x08\x12\x18\n\x10missing_required\x18\x07 \x03(\t\x12\x32\n\x06params\x18\x08 \x03(\x0b\x32\".aiintegration.Binding.ParamsEntry\x1a,\n\nRolesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\x1a-\n\x0bParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"%\n\x13ListBindingsRequest\x12\x0e\n\x06\x64omain\x18\x01 \x01(\t\"=\n\x11ListBindingsReply\x12(\n\x08\x62indings\x18\x01 \x03(\x0b\x32\x16.aiintegration.Binding\"<\n\x11PutBindingRequest\x12\'\n\x07\x62inding\x18\x01 \x01(\x0b\x32\x16.aiintegration.Binding\".\n\x0fPutBindingReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"7\n\x14\x44\x65leteBindingRequest\x12\x0e\n\x06\x64omain\x18\x01 \x01(\t\x12\x0f\n\x07\x62inding\x18\x02 \x01(\t\"1\n\x12\x44\x65leteBindingReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"\xd7\x01\n\tLogRecord\x12\x12\n\nSequenceId\x18\x01 \x01(\x05\x12-\n\tTimeStamp\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12)\n\x08LogLevel\x18\x03 \x01(\x0e\x32\x17.aiintegration.LogLevel\x12\x10\n\x08\x43\x61tegory\x18\x04 \x01(\t\x12\x0f\n\x07Message\x18\x05 \x01(\t\x12\x12\n\nMemberName\x18\x06 \x01(\t\x12\x12\n\nLineNumber\x18\x07 \x01(\x05\x12\x11\n\tStatuCode\x18\x08 \x01(\x05\"o\n\x0fLogSubscribeReq\x12)\n\x08minLevel\x18\x01 \x01(\x0e\x32\x17.aiintegration.LogLevel\x12\x10\n\x08\x63\x61tegory\x18\x02 \x01(\t\x12\x0e\n\x06search\x18\x03 \x01(\t\x12\x0f\n\x07\x62\x61\x63klog\x18\x04 \x01(\x05\"[\n\rLogStreamItem\x12*\n\x06record\x18\x01 \x01(\x0b\x32\x18.aiintegration.LogRecordH\x00\x12\x16\n\x0c\x64roppedTotal\x18\x02 \x01(\x04H\x00\x42\x06\n\x04item\"\xe8\x01\n\x0bLogQueryReq\x12,\n\x08\x66romTime\x18\x01 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12*\n\x06toTime\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\x12)\n\x08minLevel\x18\x03 \x01(\x0e\x32\x17.aiintegration.LogLevel\x12\x10\n\x08\x63\x61tegory\x18\x04 \x01(\t\x12\x0e\n\x06search\x18\x05 \x01(\t\x12\x0e\n\x06offset\x18\x06 \x01(\x05\x12\r\n\x05limit\x18\x07 \x01(\x05\x12\x13\n\x0bnewestFirst\x18\x08 \x01(\x08\"w\n\x0cQueryLogsRes\x12\x12\n\nTotalCount\x18\x01 \x01(\x05\x12&\n\x04Logs\x18\x02 \x03(\x0b\x32\x18.aiintegration.LogRecord\x12\x15\n\rReachedOldest\x18\x03 \x01(\x08\x12\x14\n\x0c\x45victedTotal\x18\x04 \x01(\x03*\x92\x01\n\x08LogLevel\x12\x12\n\x0eTrace_LogLevel\x10\x00\x12\x12\n\x0e\x44\x65\x62ug_LogLevel\x10\x01\x12\x11\n\rInfo_LogLevel\x10\x02\x12\x11\n\rWarn_LogLevel\x10\x03\x12\x12\n\x0e\x45rror_LogLevel\x10\x04\x12\x12\n\x0e\x46\x61tal_LogLevel\x10\x05\x12\x10\n\x0cOff_LogLevel\x10\x06\x32\xb8\x04\n\x14\x41IIntegrationService\x12?\n\x07GetInfo\x12\x1a.aiintegration.InfoRequest\x1a\x18.aiintegration.InfoReply\x12I\n\x0bListDomains\x12\x1d.aiintegration.DomainsRequest\x1a\x1b.aiintegration.DomainsReply\x12T\n\x0cListBindings\x12\".aiintegration.ListBindingsRequest\x1a .aiintegration.ListBindingsReply\x12N\n\nPutBinding\x12 .aiintegration.PutBindingRequest\x1a\x1e.aiintegration.PutBindingReply\x12W\n\rDeleteBinding\x12#.aiintegration.DeleteBindingRequest\x1a!.aiintegration.DeleteBindingReply\x12O\n\rSubscribeLogs\x12\x1e.aiintegration.LogSubscribeReq\x1a\x1c.aiintegration.LogStreamItem0\x01\x12\x44\n\tQueryLogs\x12\x1a.aiintegration.LogQueryReq\x1a\x1b.aiintegration.QueryLogsResb\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'aiintegration_pb2', globals())
@@ -23,8 +23,10 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _BINDING_ROLESENTRY._options = None
   _BINDING_ROLESENTRY._serialized_options = b'8\001'
-  _LOGLEVEL._serialized_start=2057
-  _LOGLEVEL._serialized_end=2203
+  _BINDING_PARAMSENTRY._options = None
+  _BINDING_PARAMSENTRY._serialized_options = b'8\001'
+  _LOGLEVEL._serialized_start=2374
+  _LOGLEVEL._serialized_end=2520
   _INFOREQUEST._serialized_start=71
   _INFOREQUEST._serialized_end=84
   _INFOREPLY._serialized_start=87
@@ -36,37 +38,41 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _DOMAINSREPLY._serialized_start=321
   _DOMAINSREPLY._serialized_end=379
   _DOMAININFO._serialized_start=382
-  _DOMAININFO._serialized_end=549
-  _INPUTSPEC._serialized_start=551
-  _INPUTSPEC._serialized_end=629
-  _OUTPUTSPEC._serialized_start=631
-  _OUTPUTSPEC._serialized_end=728
-  _BINDING._serialized_start=731
-  _BINDING._serialized_end=954
-  _BINDING_ROLESENTRY._serialized_start=910
-  _BINDING_ROLESENTRY._serialized_end=954
-  _LISTBINDINGSREQUEST._serialized_start=956
-  _LISTBINDINGSREQUEST._serialized_end=993
-  _LISTBINDINGSREPLY._serialized_start=995
-  _LISTBINDINGSREPLY._serialized_end=1056
-  _PUTBINDINGREQUEST._serialized_start=1058
-  _PUTBINDINGREQUEST._serialized_end=1118
-  _PUTBINDINGREPLY._serialized_start=1120
-  _PUTBINDINGREPLY._serialized_end=1166
-  _DELETEBINDINGREQUEST._serialized_start=1168
-  _DELETEBINDINGREQUEST._serialized_end=1223
-  _DELETEBINDINGREPLY._serialized_start=1225
-  _DELETEBINDINGREPLY._serialized_end=1274
-  _LOGRECORD._serialized_start=1277
-  _LOGRECORD._serialized_end=1492
-  _LOGSUBSCRIBEREQ._serialized_start=1494
-  _LOGSUBSCRIBEREQ._serialized_end=1605
-  _LOGSTREAMITEM._serialized_start=1607
-  _LOGSTREAMITEM._serialized_end=1698
-  _LOGQUERYREQ._serialized_start=1701
-  _LOGQUERYREQ._serialized_end=1933
-  _QUERYLOGSRES._serialized_start=1935
-  _QUERYLOGSRES._serialized_end=2054
-  _AIINTEGRATIONSERVICE._serialized_start=2206
-  _AIINTEGRATIONSERVICE._serialized_end=2774
+  _DOMAININFO._serialized_end=591
+  _PARAMSPEC._serialized_start=594
+  _PARAMSPEC._serialized_end=767
+  _INPUTSPEC._serialized_start=769
+  _INPUTSPEC._serialized_end=847
+  _OUTPUTSPEC._serialized_start=849
+  _OUTPUTSPEC._serialized_end=946
+  _BINDING._serialized_start=949
+  _BINDING._serialized_end=1271
+  _BINDING_ROLESENTRY._serialized_start=1180
+  _BINDING_ROLESENTRY._serialized_end=1224
+  _BINDING_PARAMSENTRY._serialized_start=1226
+  _BINDING_PARAMSENTRY._serialized_end=1271
+  _LISTBINDINGSREQUEST._serialized_start=1273
+  _LISTBINDINGSREQUEST._serialized_end=1310
+  _LISTBINDINGSREPLY._serialized_start=1312
+  _LISTBINDINGSREPLY._serialized_end=1373
+  _PUTBINDINGREQUEST._serialized_start=1375
+  _PUTBINDINGREQUEST._serialized_end=1435
+  _PUTBINDINGREPLY._serialized_start=1437
+  _PUTBINDINGREPLY._serialized_end=1483
+  _DELETEBINDINGREQUEST._serialized_start=1485
+  _DELETEBINDINGREQUEST._serialized_end=1540
+  _DELETEBINDINGREPLY._serialized_start=1542
+  _DELETEBINDINGREPLY._serialized_end=1591
+  _LOGRECORD._serialized_start=1594
+  _LOGRECORD._serialized_end=1809
+  _LOGSUBSCRIBEREQ._serialized_start=1811
+  _LOGSUBSCRIBEREQ._serialized_end=1922
+  _LOGSTREAMITEM._serialized_start=1924
+  _LOGSTREAMITEM._serialized_end=2015
+  _LOGQUERYREQ._serialized_start=2018
+  _LOGQUERYREQ._serialized_end=2250
+  _QUERYLOGSRES._serialized_start=2252
+  _QUERYLOGSRES._serialized_end=2371
+  _AIINTEGRATIONSERVICE._serialized_start=2523
+  _AIINTEGRATIONSERVICE._serialized_end=3091
 # @@protoc_insertion_point(module_scope)

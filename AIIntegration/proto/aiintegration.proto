@@ -64,6 +64,23 @@ message DomainInfo {
   repeated string capabilities = 4;
   repeated InputSpec  inputs   = 5;
   repeated OutputSpec outputs  = 6;
+  // ★台账参数自述（1.1 新增）。贵方**按这张表渲染绑定表单**，不要按域名写死字段 ——
+  //   与能力位同一条道理：新增域不改前端。取值都放在 `Binding.params` 里（字符串）。
+  repeated ParamSpec  params   = 7;
+}
+// 一项台账参数的自述。**域定义它，骨架只搬运**。
+message ParamSpec {
+  string key         = 1;   // 如 iso_group
+  string display     = 2;   // 如 "ISO 10816-3 机组类别"
+  string value_type  = 3;   // float | int | bool | string | enum
+  // value_type=enum 时的候选值；其余类型为空。★候选值是**取值本身**，
+  // 显示名走 choice_displays（同序），空则直接显示取值。
+  repeated string choices          = 4;
+  repeated string choice_displays  = 5;
+  string default     = 6;   // 空 = 无缺省（必须由人填）
+  bool   required    = 7;   // ★缺了它，本域的部分结论会落坏质量码而不是猜一个
+  string unit        = 8;
+  string description = 9;
 }
 message InputSpec {
   string role        = 1;   // 域内角色名，绑定时对到实际测点
@@ -91,6 +108,14 @@ message Binding {
   bool   enabled      = 6;
   // 声明里必填、而本绑定没给的角色。**只读**，我方算好回给贵方渲染"配置不全"提示。
   repeated string missing_required = 7;
+  // ★被诊断对象的**台账参数**（1.1 新增）：额定功率等级、刚性/柔性支承、轴向是哪一轴、
+  //   速度口径是不是 RMS…… 这些是"每台机器一份"的静态事实，**不是测点**，
+  //   绑不到 globalId 上，但判据离了它们就出不来（ISO 10816 分级要的正是这几项）。
+  //
+  //   ★**骨架只搬运不解释**（照 hs 的 `GatewayIdentity.attrs` 那条规矩）：
+  //     键名与取值由**域**定义并在 `DomainInfo.param_specs` 里自述，骨架不枚举、不校验语义。
+  //     ⇒ 新增一个域带来新的参数，骨架与贵方前端都不改 —— 前端按 `param_specs` 渲染表单。
+  map<string, string> params = 8;
 }
 message ListBindingsRequest { string domain = 1; }   // 空 = 全部
 message ListBindingsReply   { repeated Binding bindings = 1; }

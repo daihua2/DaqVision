@@ -128,6 +128,14 @@ class Frame:
     channels: dict[str, Sequence[Sample]]
     """按 `InputSpec.role` 索引的采样序列。缺失的可选输入不出现在字典里。"""
 
+    params: dict[str, str] = dataclasses.field(default_factory=dict)
+    """被诊断对象的**台账参数**（额定功率等级、支承方式、轴向是哪一轴…），照抄绑定里那份。
+
+    ★**骨架只搬运不解释**：键名与取值由域在 `Declaration.params` 里自述，骨架不枚举、不校验语义。
+      模块自己读、自己校验；**读不到就落质量码，不许替它猜一个缺省**
+      —— 猜错的 ISO 分级会把"该停机"说成"可长期运行"，而且看不出来。
+    """
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "t_start", _require_utc(self.t_start, "Frame.t_start"))
         object.__setattr__(self, "t_end", _require_utc(self.t_end, "Frame.t_end"))
@@ -172,15 +180,67 @@ class OutputSpec:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class ParamSpec:
+    """模块声明它要什么**台账参数** —— "每台机器一份"的静态事实，不是测点。
+
+    ★为什么不能当成输入角色绑到点上：额定功率等级、刚性/柔性支承这些既没有时刻也没有质量码，
+      往实时库里塞一个恒定值的点，就是把台账伪装成测量。
+
+    ★为什么不能让模块自己读配置文件：那样"新增一个域 = 丢一个 .py"当场不成立，
+      而且状态散在文件里没人备份、没人授权（分界文档 §2 第 5 条）。
+    """
+
+    key: str
+    display: str
+    value_type: str
+    """`float` | `int` | `bool` | `string` | `enum`。"""
+
+    choices: tuple[str, ...] = ()
+    """`enum` 的候选取值。**取值本身**，显示名走 `choice_displays`（同序）。"""
+
+    choice_displays: tuple[str, ...] = ()
+    default: str = ""
+    """空 = 无缺省，必须由人填。★**不给"看起来合理"的缺省** —— 见下面 `required`。"""
+
+    required: bool = True
+    """必填。★缺了它，模块该落坏质量码而不是猜一个值。"""
+
+    unit: str = ""
+    description: str = ""
+
+    _ALLOWED = ("float", "int", "bool", "string", "enum")
+
+    def __post_init__(self) -> None:
+        if self.value_type not in ParamSpec._ALLOWED:
+            raise ValueError(
+                f"ParamSpec({self.key}).value_type 只能是 {ParamSpec._ALLOWED}，"
+                f"收到 {self.value_type!r}")
+        if self.value_type == "enum" and not self.choices:
+            raise ValueError(f"ParamSpec({self.key}) 是 enum 却没有 choices")
+        if self.value_type != "enum" and self.choices:
+            raise ValueError(f"ParamSpec({self.key}) 不是 enum 却给了 choices")
+        if self.choice_displays and len(self.choice_displays) != len(self.choices):
+            raise ValueError(
+                f"ParamSpec({self.key}).choice_displays 与 choices 长度不一致 "
+                f"({len(self.choice_displays)} vs {len(self.choices)}) —— 同序对应，错位会让界面显示成别的选项")
+        if self.default and self.choices and self.default not in self.choices:
+            raise ValueError(
+                f"ParamSpec({self.key}).default={self.default!r} 不在 choices {self.choices} 里")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class Declaration:
     """`Domain.declare()` 的返回值：这个域要什么、出什么。"""
 
     inputs: tuple[InputSpec, ...]
     outputs: tuple[OutputSpec, ...]
+    params: tuple[ParamSpec, ...] = ()
+    """台账参数自述。骨架原样回给 AICloud 渲染绑定表单 —— **不枚举、不解释**。"""
 
     def __post_init__(self) -> None:
         _reject_dup([i.role for i in self.inputs], "InputSpec.role")
         _reject_dup([o.key for o in self.outputs], "OutputSpec.key")
+        _reject_dup([p.key for p in self.params], "ParamSpec.key")
         if not self.outputs:
             raise ValueError("Declaration.outputs 为空 —— 不产出结论的域没有意义")
 

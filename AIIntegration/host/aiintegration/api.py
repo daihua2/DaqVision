@@ -25,7 +25,7 @@ from .logstore import LogFilter, LogLevel, LogStore
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.0"
+PROTO_VERSION = "1.1"
 
 
 def _ts(dt: datetime) -> object:
@@ -92,6 +92,14 @@ class ApiService:
             for o in d.declaration.outputs:
                 info.outputs.add(key=o.key, display=o.display, value_type=o.value_type,
                                  unit=o.unit, description=o.description)
+            # 台账参数自述 —— 贵方**按这张表渲染绑定表单**，不按域名写死字段。
+            for pm in d.declaration.params:
+                spec = info.params.add(
+                    key=pm.key, display=pm.display, value_type=pm.value_type,
+                    default=pm.default, required=pm.required,
+                    unit=pm.unit, description=pm.description)
+                spec.choices.extend(pm.choices)
+                spec.choice_displays.extend(pm.choice_displays)
         return reply
 
     # ── 绑定 ──────────────────────────────────────────────────────────────
@@ -101,6 +109,8 @@ class ApiService:
                          enabled=b.enabled)
         for role, gid in b.roles.items():
             out.roles[role] = gid
+        for k, v in b.params.items():
+            out.params[k] = v
         loaded = self._domains.get(b.domain)
         if loaded is not None:
             required = [i.role for i in loaded.declaration.inputs if i.required]
@@ -123,6 +133,7 @@ class ApiService:
         try:
             self._bindings.put(Binding(
                 domain=b.domain, binding=b.binding, roles=dict(b.roles),
+                params=dict(b.params),
                 interval_sec=b.interval_sec or 60.0,
                 window_sec=b.window_sec or 60.0,
                 enabled=b.enabled))

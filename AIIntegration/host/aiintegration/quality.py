@@ -43,6 +43,17 @@ class Quality(enum.Enum):
     MODEL_NOT_LOADED = "model_not_loaded"
     """该域没有可用模型（没训练过 / 工件加载失败）。"""
 
+    CONFIG_INCOMPLETE = "config_incomplete"
+    """**台账参数缺失或非法**，这条结论的判据立不起来。
+
+    ★与 `INPUT_BAD` 分开：那是"数据不可信"，去查设备；这是"没人填过这台机器的台账"，
+      去补配置。两者的处置完全不同，混成一个码，现场只会往设备上查。
+
+    ★与"给个缺省值算出来"分开：ISO 判级的边界取决于机组类别与支承方式，
+      猜错会把"该停机"说成"可长期运行"，**而且从数值上看不出来**。
+      由第一个算法域（低频振动）落地时发现并补上。
+    """
+
     INSUFFICIENT_SAMPLES = "insufficient_samples"
     """样本不足，算了但不足以下结论。"""
 
@@ -78,6 +89,8 @@ _TO_STATUS: dict[Quality, int] = {
     Quality.NO_INPUT: STATUS_QUALITY_NOT_CONNECTED,
     # "不在服务中" —— 语义与既有码对上（该域此刻不提供服务）。
     Quality.MODEL_NOT_LOADED: STATUS_QUALITY_OUT_OF_SERVICE,
+    # 台账没配全 ⇒ 该结论此刻确实**不提供**，与 OutOfService 语义对得上（同上一条的理由）。
+    Quality.CONFIG_INCOMPLETE: STATUS_QUALITY_OUT_OF_SERVICE,
     # ↓ 以下【待批】：无语义确实对得上的既有码，一律折叠 QualityBad，不挪用别的码。
     Quality.INPUT_BAD: STATUS_QUALITY_BAD,
     Quality.INSUFFICIENT_SAMPLES: STATUS_QUALITY_BAD,

@@ -174,5 +174,80 @@ class TestBindingStore(unittest.TestCase):
         self.assertFalse(self.store.delete("vib", "dev1"))
 
 
+class TestBindingParams(unittest.TestCase):
+    """台账参数（契约 1.1）—— 骨架**只搬运不解释**，但搬运本身要靠得住。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "b.db"
+        self.store = BindingStore(self.path)
+
+    def tearDown(self):
+        self.store.close(); self._tmp.cleanup()
+
+    def test_存取往返含中文与空(self):
+        self.store.put(Binding("vib", "dev1", {"x": 1},
+                               params={"iso_group": "2", "note": "1# 主泵 驱动端"}))
+        self.assertEqual(self.store.get("vib", "dev1").params,
+                         {"iso_group": "2", "note": "1# 主泵 驱动端"})
+        self.store.put(Binding("vib", "dev2", {"x": 2}))
+        self.assertEqual(self.store.get("vib", "dev2").params, {})
+
+    def test_骨架不解释键名(self):
+        # ★随便一个没人见过的键也要存下来 —— 枚举键名就等于"新增域要改骨架"。
+        self.store.put(Binding("vib", "dev1", {"x": 1}, params={"没定义过的键": "值"}))
+        self.assertEqual(self.store.get("vib", "dev1").params, {"没定义过的键": "值"})
+
+    def test_非字符串取值被拒(self):
+        # 契约里是 map<string,string>；存进去 int 会在回读时变成另一种类型，静默。
+        with self.assertRaises(ValueError) as ctx:
+            self.store.put(Binding("vib", "dev1", {"x": 1}, params={"iso_group": 2}))
+        self.assertIn("字符串", str(ctx.exception))
+
+    def test_覆盖时参数一并覆盖(self):
+        self.store.put(Binding("vib", "dev1", {"x": 1}, params={"a": "1"}))
+        self.store.put(Binding("vib", "dev1", {"x": 1}, params={"b": "2"}))
+        self.assertEqual(self.store.get("vib", "dev1").params, {"b": "2"})
+
+    def test_老库能补列而不是读时才炸(self):
+        """★`CREATE TABLE IF NOT EXISTS` 对已存在的表一个字都不改。"""
+        self.store.close()
+        import sqlite3
+        conn = sqlite3.connect(str(self.path))
+        conn.execute("DROP TABLE bindings")
+        conn.execute("CREATE TABLE bindings (domain TEXT NOT NULL, binding TEXT NOT NULL,"
+                     " roles_json TEXT NOT NULL, interval_sec REAL NOT NULL,"
+                     " window_sec REAL NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,"
+                     " updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                     " PRIMARY KEY (domain, binding))")
+        conn.execute("INSERT INTO bindings(domain,binding,roles_json,interval_sec,window_sec,enabled)"
+                     " VALUES('vib','old','{\"x\": 5}',60,60,1)")
+        conn.commit(); conn.close()
+
+        store = BindingStore(self.path)          # 打开即迁移
+        try:
+            old = store.get("vib", "old")
+            self.assertEqual(old.roles, {"x": 5}, "老绑定不能丢")
+            self.assertEqual(old.params, {}, "老绑定没有台账参数，应为空而不是报错")
+            store.put(Binding("vib", "new", {"x": 6}, params={"iso_group": "1"}))
+            self.assertEqual(store.get("vib", "new").params, {"iso_group": "1"})
+        finally:
+            store.close()
+
+    def test_取数时台账原样进帧(self):
+        client = FakeClient({})
+        b = Binding("vib", "dev1", {"x_vel": 101},
+                    params={"iso_group": "2", "mount_type": "rigid"})
+        frame = Fetcher(client).fetch(b, T0)
+        self.assertEqual(frame.params, {"iso_group": "2", "mount_type": "rigid"})
+
+    def test_帧里的台账是副本改不回绑定(self):
+        client = FakeClient({})
+        b = Binding("vib", "dev1", {"x_vel": 101}, params={"iso_group": "2"})
+        frame = Fetcher(client).fetch(b, T0)
+        frame.params["iso_group"] = "4"
+        self.assertEqual(b.params, {"iso_group": "2"}, "模块改帧不该反噬配置")
+
+
 if __name__ == "__main__":
     unittest.main()

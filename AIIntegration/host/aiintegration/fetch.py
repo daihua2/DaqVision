@@ -91,4 +91,6 @@ class Fetcher:
             )
 
         return Frame(domain=b.domain, binding=b.binding,
-                     t_start=start, t_end=end_time, channels=channels)
+                     t_start=start, t_end=end_time, channels=channels,
+                     # 台账参数照抄，**不解释、不填缺省** —— 缺什么由模块自己发现并落码。
+                     params=dict(b.params))

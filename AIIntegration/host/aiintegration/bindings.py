@@ -17,7 +17,7 @@ import json
 import logging
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS bindings (
     domain       TEXT NOT NULL,
     binding      TEXT NOT NULL,
     roles_json   TEXT NOT NULL,
+    params_json  TEXT NOT NULL DEFAULT '{}',
     interval_sec REAL NOT NULL,
     window_sec   REAL NOT NULL,
     enabled      INTEGER NOT NULL DEFAULT 1,
@@ -48,6 +49,14 @@ class Binding:
 
     roles: dict[str, int]
     """`InputSpec.role` → **globalId**。"""
+
+    params: dict[str, str] = field(default_factory=dict)
+    """被诊断对象的**台账参数**（`ParamSpec.key` → 取值字符串）。
+
+    ★**骨架只搬运不解释**（照 hs 的 `GatewayIdentity.attrs`）：键名与取值由域自述，
+      骨架不枚举、不校验语义 —— 否则"新增一个域只写一个 .py"当场不成立。
+      校验归模块；**模块读不到就落坏质量码，不许替它猜**。
+    """
 
     interval_sec: float = DEFAULT_INTERVAL_SEC
     window_sec: float = DEFAULT_WINDOW_SEC
@@ -70,7 +79,20 @@ class BindingStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """老库补列。
+
+        ★`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字都不改 —— 新加的列不会自己长出来，
+          而读的时候才炸（`no such column`），且是在现场、在半夜。这里显式补。
+        """
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(bindings)")}
+        if "params_json" not in have:
+            self._conn.execute(
+                "ALTER TABLE bindings ADD COLUMN params_json TEXT NOT NULL DEFAULT '{}'")
+            logger.info("绑定表已补列 params_json（老库升级）")
 
     def close(self) -> None:
         with self._lock:
@@ -87,15 +109,25 @@ class BindingStore:
                     f"绑定 {b.domain}/{b.binding} 的角色 {role} 指向非法 globalId {gid!r}"
                     "（0 = hs 尚未分配映射；**绝不能拿 0 去查**，那会静默查到别人的点）"
                 )
+        for k, v in b.params.items():
+            # 只管形状（键非空、值是字符串），**语义一律不碰** —— 那是域的事。
+            if not k or not isinstance(k, str):
+                raise ValueError(f"绑定 {b.domain}/{b.binding} 的台账参数键非法 {k!r}")
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"绑定 {b.domain}/{b.binding} 的台账参数 {k} 取值必须是字符串，"
+                    f"收到 {type(v).__name__}（契约里 params 是 map<string,string>）")
         with self._lock:
             self._conn.execute(
-                "INSERT INTO bindings(domain,binding,roles_json,interval_sec,window_sec,enabled) "
-                "VALUES(?,?,?,?,?,?) "
+                "INSERT INTO bindings(domain,binding,roles_json,params_json,interval_sec,window_sec,enabled) "
+                "VALUES(?,?,?,?,?,?,?) "
                 "ON CONFLICT(domain,binding) DO UPDATE SET "
-                "roles_json=excluded.roles_json, interval_sec=excluded.interval_sec, "
+                "roles_json=excluded.roles_json, params_json=excluded.params_json, "
+                "interval_sec=excluded.interval_sec, "
                 "window_sec=excluded.window_sec, enabled=excluded.enabled, "
                 "updated_at=datetime('now')",
                 (b.domain, b.binding, json.dumps(b.roles, ensure_ascii=False),
+                 json.dumps(b.params, ensure_ascii=False),
                  float(b.interval_sec), float(b.window_sec), 1 if b.enabled else 0),
             )
             self._conn.commit()
@@ -142,6 +174,7 @@ def _to_binding(row: sqlite3.Row) -> Binding:
         domain=row["domain"],
         binding=row["binding"],
         roles={k: int(v) for k, v in json.loads(row["roles_json"]).items()},
+        params={k: str(v) for k, v in json.loads(row["params_json"] or "{}").items()},
         interval_sec=float(row["interval_sec"]),
         window_sec=float(row["window_sec"]),
         enabled=bool(row["enabled"]),

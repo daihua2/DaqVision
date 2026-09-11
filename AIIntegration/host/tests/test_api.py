@@ -27,7 +27,7 @@ T0 = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
 
 DOM = '''
 from aiintegration.domains import Domain
-from aiintegration.types import Declaration, InputSpec, OutputSpec
+from aiintegration.types import Declaration, InputSpec, OutputSpec, ParamSpec
 
 class D(Domain):
     key = "vib"
@@ -39,6 +39,11 @@ class D(Domain):
                     InputSpec(role="temp", unit="℃", required=False)),
             outputs=(OutputSpec(key="health_score", display="健康分",
                                 value_type="float", unit="分"),),
+            params=(ParamSpec(key="iso_group", display="机组类别", value_type="enum",
+                              choices=("1", "2"), choice_displays=("大型", "中型"),
+                              description="决定边界值"),
+                    ParamSpec(key="note", display="备注", value_type="string",
+                              required=False),),
         )
     def infer(self, frame):
         return []
@@ -83,7 +88,7 @@ class TestInfoAndDomains(ApiTestBase):
     def test_GetInfo_带身份与契约版本(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
         self.assertEqual(r.guid, "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(r.proto_version, "1.0")
+        self.assertEqual(r.proto_version, "1.1")
         self.assertEqual(r.domain_count, 1)
 
     def test_装载失败不藏(self):
@@ -213,6 +218,51 @@ class TestLogs(ApiTestBase):
         item = next(it)
         self.assertEqual(item.record.Message, "旧的命中")
         it.cancel()
+
+
+class TestBindingParamsOverWire(unittest.TestCase):
+    """契约 1.1 的台账参数 —— 这是 AICloud **唯一看得见**的那一面。"""
+
+    def setUp(self):
+        ApiTestBase.setUp(self)
+
+    def tearDown(self):
+        ApiTestBase.tearDown(self)
+
+    call = ApiTestBase.call
+
+    def test_域清单带台账自述供前端渲染表单(self):
+        r = self.call("ListDomains", pb.DomainsRequest(), pb.DomainsReply)
+        d = next(x for x in r.domains if x.key == "vib")
+        specs = {p.key: p for p in d.params}
+        self.assertEqual(set(specs), {"iso_group", "note"},
+                         "自述漏一项，前端表单就少一格，而域会因此永远落坏码")
+        self.assertEqual(list(specs["iso_group"].choices), ["1", "2"])
+        self.assertEqual(list(specs["iso_group"].choice_displays), ["大型", "中型"])
+        self.assertTrue(specs["iso_group"].required)
+        self.assertFalse(specs["note"].required)
+
+    def test_台账原样往返(self):
+        b = pb.Binding(domain="vib", binding="dev1", enabled=True)
+        b.roles["x_acc"] = 101
+        b.params["iso_group"] = "2"
+        b.params["note"] = "1# 主泵 驱动端"
+        r = self.call("PutBinding", pb.PutBindingRequest(binding=b), pb.PutBindingReply)
+        self.assertTrue(r.ok, r.message)
+
+        got = self.call("ListBindings", pb.ListBindingsRequest(), pb.ListBindingsReply)
+        one = got.bindings[0]
+        self.assertEqual(dict(one.params), {"iso_group": "2", "note": "1# 主泵 驱动端"})
+
+    def test_不填台账也能存但域会自己落码(self):
+        # 骨架**不校验台账语义**（那会让"新增域不改骨架"当场不成立）。
+        b = pb.Binding(domain="vib", binding="dev2", enabled=True)
+        b.roles["x_acc"] = 102
+        r = self.call("PutBinding", pb.PutBindingRequest(binding=b), pb.PutBindingReply)
+        self.assertTrue(r.ok, r.message)
+        got = self.call("ListBindings", pb.ListBindingsRequest(domain="vib"),
+                        pb.ListBindingsReply)
+        self.assertEqual(dict(got.bindings[0].params), {})
 
 
 if __name__ == "__main__":
