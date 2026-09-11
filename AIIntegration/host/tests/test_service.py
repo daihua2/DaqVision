@@ -67,9 +67,11 @@ class TestHttpApi(unittest.TestCase):
         self.root = Path(self._tmp.name)
         (self.root / "artifacts").mkdir()
         (self.root / "artifacts" / "model.bin").write_bytes(b"\x00\x01model")
+        (self.root / "reports").mkdir()
+        (self.root / "reports" / "r1.pdf").write_bytes(b"%PDF-1.4 fake")
         self.srv = make_server("127.0.0.1:0", guid="g-1", version="0.1.0",
                                domains=["vib"], artifacts_dir=self.root / "artifacts",
-                               can_write=False)
+                               reports_dir=self.root / "reports", can_write=False)
         self.port = self.srv.server_address[1]
         serve_in_thread(self.srv)
 
@@ -109,6 +111,33 @@ class TestHttpApi(unittest.TestCase):
         except urllib.error.HTTPError as e:
             code = e.code
         self.assertEqual(code, 404)
+
+    def test_下载报告(self):
+        # 片段报告是大对象 ⇒ HTTP（C-11 §3.4，与 C-8 §3 定的一致）。
+        code, body = self.get("/reports/r1.pdf")
+        self.assertEqual(code, 200)
+        self.assertEqual(body, b"%PDF-1.4 fake")
+
+    def test_报告口也挡路径穿越(self):
+        """★两条下载路走的是**同一段**代码，防护不该有第二份实现。
+
+        hs 那个"离散点 Raw 恒回空"的成因正是同一个方法在两条路各写一遍、其中一条忘了。
+        """
+        for evil in ("/reports/../artifacts/model.bin", "/reports/%2e%2e/%2e%2e/etc/passwd"):
+            with self.subTest(evil=evil):
+                try:
+                    code, _ = self.get(evil)
+                except urllib.error.HTTPError as e:
+                    code = e.code
+                self.assertIn(code, (403, 404))
+
+    def test_不存在的报告回404且说的是报告不是工件(self):
+        try:
+            self.get("/reports/nope.pdf")
+            self.fail("该 404")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 404)
+            self.assertIn("报告", e.read().decode("utf-8"))
 
     def test_未知路径回404(self):
         try:

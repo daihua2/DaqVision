@@ -4,6 +4,38 @@
 > 且**改即投分发点并发函**（AI-9 §2.3、C-9 §2.1）—— 不投就会出现"我方以为改了、贵方发版还是旧的"，
 > 而且不报错。
 
+## 1.2 —— 2026-09-11
+
+**动机**：AICloud `C-11` 看完 v4/v5/meter/VFD 四套界面后，给出**七类页面**清单，其中
+4~7 四类（标注工作台 / 训练集与知识库 / 训练任务与模型工件 / 片段归档与报告）要我方出端点。
+
+**新增 23 个方法**（纯新增，1.1 的一个字没动）：
+
+| 组 | 方法 |
+| --- | --- |
+| 标注 | `ListAnnotations` `PutAnnotation` `AnnotateRange` `DeleteAnnotations` `ListLabels` |
+| 训练集 | `ListDatasets` `PutDataset` `DeleteDataset` `CopyDataset` |
+| 样本 | `ListSamples` `AddSamples` `RemoveSamples` `CopySamples` |
+| 工件 | `ListArtifacts` `ActivateArtifact` `DeleteArtifact` |
+| 训练任务 | `ListTrainJobs` `GetTrainJob` |
+| 片段与报告 | `ListSegments` `PutSegment` `DeleteSegment` `ListReports` `RediagnoseSegment` |
+
+**四条语义在库层落死**（不是靠调用方自觉）：① 标注 ≠ 样本；② 移出 ≠ 删除（`RemoveSamples`
+只解关系，原始标注一动不动）；③ 标签不枚举（没有标签表，`ListLabels` 从数据聚合）；
+④ 训练是可查询状态的任务，且**终态不可覆盖**。
+外加我方一条：**样本上的标签是入集那一刻的快照**，不跟随标注改动。
+
+**质量码订正**：`CONFIG_INCOMPLETE` 出向从 `-1007 QualityOutofService` 改为
+**`-1001 QualityConfigError`**。理由见 `C-10 §2`（`-1007` 在 hs 读路径里已是"采集中断"，
+与"去补台账"的处置方向正相反）。我方已核：hs 源码从没往数据面写过 `-1001`，这个码是干净的。
+
+**本版故意没开的两件**（不是遗漏）：`StartTraining`（训练执行未落，
+**不给一个永远 pending 的口** —— 那比没有更坏）、报告**生成**（等 LLM 出网定；
+存储与下载已就位）。
+
+**大对象 HTTP**：新增 `GET /reports/<path>`，与 `GET /artifacts/<path>` **走同一段代码**
+（含路径穿越防护 —— 复制一份就等于给它一次退化的机会）。
+
 ## 1.1 —— 2026-09-11
 
 **动机**：落第一个算法域（低频振动）时发现的真缺口 —— ISO 10816-3 烈度判级要知道

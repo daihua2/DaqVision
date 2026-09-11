@@ -48,7 +48,10 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/health":
             return self._health()
         if path.startswith("/artifacts/"):
-            return self._artifact(path[len("/artifacts/"):])
+            return self._download(self.ctx["artifacts_dir"], path[len("/artifacts/"):], "工件")
+        if path.startswith("/reports/"):
+            # 片段报告（`C-11 §3.4`：报告是大对象 ⇒ HTTP，与 C-8 定的一致）。
+            return self._download(self.ctx["reports_dir"], path[len("/reports/"):], "报告")
         self._err(404, f"没有这个路径: {path}")
 
     def _health(self):
@@ -62,13 +65,15 @@ class _Handler(BaseHTTPRequestHandler):
             "writePath": "ready" if c["can_write"] else "未配置（结论不回流）",
         })
 
-    def _artifact(self, rel: str):
-        """下载模型工件等大对象。
+    def _download(self, root: Path, rel: str, what: str):
+        """下载大对象（工件 / 报告）。**两条路走同一段代码**。
 
-        ★路径穿越防护：解析成绝对路径后必须仍在工件根之下。
+        ★为什么不各写一遍：这段里有路径穿越防护，复制一份就等于给了它一次退化的机会 ——
+          hs 那个"离散点 Raw 恒回空"的缺陷，成因正是同一个方法在两条路各写一遍、其中一条忘了。
+
+        ★路径穿越防护：解析成绝对路径后必须仍在根之下。
         `..` 这类在 URL 里是**合法字符**，不防就等于把整个文件系统开出去。
         """
-        root: Path = self.ctx["artifacts_dir"]
         try:
             target = (root / rel).resolve()
             root_resolved = root.resolve()
@@ -77,7 +82,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             return self._err(400, "路径非法")
         if not target.is_file():
-            return self._err(404, "没有这个工件")
+            return self._err(404, "没有这个" + what)
 
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         size = target.stat().st_size
@@ -92,14 +97,17 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir: Path,
-                can_write: bool) -> ThreadingHTTPServer:
+                can_write: bool, reports_dir: Path | None = None) -> ThreadingHTTPServer:
     host, _, port = listen.rpartition(":")
     artifacts_dir = Path(artifacts_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir = Path(reports_dir) if reports_dir else artifacts_dir.parent / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     handler = type("_Bound", (_Handler,), {"ctx": {
         "guid": guid, "version": version, "domains": domains,
-        "artifacts_dir": artifacts_dir, "can_write": can_write,
+        "artifacts_dir": artifacts_dir, "reports_dir": reports_dir,
+        "can_write": can_write,
     }})
     srv = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler)
     srv.daemon_threads = True

@@ -29,7 +29,10 @@ from .hsclient import HsClient, HsConfig
 from .identity import SystemGuid
 from .logstore import LogStore, LogStoreHandler
 from .pointmap import PointMap
+from .runner import run_domain
 from .scheduler import Scheduler
+from .types import Frame
+from .workbench import Workbench
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,10 @@ class Service:
         self.logstore = LogStore(capacity=cfg.log_capacity)
         self._stop = threading.Event()
 
+    def stop(self) -> None:
+        """叫停。嵌进别的进程时用这个，别去碰内部的 Event。"""
+        self._stop.set()
+
     def run(self) -> int:
         cfg = self.cfg
         _setup_logging(self.logstore)
@@ -80,6 +87,8 @@ class Service:
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
         points = PointMap(cfg.data_dir / "points.db")
         bindings = BindingStore(cfg.data_dir / "bindings.db")
+        # 工作台：标注/训练集/样本/工件/任务/片段。**平台级资产**，与点表同级同库规矩。
+        workbench = Workbench(cfg.data_dir / "workbench.db")
 
         # ④ hs 连接与调度
         can_write = cfg.can_write()
@@ -108,10 +117,35 @@ class Service:
             logger.warning("跳过调度启动（无写路径）")
 
         # ⑤ 对外两口
+        def rediagnose(seg):
+            """对一个归档片段再判别一次（`C-11 §3.4`）。
+
+            ★**不写回实时库**：回溯判别问的是"当时若用现在的模型会怎样"，
+              写回去就把历史改写成了从没发生过的样子。
+            """
+            loaded_dom = domains.get(seg.domain)
+            if loaded_dom is None:
+                raise RuntimeError(f"域 {seg.domain} 未装载，无法回溯判别")
+            b = bindings.get(seg.domain, seg.binding)
+            if b is None:
+                raise RuntimeError(
+                    f"{seg.domain}/{seg.binding} 没有绑定 —— 不知道该取哪些点，无法回溯判别")
+            frame = Fetcher(client).fetch(b, seg.t_to)
+            # 片段的窗口就是片段本身的时间范围，不是绑定上配的那个 window_sec。
+            frame = Frame(domain=frame.domain, binding=frame.binding,
+                          t_start=seg.t_from, t_end=seg.t_to,
+                          channels=frame.channels, params=frame.params)
+            res = run_domain(loaded_dom, frame)
+            names = {o.key: o.display for o in loaded_dom.declaration.outputs}
+            note = ("用当前配置与模型重跑；**未写回实时库**"
+                    if res.ok else f"模块没跑完（{res.error}），下面是坏值锚点；未写回实时库")
+            return [(f, names.get(f.key, f.key)) for f in res.findings], note
+
         svc = api.ApiService(guid=guid, version=VERSION, logstore=self.logstore,
                              domains=domains, bindings=bindings, load_errors=load_errors,
                              # 绑定一变就重新同步：建点、推快照、起线程。
-                             on_bindings_changed=(sched.sync if can_write else None))
+                             on_bindings_changed=(sched.sync if can_write else None),
+                             workbench=workbench, rediagnose=rediagnose)
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
                              handlers=(api.build_handler(svc),))
         if server.add_insecure_port(cfg.api_listen) == 0:
@@ -122,13 +156,21 @@ class Service:
 
         http = httpapi.make_server(
             cfg.http_listen, guid=guid, version=VERSION, domains=list(domains),
-            artifacts_dir=cfg.data_dir / "artifacts", can_write=can_write)
+            artifacts_dir=cfg.data_dir / "artifacts",
+            reports_dir=cfg.data_dir / "reports", can_write=can_write)
         httpapi.serve_in_thread(http)
         logger.warning("大对象 HTTP 监听 %s", cfg.http_listen)
 
         # ⑥ 等停
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(sig, lambda *_: self._stop.set())
+        # ★`signal.signal` **只在主线程装得上**：在别的线程调它会抛 ValueError。
+        #   不接住的话，两个口都已经起好了，却被这一句掀翻 —— 现象是"服务起来了又没起来"，
+        #   日志里最后一行还是"监听 …"，极难看出真因。（本条由整机用例真起进程时逮到。）
+        try:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(sig, lambda *_: self._stop.set())
+        except ValueError:
+            # 非主线程（被嵌进别的进程、或整机自检里起在线程里）—— 由宿主负责叫停。
+            logger.info("非主线程，未装信号处理；停机由宿主调 stop() 触发")
         self._stop.wait()
 
         logger.warning("收到停止信号，正在停…")
@@ -139,6 +181,7 @@ class Service:
         client.close()
         points.close()
         bindings.close()
+        workbench.close()
         logger.warning("已停止")
         return 0
 

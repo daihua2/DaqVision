@@ -89,6 +89,27 @@ class TestQualityMapping(unittest.TestCase):
         for q in COLLAPSED_TO_BAD:
             self.assertEqual(q.to_status_code(), STATUS_QUALITY_BAD)
 
+    def test_配置不全用ConfigError而不是OutOfService(self):
+        """★不是洁癖：`-1007` 在 hs 读路径里已经是"采集中断的延续"。
+
+        给同一个码，界面就分不开"去补台账"与"去查设备"，而这两件事的处置正相反。
+        由 AICloud `C-10 §2` 逮到我方 AI-12 那一版的自相矛盾（要求对端分开显示，却给同一个码）。
+        """
+        self.assertEqual(Quality.CONFIG_INCOMPLETE.to_status_code(), -1001)
+        self.assertNotEqual(Quality.CONFIG_INCOMPLETE.to_status_code(),
+                            Quality.MODEL_NOT_LOADED.to_status_code())
+
+    def test_没有两档共用同一个非折叠码(self):
+        """折叠进 QualityBad 的那几档是**刻意**共用；其余每一档必须各占一个码。
+
+        ★共用一个码 = 对端无法按码分流，只能去读文本 —— 而文本是写给人的，
+          拿它当程序判据，措辞一改对端就分错类，且不报错。
+        """
+        distinct = [q for q in Quality if q not in COLLAPSED_TO_BAD]
+        codes = [q.to_status_code() for q in distinct]
+        self.assertEqual(len(codes), len(set(codes)),
+                         f"有两档撞码了：{[(q.name, q.to_status_code()) for q in distinct]}")
+
     def test_只有OK算好(self):
         self.assertTrue(Quality.OK.is_good())
         for q in Quality:

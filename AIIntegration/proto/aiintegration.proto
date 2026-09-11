@@ -33,6 +33,54 @@ service AIIntegrationService {
   //   对齐的四条见 host/aiintegration/logstore.py 模块头：同一判据、ASCII 折叠、真实总数、背压不静默。
   rpc SubscribeLogs (LogSubscribeReq) returns (stream LogStreamItem);
   rpc QueryLogs     (LogQueryReq)     returns (QueryLogsRes);
+
+  // ═══════════ 工作台（1.2 新增，对应贵方 C-11 §2 表里 4~7 那四类页面）═══════════
+  //
+  // ★三条贯穿本段的语义，都是贵方 C-11 点名要保住的，我方在**库层**落死（不靠调用方自觉）：
+  //   ① **标注 ≠ 样本**：标注是"人对一段数据的判断"，样本是"进了某个训练集的那份拷贝"；
+  //   ② **移出 ≠ 删除**：`RemoveSamples` 只解训练集与样本的关系，**原始标注一动不动**；
+  //   ③ **标签不枚举**：没有标签表，`ListLabels` 从现有数据聚合，新标签用一次就存在。
+  //
+  // ★外加一条我方自己的：**样本上的标签是入集那一刻的快照**，不跟随标注改动 ——
+  //   否则"这个模型当初是用什么训的"就没有答案了。
+
+  // ── 标注工作台 ──
+  rpc ListAnnotations   (ListAnnotationsReq)   returns (ListAnnotationsRes);
+  rpc PutAnnotation     (PutAnnotationReq)     returns (MutateRes);
+  rpc AnnotateRange     (AnnotateRangeReq)     returns (AnnotateRangeRes);
+  rpc DeleteAnnotations (DeleteAnnotationsReq) returns (MutateRes);
+  rpc ListLabels        (ListLabelsReq)        returns (ListLabelsRes);
+
+  // ── 训练集 / 知识库 ──
+  rpc ListDatasets  (ListDatasetsReq) returns (ListDatasetsRes);
+  rpc PutDataset    (PutDatasetReq)   returns (MutateRes);
+  rpc DeleteDataset (IdReq)           returns (MutateRes);
+  rpc CopyDataset   (CopyDatasetReq)  returns (MutateRes);   // 整库复制，连样本一起
+
+  // ── 样本 ──
+  rpc ListSamples   (ListSamplesReq)   returns (ListSamplesRes);
+  rpc AddSamples    (AddSamplesReq)    returns (MutateRes);   // 把标注拷进训练集（幂等）
+  rpc RemoveSamples (RemoveSamplesReq) returns (MutateRes);   // ★只解关系，不动标注
+  rpc CopySamples   (CopySamplesReq)   returns (MutateRes);
+
+  // ── 模型工件（含基线：同一张表，`kind` 区分）──
+  rpc ListArtifacts    (ListArtifactsReq) returns (ListArtifactsRes);
+  rpc ActivateArtifact (IdReq)            returns (MutateRes);
+  rpc DeleteArtifact   (IdReq)            returns (MutateRes);   // ★激活中的不让删
+
+  // ── 训练任务（★可查询状态的任务，不是阻塞调用；C-11 §3.3）──
+  rpc ListTrainJobs (ListTrainJobsReq) returns (ListTrainJobsRes);
+  rpc GetTrainJob   (IdReq)            returns (TrainJob);
+  // ⚠️ `StartTraining` **本版未开** —— 理由见文件末尾「1.2 未开的两件」。
+
+  // ── 片段归档与报告 ──
+  rpc ListSegments  (ListSegmentsReq) returns (ListSegmentsRes);
+  rpc PutSegment    (PutSegmentReq)   returns (MutateRes);
+  rpc DeleteSegment (IdReq)           returns (MutateRes);
+  rpc ListReports   (IdReq)           returns (ListReportsRes);   // id = 片段 id
+  // 对某个片段**再判别一次**（C-11 §3.4）：取那段数据重跑一遍推理。
+  // ★**不写回实时库** —— 回溯判别是"看看当时若用现在的模型会怎样"，写回去就篡改了历史。
+  rpc RediagnoseSegment (IdReq) returns (RediagnoseRes);
 }
 
 // ───────────────────────── 身份与能力 ─────────────────────────
@@ -180,3 +228,234 @@ message QueryLogsRes {
   bool               ReachedOldest = 3;
   int64              EvictedTotal  = 4;   // 被内存环挤掉的总条数；>0 说明历史翻阅已不完整
 }
+
+
+// ═════════════════════ 工作台（1.2 新增）═════════════════════
+
+// 通用的"改了一下"回执。★`ok=false` 时 `message` 是**给人看的原因原文**，
+// 我方原样回、不吞 —— 界面要能直接把它显示出来。
+message MutateRes {
+  bool   ok      = 1;
+  int64  id      = 2;   // 新建时是新 id；批量操作时是受影响条数
+  string message = 3;
+}
+message IdReq { int64 id = 1; }
+
+// ── 标注 ──
+message Annotation {
+  int64  id      = 1;
+  string domain  = 2;
+  string binding = 3;   // 被诊断对象
+  google.protobuf.Timestamp t_from = 4;
+  google.protobuf.Timestamp t_to   = 5;
+  string label   = 6;   // ★运行期值，**不是枚举**
+  string note    = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+message ListAnnotationsReq {
+  string domain  = 1;
+  string binding = 2;
+  string label   = 3;
+  // ★时间过滤是**区间相交**，不是"被完全包含"：框一小段也该找到跨过它的那条标注。
+  google.protobuf.Timestamp t_from = 4;
+  google.protobuf.Timestamp t_to   = 5;
+  int32  offset  = 6;
+  int32  limit   = 7;   // 上限 1000；超了**报错**，不静默截断
+}
+message ListAnnotationsRes {
+  repeated Annotation items = 1;
+  int32 total = 2;      // ★过滤后的真实总数，不是本页条数
+}
+message PutAnnotationReq {
+  int64  id      = 1;   // 0 = 新建；非 0 = 改这条（改不存在的会报错，**不静默新建**）
+  string domain  = 2;
+  string binding = 3;
+  google.protobuf.Timestamp t_from = 4;
+  google.protobuf.Timestamp t_to   = 5;
+  string label   = 6;
+  string note    = 7;
+}
+// 按时间范围**批量**给多个对象打同一个标签。★一个事务：要么都进，要么一条都不进。
+message AnnotateRangeReq {
+  string domain = 1;
+  repeated string bindings = 2;
+  google.protobuf.Timestamp t_from = 3;
+  google.protobuf.Timestamp t_to   = 4;
+  string label = 5;
+  string note  = 6;
+}
+message AnnotateRangeRes {
+  bool   ok = 1;
+  repeated int64 ids = 2;
+  string message = 3;
+}
+message DeleteAnnotationsReq { repeated int64 ids = 1; }
+
+// 现有标签 + 各自条数。**从数据聚合，没有标签表**。
+message ListLabelsReq {
+  string domain     = 1;
+  int64  dataset_id = 2;   // 给了就按该训练集里的样本聚合；否则按域里的标注聚合
+}
+message LabelCount { string label = 1; int32 count = 2; }
+message ListLabelsRes { repeated LabelCount items = 1; }
+
+// ── 训练集与样本 ──
+message Dataset {
+  int64  id     = 1;
+  string domain = 2;
+  string name   = 3;
+  string note   = 4;
+  int32  sample_count = 5;
+  string created_at   = 6;
+  string updated_at   = 7;
+}
+message ListDatasetsReq { string domain = 1; }
+message ListDatasetsRes { repeated Dataset items = 1; }
+message PutDatasetReq {
+  int64  id     = 1;   // 0 = 新建
+  string domain = 2;
+  string name   = 3;   // 域内唯一；重名会被拒并说清是哪个名字撞了
+  string note   = 4;
+}
+message CopyDatasetReq { int64 id = 1; string new_name = 2; }
+
+message Sample {
+  int64  id            = 1;
+  int64  dataset_id    = 2;
+  int64  annotation_id = 3;   // 0 = 来源标注已被删（★样本与它的标签仍在，训练历史不被改写）
+  string binding       = 4;
+  google.protobuf.Timestamp t_from = 5;
+  google.protobuf.Timestamp t_to   = 6;
+  string label         = 7;   // ★入集那一刻的快照
+  string created_at    = 8;
+}
+message ListSamplesReq {
+  int64  dataset_id = 1;
+  string label      = 2;
+  string binding    = 3;
+  int32  offset     = 4;
+  int32  limit      = 5;
+}
+message ListSamplesRes { repeated Sample items = 1; int32 total = 2; }
+message AddSamplesReq    { int64 dataset_id = 1; repeated int64 annotation_ids = 2; }
+message RemoveSamplesReq { int64 dataset_id = 1; repeated int64 sample_ids = 2; }
+message CopySamplesReq   { repeated int64 sample_ids = 1; int64 to_dataset = 2; }
+
+// ── 工件 ──
+message Artifact {
+  int64  id      = 1;
+  string domain  = 2;
+  // model | baseline | image …★**不是封闭枚举**：新种类随时加，请按字符串透传，别写死分支。
+  string kind    = 3;
+  string binding = 4;   // 空 = 全域通用（v5 是每传感器一个模型，故常态是具体对象）
+  string name    = 5;
+  string algo    = 6;
+  int64  dataset_id    = 7;
+  int32  sample_count  = 8;
+  int32  feature_count = 9;
+  // ★准确率**可空**：没测过就是没测过。`has_accuracy=false` 时请显示"未测"，**别显示 0**。
+  double accuracy      = 10;
+  bool   has_accuracy  = 11;
+  bool   active        = 12;
+  // 下载路径（相对工件根）。**大对象走 HTTP**：`GET /artifacts/<path>`，见 C-8 §3。
+  string path    = 13;
+  int64  size    = 14;
+  string sha256  = 15;
+  string meta_json  = 16;
+  string created_at = 17;
+}
+message ListArtifactsReq {
+  string domain  = 1;
+  string kind    = 2;
+  string binding = 3;
+  bool   binding_set = 4;   // ★true 才按 binding 过滤；否则空串会被当成"全域通用"那一档
+  int32  offset  = 5;
+  int32  limit   = 6;
+}
+message ListArtifactsRes { repeated Artifact items = 1; int32 total = 2; }
+
+// ── 训练任务 ──
+message TrainJob {
+  int64  id         = 1;
+  string domain     = 2;
+  int64  dataset_id = 3;
+  string binding    = 4;
+  string algo       = 5;
+  // pending | running | ready | failed | canceled。★**终态不可覆盖**：
+  //   已失败的任务被改成"就绪"，界面上就再也看不出它失败过。
+  string status     = 6;
+  string message    = 7;   // ★失败原因在这，不是只打日志
+  double progress   = 8;   // 0~1
+  int32  sample_count = 9;
+  int64  artifact_id  = 10;
+  string created_at   = 11;
+  string started_at   = 12;
+  string finished_at  = 13;
+}
+message ListTrainJobsReq { string domain = 1; string status = 2; int32 offset = 3; int32 limit = 4; }
+message ListTrainJobsRes { repeated TrainJob items = 1; int32 total = 2; }
+
+// ── 片段与报告 ──
+message Segment {
+  int64  id      = 1;
+  string domain  = 2;
+  string binding = 3;
+  google.protobuf.Timestamp t_from = 4;
+  google.protobuf.Timestamp t_to   = 5;
+  string name    = 6;
+  string source  = 7;
+  int32  point_count = 8;
+  string note    = 9;
+  string created_at = 10;
+}
+message ListSegmentsReq { string domain = 1; string binding = 2; int32 offset = 3; int32 limit = 4; }
+message ListSegmentsRes { repeated Segment items = 1; int32 total = 2; }
+message PutSegmentReq {
+  string domain  = 1;
+  string binding = 2;
+  google.protobuf.Timestamp t_from = 3;
+  google.protobuf.Timestamp t_to   = 4;
+  string name    = 5;
+  string source  = 6;
+  int32  point_count = 7;
+  string note    = 8;
+}
+message Report {
+  int64  id         = 1;
+  int64  segment_id = 2;
+  string kind       = 3;   // basic | deep
+  string path       = 4;   // `GET /reports/<path>`
+  int64  size       = 5;
+  string created_at = 6;
+}
+message ListReportsRes { repeated Report items = 1; }
+
+// 对片段再判别一次的结果。**不写回实时库**（回溯判别不该篡改历史）。
+message RediagnoseRes {
+  bool   ok = 1;
+  string message = 2;
+  repeated FindingItem findings = 3;
+}
+message FindingItem {
+  string key     = 1;
+  string display = 2;
+  // 值按类型三选一；**质量非 Ok 时三个都不给**（坏质量下不许有值）。
+  oneof value { double num = 3; bool flag = 4; string text = 5; }
+  // daq.StatusCode。★`-1001 QualityConfigError` = 台账没填，去补配置；
+  //   `-1007` 是采集中断，去查设备 —— **不是一回事**（订正自 AI-12 §2.2，贵方 C-10 §2 逮到）。
+  int32  status_code = 6;
+  google.protobuf.Timestamp t = 7;
+}
+
+// ═══════════ 1.2 未开的两件（不是遗漏，是"没做完就不给口"）═══════════
+//
+// 1. **`StartTraining`** —— 训练执行还没落（要先定 `Dataset`/`Artifact` 怎么交给算法模块，
+//    以及数据集怎么从实时库组装）。任务表、状态机、工件表**都已就位**，
+//    故 `ListTrainJobs` / `GetTrainJob` / `ListArtifacts` 现在就能接。
+//    ★**故意不给一个永远 pending 的 `StartTraining`** —— 那比没有更坏：
+//      界面上看着开训了，实际没人跑，而且不报错。
+//
+// 2. **报告生成** —— v5 的深度报告是 LLM 出的，而"LLM 出网"这条还没定。
+//    报告的**存储与下载已就位**（`ListReports` + HTTP `GET /reports/<path>`），
+//    缺的只是"谁来生成"。定了加一个 RPC 即可，**加方法不破兼容**。

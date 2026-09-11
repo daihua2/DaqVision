@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 import grpc
 
+from .api_workbench import WorkbenchApiMixin, method_specs
 from .apiproto import aiintegration_pb2 as pb
 from .bindings import Binding, BindingStore
 from .domains import LoadedDomain
@@ -25,7 +26,7 @@ from .logstore import LogFilter, LogLevel, LogStore
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.1"
+PROTO_VERSION = "1.2"
 
 
 def _ts(dt: datetime) -> object:
@@ -46,13 +47,16 @@ def _dt(ts) -> datetime | None:
     return ts.ToDatetime().replace(tzinfo=timezone.utc)
 
 
-class ApiService:
-    """把骨架的各件接到 gRPC 上。**本类不含业务逻辑** —— 只做协议翻译。"""
+class ApiService(WorkbenchApiMixin):
+    """把骨架的各件接到 gRPC 上。**本类不含业务逻辑** —— 只做协议翻译。
+
+    工作台那二十来口在 `api_workbench.py`（同一条纪律，只是文件分开：加一口只改一处）。
+    """
 
     def __init__(self, *, guid: str, version: str, logstore: LogStore,
                  domains: dict[str, LoadedDomain], bindings: BindingStore,
                  load_errors: list[tuple[str, str]] | None = None,
-                 on_bindings_changed=None) -> None:
+                 on_bindings_changed=None, workbench=None, rediagnose=None) -> None:
         self._guid = guid
         self._version = version
         self._logs = logstore
@@ -62,6 +66,10 @@ class ApiService:
         # ★绑定变更后必须让调度器**重新同步**：新绑定要建点、要起线程。
         #   不回调的话，界面上看着配好了、实际一拍都不走。
         self._on_changed = on_bindings_changed
+        # 工作台。★没接就是没接 —— 那几口会当场报错，**不假装成功**。
+        self._wb = workbench
+        # 回溯判别的执行器（片段 → [(Finding, 显示名)], 备注）。没接则该口如实回"只读模式"。
+        self._rediagnose = rediagnose
 
     # ── 身份与域 ──────────────────────────────────────────────────────────
     def GetInfo(self, request, context):
@@ -232,4 +240,9 @@ def build_handler(svc: ApiService) -> grpc.GenericRpcHandler:
         "QueryLogs":     _unary(svc.QueryLogs, pb.LogQueryReq, pb.QueryLogsRes),
         "SubscribeLogs": _stream(svc.SubscribeLogs, pb.LogSubscribeReq, pb.LogStreamItem),
     }
+    # 工作台那二十来口（契约 1.2）。★只在真接了 Workbench 时才注册：
+    #   注册了却没有库，调用方拿到的是内部错误堆栈；不注册拿到的是 UNIMPLEMENTED —— 后者说的是实话。
+    if getattr(svc, "_wb", None) is not None:
+        for name, (fn, req_cls, res_cls) in method_specs(pb, svc).items():
+            m[name] = _unary(fn, req_cls, res_cls)
     return grpc.method_handlers_generic_handler(SERVICE, m)

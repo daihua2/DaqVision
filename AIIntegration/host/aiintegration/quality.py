@@ -24,6 +24,7 @@ import enum
 # daq.StatusCode 里我方用到的那几个（数值取自 daqcontract.proto，勿改）。
 STATUS_OK = 1
 STATUS_QUALITY_BAD = -1000
+STATUS_QUALITY_CONFIG_ERROR = -1001
 STATUS_QUALITY_NOT_CONNECTED = -1002
 STATUS_QUALITY_OUT_OF_SERVICE = -1007
 
@@ -52,6 +53,15 @@ class Quality(enum.Enum):
     ★与"给个缺省值算出来"分开：ISO 判级的边界取决于机组类别与支承方式，
       猜错会把"该停机"说成"可长期运行"，**而且从数值上看不出来**。
       由第一个算法域（低频振动）落地时发现并补上。
+
+    ★出向映射 **`QualityConfigError(-1001)`**，不是 `-1007`。
+      订正自 AI-12 §2.2 —— 那一版写的是复用 `-1007 OutofService`，**是错的**：
+      `-1007` 在 hs 的读路径里已经是"采集中断的延续"（`historystore.proto` 那句
+      「跨坏值/采集中断的延续 → 中断码(如 -1007)」），而"采集中断"恰恰是**要去查设备**的那一类。
+      于是我方要求对端"把没填台账与设备坏了分开显示"，却给了同一个码 —— 自相矛盾。
+      由 AICloud `C-10 §2` 逮到并给出取证（他们界面按码区间三分，`-1007` 落进"坏值"，
+      与采集中断像素级一致）。**`-1001` 语义逐字对得上，且同样不必发明新 StatusCode。**
+      已核：hs 源码从没往数据面写过 `-1001`（命中全在生成的 pb.h 里），这个码是干净的。
     """
 
     INSUFFICIENT_SAMPLES = "insufficient_samples"
@@ -89,8 +99,9 @@ _TO_STATUS: dict[Quality, int] = {
     Quality.NO_INPUT: STATUS_QUALITY_NOT_CONNECTED,
     # "不在服务中" —— 语义与既有码对上（该域此刻不提供服务）。
     Quality.MODEL_NOT_LOADED: STATUS_QUALITY_OUT_OF_SERVICE,
-    # 台账没配全 ⇒ 该结论此刻确实**不提供**，与 OutOfService 语义对得上（同上一条的理由）。
-    Quality.CONFIG_INCOMPLETE: STATUS_QUALITY_OUT_OF_SERVICE,
+    # 台账没配全 ⇒ "配置错"，语义逐字对得上。★不是 -1007：那个码在 hs 读路径里
+    # 已经是"采集中断"，与本档的处置方向（去补配置 vs 去查设备）正相反。见枚举处。
+    Quality.CONFIG_INCOMPLETE: STATUS_QUALITY_CONFIG_ERROR,
     # ↓ 以下【待批】：无语义确实对得上的既有码，一律折叠 QualityBad，不挪用别的码。
     Quality.INPUT_BAD: STATUS_QUALITY_BAD,
     Quality.INSUFFICIENT_SAMPLES: STATUS_QUALITY_BAD,
