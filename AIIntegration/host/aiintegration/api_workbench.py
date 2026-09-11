@@ -198,7 +198,9 @@ class WorkbenchApiMixin:
                 accuracy=a.accuracy if a.accuracy is not None else 0.0,
                 has_accuracy=a.accuracy is not None,
                 active=a.active, path=a.path, size=a.size, sha256=a.sha256,
-                meta_json=a.meta_json, created_at=a.created_at)
+                meta_json=a.meta_json, created_at=a.created_at,
+                origin=a.origin, source=a.source,
+                training_data=a.training_data, license=a.license)
         return res
 
     @_guard

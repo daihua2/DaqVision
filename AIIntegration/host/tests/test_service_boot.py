@@ -81,7 +81,7 @@ class TestServiceBoot(unittest.TestCase):
 
     def test_没有写路径也起得来且域装上了(self):
         info = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
-        self.assertEqual(info.proto_version, "1.4")
+        self.assertEqual(info.proto_version, "1.5")
         self.assertEqual(info.domain_count, 1)
         self.assertTrue(info.guid, "首启该自己生成 guid")
 

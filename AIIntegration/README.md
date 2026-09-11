@@ -442,7 +442,7 @@ grpcio 是 C 扩展、按"架构 × Python 主次版本"分 wheel ⇒ 那样出�
 | guid 落盘 | `/home/Project/AIIntegration/system.guid` 与 `/etc/aiintegration/system.guid`，两处一致 |
 | 单元 | `aiintegration.service`，enabled + active。★停启一律 `systemctl` |
 | 口 | gRPC `127.0.0.1:50070`、HTTP `127.0.0.1:50071`（只绑回环） |
-| 运行形态 | **只读**：未配写路径（无证书），结论不回流；调度未起 |
+| 运行形态 | **写路径已开**（2026-09-12 00:03，用户授权）：drop-in `aiintegration.service.d/override.conf` = `Environment=AII_HS_WRITE=192.168.1.135:5400`。开时绑定 0 条 ⇒ 只推了空快照；**点建得出、值写得进、来源 guid 三条仍待第一个绑定验证**（`AI-21`） |
 | 环境 | 独立 venv `/home/Project/AIIntegration/.venv`：Python 3.10.12 / grpcio 1.83.1 / protobuf 7.36.1 |
 | 资源 | RSS 41 MB，10 线程 |
 | 发布件 | `aiintegration-amd64-cpu-py3.10.tar.gz`，sha256 `9ec089079f34689d7e8d5f7dc5c5c2833ca7ef2a8848786348d03944afaeb325`（两端核对一致） |
@@ -469,9 +469,11 @@ grpcio 是 C 扩展、按"架构 × Python 主次版本"分 wheel ⇒ 那样出�
 
 ### 13.4 仍待办
 
-- **写路径**：等 AICloud 签发客户端证书（投到 `cert/`：`ca.cer` / `client.cer` / `client.key`，文件名写死）**＋ 内部授权**。
-  开写路径 = 开始往实时库写结论点（每绑定 12 个），不自动开。`AI-18 §3`。
-- AICloud 签发前**用 `GetInfo` 现取 guid 核对**（不照抄函件）—— 已在 `AI-18 §3.2` 请求。
+- ~~写路径~~：证书 `C-14` 已签、我方独立核过（`AI-20 §1`）；**2026-09-12 已开**（`AI-21`）。
+  开法：先查绑定/点表/工作台全为 0 → 加 drop-in → `daemon-reload` → **只重启本服务** → 核 `/health` writePath=ready、
+  日志 `结论点快照已推送：0 个点`、ERROR 0 行、**10 个端口进程号与基线全不变**。回退 = 删 drop-in → reload → restart。
+- **仍待**：第一个绑定建起后核三条 —— 点建得出、值写得进、实时库里来源 guid 是本服务的（`AI-21 §3`，请 AICloud 同时核）。
+- 部署的仍是 1.4 之前的代码（`GetInfo` 报 proto 1.3）：无事件入口 / 视觉域 / 骨架不变式 / 工件导入。更新要再授权。
 
 
 ---
@@ -582,3 +584,43 @@ grpcio 是 C 扩展、按"架构 × Python 主次版本"分 wheel ⇒ 那样出�
 ★`AI-13` 写"`-1001` 是干净的"时**只查了实时库、没查 daqgate**。好在语义同族不有害，但结论下早了。
 **规矩**：判一个码干不干净，要查**所有**会往数据面写码的一方。
 
+---
+
+## 16. 外部模型导入为工件（2026-09-12，契约 1.5）
+
+至今工件只从训练产出；视觉域要用的模型却是**外面训好的**。原 VFD 的取证（模型拿代码合成的数据训、服务器上没有训练代码）
+说明：代码救不了来历有问题的模型，**但能让模型带着来历进来、并且看得见**。这是本节唯一想做到的事。
+
+### 16.1 四条规矩（`artifact_import.py`）
+
+1. **名字、来源、训练数据说明、许可 必填**。不清楚就明写"未知" —— 写"未知"是如实，留空是回避，留空一律 400。
+   库层 `add_artifact(origin="imported")` 再挡一道（第二道不靠调用方自觉）。
+2. 导入即 `origin=imported`。**没有"已核实"状态** —— 本系统没有核实外部训练数据的手段，有了这个状态就会有人去点。
+3. **域先校验**（可选钩子 `validate_artifact(kind, blob) -> (拒收原因, 事实)`）：不过 422，校验本身抛异常也算不过；
+   域没提供校验照收，但回执 `validated=false` 明说。域读出的事实（模型元数据里的描述/版本/许可/类别表）**原样存进工件** ——
+   "文件名 yolo11n、元数据写 YOLOv5n"这种不一致就留在记录里看得见。
+4. **不自动启用**。同一文件（域+种类+sha256）重复导入 409 并指明已有工件。
+
+### 16.2 为什么只走服务进程
+
+工作台库"服务进程是唯一写者"（训练执行器重启时据此收拾遗留任务）。所以导入只有一个口：
+HTTP `POST /artifacts/import/{domain}?name=…&source=…&training_data=…&license=…`，正文是工件字节；
+命令行 `python -m aiintegration.admin import-artifact|list-artifacts|activate-artifact` **只是这个口 / 控制面的客户端**，
+不开库。`activate-artifact` 必须带 `--yes`。
+
+### 16.3 训练产出也补上来历
+
+`trainer._store` 由骨架写 `origin=trained`、`source=训练任务 N`、`training_data=训练集名 + 样本数 + 标签分布 + 跳过数` ——
+训练产出的来历本系统**确实知道**，不靠域自觉。
+
+★**老库补列**：`CREATE TABLE IF NOT EXISTS` 对已存在的表一个字都不改，新列不会自己长出来 —— 读的时候才 `no such column`，
+而且是在现场（AISERVER 上就有一份 1.4 时代的库）。`Workbench._migrate()` 开库即补四列；老工件按训练集号回填一句
+"训练集 id=N（1.5 之前产出，未记录详情）"，**不编造细节**。
+
+### 16.4 契约与验证
+
+- `Artifact` 加 `origin=18 / source=19 / training_data=20 / license=21`（纯增量），`PROTO_VERSION` 1.5，CHANGELOG 有使用说明三条。
+- 测试 `test_artifact_import.py`（导入器、库层第二道、老库迁移、训练来历、HTTP 口含中文参数与 413 不读正文、控制面带出来历、命令行）
+  + `test_domain_vision_helmet.py::TestValidateArtifact`（合法模型 / 类别表不对仍交回事实 / 坏字节 / 非模型种类）。
+- 三环境（3.12 零依赖 / 3.10 零依赖 / 3.10 视觉）各 **405 个用例全绿**（前两者跳过 27 个视觉用例）；
+  **变异 17 处全部被抓住**（必填、去重、域拒收、校验异常、未校验提示、事实入库、上限、老库补列、库层第二道、读侧、训练来历、控制面、HTTP 上限与路由、`--yes`、视觉域两处），累计 107。

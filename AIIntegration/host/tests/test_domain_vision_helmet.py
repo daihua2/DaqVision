@@ -249,6 +249,30 @@ class TestBadQuality(HelmetBase):
         self.assertAllBad(self.infer(image=False), Quality.NO_INPUT, "未收到图片")
 
 
+class TestValidateArtifact(HelmetBase):
+    """契约 1.5：外部导入时由骨架调用的校验钩子。"""
+
+    def test_合法模型通过并交回元数据事实(self):
+        reason, facts = self.dom.validate_artifact("model", build_model(SCENE))
+        self.assertEqual(reason, "")
+        self.assertIn("hat", facts["names"])
+        self.assertEqual(facts["input_size"], "640x640")
+
+    def test_类别表不对拒收但事实照交(self):
+        blob = build_model(SCENE, names={0: "a", 1: "b", 2: "c", 3: "d", 4: "e"})
+        reason, facts = self.dom.validate_artifact("model", blob)
+        self.assertIn("不是安全帽模型", reason)
+        self.assertIn("names", facts, "拒收也把读到的事实交回，方便人看清是什么模型")
+
+    def test_坏字节拒收(self):
+        reason, _ = self.dom.validate_artifact("model", b"not an onnx model")
+        self.assertIn("不是可用的", reason)
+
+    def test_非模型种类拒收(self):
+        reason, _ = self.dom.validate_artifact("baseline", build_model(SCENE))
+        self.assertIn("kind=model", reason)
+
+
 class TestThroughSkeleton(HelmetBase):
     def test_走骨架校验路径所有结论都被收下(self):
         from aiintegration.runner import run_domain

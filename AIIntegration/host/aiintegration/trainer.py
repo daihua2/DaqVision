@@ -354,7 +354,13 @@ class Trainer:
             sample_count=len(dataset), feature_count=art.feature_count,
             accuracy=art.accuracy, path=rel, size=len(blob),
             sha256=hashlib.sha256(blob).hexdigest(),
-            meta_json=json.dumps(meta, ensure_ascii=False))
+            meta_json=json.dumps(meta, ensure_ascii=False),
+            # ★来历由骨架写，不靠域自觉：训练产出的来历本系统**确实知道**。
+            origin="trained", source=f"训练任务 {job.id}",
+            training_data=(f"训练集「{dataset.name}」（id={job.dataset_id}）{len(dataset)} 条样本，"
+                           f"标签分布 {dataset.label_counts()}"
+                           + (f"；另有 {len(skipped)} 条样本取不到数据、未参与训练" if skipped else "")),
+            license="")
 
 
 def _safe(name: str) -> str:

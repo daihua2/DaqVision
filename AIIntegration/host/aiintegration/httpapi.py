@@ -18,8 +18,9 @@ import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
+from .artifact_import import MAX_IMPORT_BYTES, ImportRejected
 from .events import MAX_BLOB_BYTES, EventError
 
 logger = logging.getLogger(__name__)
@@ -60,9 +61,34 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = unquote(urlparse(self.path).path)
         parts = [p for p in path.split("/") if p]
+        if len(parts) == 3 and parts[:2] == ["artifacts", "import"]:
+            return self._import_artifact(parts[2])
         if len(parts) == 3 and parts[0] == "infer":
             return self._infer(parts[1], parts[2])
         self._err(404, f"没有这个路径: {path}")
+
+    def _import_artifact(self, domain: str):
+        """`POST /artifacts/import/{域}?name=…&source=…&training_data=…&license=…`：正文是工件字节。"""
+        importer = self.ctx.get("importer")
+        if importer is None:
+            return self._err(503, "本实例未接工件导入")
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._err(411, "必须带 Content-Length（不收分块上传）")
+        if length > MAX_IMPORT_BYTES:
+            self.close_connection = True
+            return self._err(413, f"工件 {length} 字节，超过上限 {MAX_IMPORT_BYTES} 字节")
+        data = self.rfile.read(length) if length > 0 else b""
+        query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+        fields = {k: v[0] for k, v in query.items() if v}
+        try:
+            res = importer.import_blob(domain=domain, data=data, fields=fields)
+        except ImportRejected as exc:
+            return self._err(exc.status, exc.message)
+        self._json({"ok": True, "artifact_id": res.artifact_id, "path": res.path, "size": res.size,
+                    "sha256": res.sha256, "validated": res.validated, "facts": res.facts,
+                    "warnings": res.warnings})
 
     def _infer(self, domain: str, binding: str):
         """`POST /infer/{域}/{绑定}`：正文是图片原始字节。来一张算一次。
@@ -179,7 +205,7 @@ def _finding_json(f) -> dict:
 
 def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir: Path,
                 can_write: bool, reports_dir: Path | None = None,
-                events=None) -> ThreadingHTTPServer:
+                events=None, importer=None) -> ThreadingHTTPServer:
     host, _, port = listen.rpartition(":")
     artifacts_dir = Path(artifacts_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +215,7 @@ def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir:
     handler = type("_Bound", (_Handler,), {"ctx": {
         "guid": guid, "version": version, "domains": domains,
         "artifacts_dir": artifacts_dir, "reports_dir": reports_dir,
-        "can_write": can_write, "events": events,
+        "can_write": can_write, "events": events, "importer": importer,
     }})
     srv = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler)
     srv.daemon_threads = True

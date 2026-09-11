@@ -190,6 +190,29 @@ class HelmetDetection(Domain):
             ),
         )
 
+    # ── 外部工件校验（导入时由骨架调用）─────────────────────────────────
+    def validate_artifact(self, kind: str, blob: bytes) -> tuple[str, dict[str, str]]:
+        """能不能当本域的检测模型用。返回 (拒收原因, 从模型元数据读出的事实)。
+
+        ★事实原样交回存进工件 —— 模型文件自带的描述/版本/许可，可能与导入时人填的**不一致**
+          （如文件名 yolo11n、元数据写 YOLOv5n），两样都留着才看得见。
+        """
+        if kind != "model":
+            return f"本域只接受 kind=model 的工件，收到 {kind!r}", {}
+        try:
+            det = _YoloOnnx(bytes(blob))
+        except Exception as exc:  # noqa: BLE001
+            return f"不是可用的 YOLO 形 ONNX：{type(exc).__name__}: {exc}", {}
+        meta = det.sess.get_modelmeta().custom_metadata_map
+        facts = {k: str(meta[k])[:300] for k in ("description", "version", "license", "date", "imgsz")
+                 if k in meta}
+        facts["names"] = str(det.names)[:300]
+        facts["input_size"] = f"{det.imgsz[1]}x{det.imgsz[0]}"
+        missing = [c for c in REQUIRED_CLASSES if c not in det.names.values()]
+        if missing:
+            return (f"类别表 {sorted(det.names.values())} 缺 {missing} —— 不是安全帽模型", facts)
+        return "", facts
+
     # ── 推理 ──────────────────────────────────────────────────────────────
     def infer(self, frame: Frame) -> list[Finding]:
         blob = frame.blobs.get("image")

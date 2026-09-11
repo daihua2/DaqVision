@@ -25,6 +25,7 @@ from .artifactcache import ActiveArtifacts
 from .bindings import BindingStore
 from .config import Config
 from .domains import discover
+from .artifact_import import ArtifactImporter
 from .events import EventRunner
 from .fetch import Fetcher
 from .hsclient import HsClient, HsConfig
@@ -174,7 +175,10 @@ class Service:
         http = httpapi.make_server(
             cfg.http_listen, guid=guid, version=VERSION, domains=list(domains),
             artifacts_dir=cfg.data_dir / "artifacts",
-            reports_dir=cfg.data_dir / "reports", can_write=can_write, events=events)
+            reports_dir=cfg.data_dir / "reports", can_write=can_write, events=events,
+            # 外部工件导入：只在本进程里写工作台库（"唯一写者"前提），命令行工具只是 HTTP 客户端。
+            importer=ArtifactImporter(workbench=workbench, domains=domains,
+                                      artifacts_dir=cfg.data_dir / "artifacts"))
         httpapi.serve_in_thread(http)
         logger.warning("大对象 HTTP 监听 %s", cfg.http_listen)
 

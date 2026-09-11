@@ -130,9 +130,15 @@ CREATE TABLE IF NOT EXISTS artifacts (
     size          INTEGER NOT NULL DEFAULT 0,
     sha256        TEXT    NOT NULL DEFAULT '',
     meta_json     TEXT    NOT NULL DEFAULT '{}',
-    created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    -- 来历（契约 1.5）。老库由 _migrate 补列。
+    origin        TEXT    NOT NULL DEFAULT 'trained',   -- trained | imported
+    source        TEXT    NOT NULL DEFAULT '',
+    training_data TEXT    NOT NULL DEFAULT '',
+    license       TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_art_scope ON artifacts(domain, kind, binding);
+CREATE INDEX IF NOT EXISTS ix_art_sha ON artifacts(domain, kind, sha256);
 -- ★同一 (域, 种类, 对象) 只允许一个激活件。用**部分唯一索引**在库层挡住，
 --   不靠应用层"记得先取消上一个" —— 那种约束迟早被并发或异常路径绕过去。
 CREATE UNIQUE INDEX IF NOT EXISTS ux_art_active
@@ -254,6 +260,12 @@ class Artifact:
     sha256: str
     meta_json: str
     created_at: str = ""
+    origin: str = "trained"
+    """`trained`（本系统训练面产出）/ `imported`（外部导入）。"""
+
+    source: str = ""
+    training_data: str = ""
+    license: str = ""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -337,7 +349,30 @@ class Workbench:
         #   删数据集会留下一堆指向空的样本，而且不报错。
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """老库补列（契约 1.5 的工件来历四列）。
+
+        ★`CREATE TABLE IF NOT EXISTS` 对已存在的表**一个字都不改** —— 新列不会自己长出来，
+          读的时候才炸（`no such column`），而且是在现场。AISERVER 上已有一份 1.4 时代的库。
+        """
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(artifacts)")}
+        added = []
+        for col, ddl in (("origin", "TEXT NOT NULL DEFAULT 'trained'"),
+                         ("source", "TEXT NOT NULL DEFAULT ''"),
+                         ("training_data", "TEXT NOT NULL DEFAULT ''"),
+                         ("license", "TEXT NOT NULL DEFAULT ''")):
+            if col not in have:
+                self._conn.execute(f"ALTER TABLE artifacts ADD COLUMN {col} {ddl}")
+                added.append(col)
+        if added:
+            # 1.5 之前的工件只可能是训练产出；来历按训练集号回填一句，**不编造细节**。
+            self._conn.execute(
+                "UPDATE artifacts SET training_data = '训练集 id=' || dataset_id || '（1.5 之前产出，未记录详情）' "
+                "WHERE origin = 'trained' AND training_data = '' AND dataset_id IS NOT NULL")
+            logger.info("工件表已补列 %s（老库升级）", added)
 
     def close(self) -> None:
         with self._lock:
@@ -698,16 +733,22 @@ class Workbench:
                      binding: str = "", algo: str = "", dataset_id: int | None = None,
                      sample_count: int = 0, feature_count: int = 0,
                      accuracy: float | None = None, path: str = "", size: int = 0,
-                     sha256: str = "", meta_json: str = "{}") -> int:
+                     sha256: str = "", meta_json: str = "{}",
+                     origin: str = "trained", source: str = "", training_data: str = "",
+                     license: str = "") -> int:
         if not domain or not name:
             raise WorkbenchError("工件必须有域与名字")
+        if origin == "imported" and not (source.strip() and training_data.strip() and license.strip()):
+            # 第二道（第一道在 artifact_import）：来历不明的外部模型不许进库。
+            raise WorkbenchError("外部导入的工件必须写明来源、训练数据说明与许可（不清楚就写「未知」）")
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO artifacts(domain,kind,binding,name,algo,dataset_id,sample_count,"
-                "feature_count,accuracy,path,size,sha256,meta_json)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "feature_count,accuracy,path,size,sha256,meta_json,origin,source,training_data,license)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (domain, kind, binding, name, algo, dataset_id, sample_count,
-                 feature_count, accuracy, path, size, sha256, meta_json))
+                 feature_count, accuracy, path, size, sha256, meta_json,
+                 origin, source, training_data, license))
             self._conn.commit()
         return int(cur.lastrowid)
 
@@ -756,6 +797,14 @@ class Workbench:
                 f"SELECT * FROM artifacts{sql_where} ORDER BY id DESC LIMIT ? OFFSET ?",
                 (*args, limit, offset)).fetchall()
         return Page([_to_artifact(r) for r in rows], total, offset, limit)
+
+    def find_artifact_by_sha256(self, domain: str, kind: str, sha256: str) -> Artifact | None:
+        """同域同种类里有没有字节相同的工件。导入去重用。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM artifacts WHERE domain=? AND kind=? AND sha256=? ORDER BY id LIMIT 1",
+                (domain, kind, sha256)).fetchone()
+        return None if row is None else _to_artifact(row)
 
     def delete_artifact(self, artifact_id: int) -> bool:
         """删工件记录。★**激活中的不让删** —— 删了之后那个对象就在"用着一个不存在的模型"。"""
@@ -885,7 +934,9 @@ def _to_artifact(r: sqlite3.Row) -> Artifact:
                     sample_count=int(r["sample_count"]), feature_count=int(r["feature_count"]),
                     accuracy=None if r["accuracy"] is None else float(r["accuracy"]),
                     active=bool(r["active"]), path=r["path"], size=int(r["size"]),
-                    sha256=r["sha256"], meta_json=r["meta_json"], created_at=r["created_at"])
+                    sha256=r["sha256"], meta_json=r["meta_json"], created_at=r["created_at"],
+                    origin=r["origin"], source=r["source"], training_data=r["training_data"],
+                    license=r["license"])
 
 
 def _to_job(r: sqlite3.Row) -> TrainJob:

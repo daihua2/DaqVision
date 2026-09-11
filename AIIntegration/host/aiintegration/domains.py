@@ -60,6 +60,11 @@ class Domain:
     # ── 可选 ──────────────────────────────────────────────────────────────
     # 不实现 train，即表示本域不支持训练（能力位 `train` 自动不出现）。
     # def train(self, dataset, report): ...
+    #
+    # 声明了能力位 `artifact` 的域可以接收外部导入的工件。强烈建议实现校验：
+    # def validate_artifact(self, kind: str, blob: bytes) -> tuple[str, dict[str, str]]:
+    #     返回 (拒收原因, 从文件里读出的事实)。原因为空 = 收；事实会原样存进工件（如模型元数据里的许可）。
+    #     不实现也能导入，但回执会明说"没经过能不能用的检查"。
 
     def capabilities(self) -> set[str]:
         """缺省按"实现了哪些方法"推断。模块可覆盖它显式声明（如 `annotate`）。"""
