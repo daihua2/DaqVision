@@ -82,4 +82,39 @@ def run_domain(loaded: LoadedDomain, frame: Frame) -> RunResult:
             continue
         kept.append(f)
 
-    return RunResult(kept, True)
+    # ★骨架硬规则：**这一帧没有任何可信输入，就不许出质量 OK 的结论**。
+    #
+    #   来由（2026-09-11 对原 v5 真跑实测）：阶次规则诊断在总幅值为 0（=没有数据）时
+    #   把 1X 占比写死成 100%，结果判出「正常 0.71」，支持理由里还写着"1X 占比很高"——
+    #   **从没有数据里编出一个健康结论**。这类错单看结论完全像真的，事后查不出来。
+    #
+    #   新写的两个域自己守住了这条，但骨架此前**不查**：下一个域作者照样可能写出来。
+    #   所以落在骨架：违规的 OK 结论改落坏质量（值清空），并大声记错。
+    #
+    #   ★判据只看"整帧有没有可信输入"（任一 OK 样本 / 任一图片）。它挡的是**完全没数据**
+    #     这一类，挡不住"必填那一路坏了、别的路还好"——那一类仍要靠域自己看质量码。
+    violation = ""
+    if not _has_trusted_input(frame):
+        offending = [f.key for f in kept if f.quality.is_good()]
+        if offending:
+            bad_q = Quality.INPUT_BAD if _has_any_sample(frame) else Quality.NO_INPUT
+            violation = (f"域 {loaded.key} 在没有任何可信输入时给出了质量 OK 的结论 {offending}，"
+                         f"已改落 {bad_q.value} —— 这是域的缺陷（从没有数据里给出了结论）")
+            logger.error("%s（绑定 %s，帧 [%s, %s]）", violation, frame.binding,
+                         frame.t_start.isoformat(), frame.t_end.isoformat())
+            kept = [Finding(key=f.key, value=None, quality=bad_q, t=f.t)
+                    if f.quality.is_good() else f for f in kept]
+
+    return RunResult(kept, True, violation)
+
+
+def _has_trusted_input(frame: Frame) -> bool:
+    """整帧是否有任何可信输入：任一质量 OK 的测点样本，或任一图片类输入。"""
+    if frame.blobs:
+        return True
+    return any(s.quality.is_good() for samples in frame.channels.values() for s in samples)
+
+
+def _has_any_sample(frame: Frame) -> bool:
+    """有样本但全不可信（INPUT_BAD）与根本没样本（NO_INPUT）要分开 —— 处置方向不同。"""
+    return any(len(samples) for samples in frame.channels.values())

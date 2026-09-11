@@ -278,3 +278,114 @@ daqvision 预案（`proto/vision.proto` + 《视觉算法gRPC交互方案_v1》�
 | AICloud 外部视图设计 | `/home/Project/AICloud/docs/17-外部视图与内部代理设计.md` |
 | AICloud 实体类别 Id 表 | `/home/Project/AICloud/AIBackend/domain/domain.go` |
 | AICloud 实时库/点表/网关/趋势 | `/home/Project/AICloud/AIBackend/irtdb/` |
+
+---
+
+## 9. 2026-09-11 源码质量与算法层实测（应用户要求记档）
+
+> 应用户两问（"原项目代码质量如何""AI 应用算法代码有大问题吗"）逐项上 AISERVER 取证，**只读**。
+> 每条标明依据：**【现查】**=今天看过文件或跑过命令；**【真跑】**=今天实际执行了原项目代码；
+> **【预研】**=沿用本文 §2~§3（2026-09-10）的实测，今天未复核。
+> 只读了集成用得到的部分，**不是完整代码评审**（前端、VFD 模型代码、指针表流水线未细读）。
+
+### 9.1 先订正：四个项目都跑在 `/home/ruiteng`
+
+【现查】`/root/ruiteng/2026/ai_diagnosis/` 下**只有一个软链** `v4 -> /home/ruiteng/2026/ai_diagnosis/v4`（8-20 建）；
+四个项目进程的 cwd 全在 `/home/ruiteng` 下（v4 `:8013` → `.../v4/backend`、v5 `:8014` → `.../v5/backend`、
+meter `:7860` → `.../meter_service/platform`、VFD `:18012` → `.../VFD/app`）。本文 §2 表里 v4 写的 `/root/ruiteng/…` 路径虽能经软链访问，但**不是真实位置**。
+
+★踩到的坑：从 `/root/ruiteng/.../v4` 起 `find` **什么都扫不到**（默认不进入作为起点的软链），第一次检查 v4 得出"无依赖清单、无 .env、0 行"，**是查法错了，不是 v4 没有**。
+
+### 9.2 工程卫生总表【现查】
+
+| | v4 高频振动 | v5 低频振动 | meter/helmet 视觉 | VFD 变频器 |
+| --- | --- | --- | --- | --- |
+| Python 代码量（排除 venv/内置第三方库/备份目录） | 10,358 行（`app.py` 单文件 2,254 行） | 7,516 行 / 72 文件 | 6,979 行 / 41 文件 | 2,638 行 / 6 文件 |
+| git 仓库 | 无 | 无 | 无 | 无 |
+| 测试 | 0 | 0 | 1（`ocr/test_api.py`） | 0 |
+| `.bak` / `before` 副本 | 6 个 | 8 个以上（整个后端 1 份、前端构建 3 份等） | 7 个 | `backups/` 目录 |
+| 明文 `.env`（只列文件名，未看内容） | 有 | 有，另有 2 份 `.env` 备份副本 | — | — |
+| macOS 残留（`._*` / `.DS_Store`） | 0 | 70 | 6 | 1 |
+
+- **没有版本管理**：四个都靠复制 `.bak` / `codex-before-日期` 副本回滚。
+- **密钥被复制多份**：v5 的 `.env` 之外还有 `.env.bak-before-fast-llm-20260905`、`.env.codex-before-local-hs-20260824`。
+- **依赖只部分锁版本**：v4/v5 一半 `==` 一半范围；`pointer_meter_service/requirements.txt` 完全不锁（fastapi/uvicorn/numpy 裸写）。
+- **多项目共用 venv**：helmet 实际跑在 `digital_meter_service/.venv` 里（进程命令行现查）；v5 进程解释器是 `/root/ruiteng/2026/ai_diagnosis/v4/.venv/bin/python`（即 v4 的 venv）。
+- 无鉴权、CORS `*`【预研】。
+
+### 9.3 各项目工程要点
+
+- **v4**：`app.py` 单文件 2,254 行【现查】；`mock_db.json` 全量读写【预研】。可取：`signal_processing.py` 质量最好、"证据包"设计可复用（《算法侧改造方案》的评价）。
+- **v5**：目录卫生四个里最差【现查】；`frontend/src` 过时、真实界面只在构建产物（AICloud `C-11` 实测，我方未复核）。
+- **meter/helmet**：结构最干净（平台层 157 行无状态转发）【预研】；helmet 导出了多尺寸多精度 ONNX、OCR 注释记录了 Paddle oneDNN 的真实坑与规避【现查】。
+  问题【现查】：ONNX 仍经 `ultralytics.YOLO()` 加载（拖 torch）；上传原图每次落盘、8 月 28 日的图仍在，未见清理；
+  `await file.read()` 读完整个上传才判断 20MB 上限；`main.py` / `main_resident.py` / `main_non_resident_backup.py` 多入口副本并存；
+  内置两份相同的 ultralytics 约 12 万行【预研】。
+- **VFD**：`0.0.0.0:18012` 无鉴权【预研】。
+
+### 9.4 ★算法层实测（按严重程度）
+
+#### 9.4.1 VFD：合成数据训练、合成数据推理
+
+- 【现查】`VFD/dataset/config.json` 是**生成参数**：`seed 2026`、`severity_range [0.3, 1]`、`variation_range [0, 0.05]`、
+  `developing_ratio 0.7`，`source` 为 "MegaVert VFD demo aligned to user manual function codes"；
+- 【现查】运行时输入来自 `app/backend/vfd_storage.py::_CodeWaveformGenerator`，注释写明公式照搬 `megavert_vfd_demo_v5.html`；
+- 【现查】模型 SmallTCN，13,850 参数，头 = 6 类分类 + 当前严重度 + 30/60/120 秒后严重度；**服务器上没有训练代码**，只有权重与配置。
+
+⇒ 模型学到的是生成公式，**其准确率与"2 分钟后严重度"对真实变频器无意义**。
+★"训练数据就是这套公式"是**强推断**（有生成参数、无训练代码可复核），不是实证。
+
+#### 9.4.2 v5 实时分类（唯一接真数据的算法，`backend/services/hs_realtime.py`）【现查】
+
+- **质量码记了不用**：`_assign_vqt` 存了点的质量、CSV 行也写 `{key}_quality`，但 `train_model` 与 `_predict_current_locked` **只取值**，
+  坏值/空值经 `_to_float` 变 0.0 参与训练与判定；
+- **只标一种标签也"训练成功"**：`train_accuracy` 写死 1.0（引擎名 "SingleClass monitor"），之后任何输入都判该标签、置信度 1.0 ——
+  只标过"正常"的现场，设备故障也报"正常 100%"；
+- **交叉验证虚高**：行每秒追加一次"上一笔收到的值"（数据流停了照样出新行），按时间段整段打标后
+  `StratifiedKFold(shuffle=True)` ⇒ 近似重复的相邻行同时进训练与验证，`cv_accuracy` 等于考见过的题；
+- XGBoost 出任何异常静默退回 RandomForest（引擎名记了，失败原因丢了）；
+- `_feature_payload` 没有激活传感器时特征全 0.0。
+
+#### 9.4.3 阶次规则诊断：没有数据判"正常"【真跑】
+
+v5 `order_diagnosis`（`services/diagnosis.py::order_features_from_frame`）与 v4 `app.py:293-301` 同写法：
+**总幅值为 0 时把 1X 占比写死成 1.0**。以 v5 进程所用解释器真跑全零输入（等价于没有数据）：
+
+| 算法 | 结果 |
+| --- | --- |
+| 规则诊断（`rule_cards_v2`） | **正常 0.7148**（不平衡 0.2829，其余 0.0007），支持理由 `['1X 占比很高', '2X~5X 较弱', '1X 绝对幅值较低', '整体阶次幅值较低']` |
+| 轻量小模型（`order_mlp_model.json`） | **正常** |
+
+⇒ 从没有数据里判出健康结论，理由里的"1X 占比很高"是编出来的。
+★事前我猜会判成"不平衡"，**实测不是** —— 先取证再下结论的又一例。
+另：这套在现场本就没有输入（喂的是 `simulate_frame` 仿真波形，见 §2.2 与《算法侧改造方案》§1.5）；
+五类得分归一化成和为 1，看着像概率，实为手调权重。
+
+#### 9.4.4 视觉：算法层未见大问题
+
+YOLO 标准流程；AIIntegration 以 onnxruntime+numpy 重写的前后处理与 helmet 现用 ultralytics 8.4.114 **24 组逐位一致**
+（`AIIntegration/research/vision-onnx-parity/RESULTS.md`）。★但"逐位一致"证明的是**与原来一样**，不是**原来是对的**。
+未核实疑点【现查】：helmet n 模型文件名 yolo11n、元数据写 YOLOv5n；数字表模型文件名
+`reading_region_yolov8s_1300demo_fp16_e60_bad_best.pt` 含 "demo"/"bad"，需问作者。指针表多模型流水线未读。
+
+#### 9.4.5 未证实也未否认
+
+§2.1 / 预研里"v4 把 NaN/Inf 静默写成 0.0"：今天 grep（`nan_to_num` / `isfinite` / `isnan` / `or 0.0` / `return 0.0`）**没定位到**；
+`app.py:391` 是模板距离对空向量返回 0.0（= 完全相同）。**查不到不等于没有**，这条不撤回、也不再当事实引用。
+v4 里"缺值当 0.0"（`float(x or 0.0)`）普遍，但多在伺服/压装模块，AICloud `C-11` 称这几页整组注释掉、不在用。
+
+### 9.5 共性根因与对重构的约束
+
+**根因**：① 把"没数据/坏数据"当 0，而 0 在这些量上恰是"健康"读数 ⇒ 故障被读成正常；② 评估方式让准确率虚高；③ 数据是合成的。
+
+| 问题 | AIIntegration 现状 |
+| --- | --- |
+| 坏值当 0、拿旧值顶、算不出来却给数、静默降级 | **骨架已结构性挡住**：取数带质量码、取不到就空着、结论类型层禁 OK+空值/NaN、算不出来落质量码、训练丢样本写进任务与工件 |
+| 没有任何可信输入却出 OK 结论（9.4.3 那类） | 2026-09-11 起**骨架硬规则**：整帧无任一可信样本/图片时，OK 结论改落坏质量并记错（`runner.py`）。★只挡"完全没数据"，挡不住"必填那路坏了、别路还好" |
+| 只标一类即训出 100%、交叉验证泄漏 | **骨架未强制**（取决于域里算法怎么写）；目前唯一训练的是基线（只用正常样本、不做分类），暂未触发 |
+| 合成数据训出的模型 | **代码救不了**。新域只吃实时库真点或现场上传；外部导入模型须标"外部导入、训练数据未核实"（导入入口尚未做） |
+| 模型本身准不准 | 需要现场标注的测试集独立评估，**目前没有** |
+| 台账/口径填错 | 系统看不出"错但合理"的值；每条结论写明用了哪些台账 |
+
+⇒ 重构这些域时，**9.4.2 与 9.4.3 的写法绝不照搬**；有人引用原项目的准确率或 VFD 预测时应提醒不可当真。
+
