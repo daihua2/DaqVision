@@ -20,6 +20,15 @@ case "$PYV" in
   3.[0-9]|3.[0-9][0-9]) ;;
   *) echo "PYV 格式应为 主.次（如 3.10），收到: $PYV" >&2; exit 1 ;;
 esac
+# ★出包机上跑 pip download 用哪个解释器。这里曾写死 `python`，而 WSL（Ubuntu 24.04）
+#   既没有 `python` 命令、系统 python3 也没有 pip（2026-09-11 实测）⇒ 脚本在出包机上根本跑不起来。
+#   pip download 带了 --platform / --python-version，**跑它的解释器版本与目标机无关**，带 pip 的都行。
+BUILD_PY="${BUILD_PYTHON:-python3}"
+if ! "$BUILD_PY" -m pip --version >/dev/null 2>&1; then
+  echo "出包机的 $BUILD_PY 没有 pip。建一个带 pip 的再来：" >&2
+  echo "  uv venv --seed /root/aii-build && BUILD_PYTHON=/root/aii-build/bin/python PYV=$PYV bash $0 $TARGET" >&2
+  exit 1
+fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$(cd "$HERE/.." && pwd)"
 OUT="$SRC/dist/aiintegration-$TARGET-py$PYV"
@@ -32,14 +41,16 @@ esac
 
 rm -rf "$OUT"; mkdir -p "$OUT/wheelhouse"
 cp -r "$SRC/host" "$OUT/host"
-find "$OUT/host" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$OUT/domains"
 [ -d "$SRC/domains" ] && cp -r "$SRC/domains/." "$OUT/domains/" || true
 cp "$SRC/host/requirements.txt" "$OUT/"
 cp "$HERE/install.sh" "$HERE/aiintegration.service" "$OUT/"
+# ★编译产物从**整个**发布目录清，不只 host/：domains/ 里那份是跑用例时装载器编的（曾被带进包）。
+find "$OUT" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find "$OUT" -name "*.pyc" -delete 2>/dev/null || true
 
 echo "=== 抓 wheel（目标平台 $TARGET, cp$PYV）==="
-python -m pip download -r "$OUT/requirements.txt" -d "$OUT/wheelhouse" \
+"$BUILD_PY" -m pip download -r "$OUT/requirements.txt" -d "$OUT/wheelhouse" \
     "${PLAT[@]}" --python-version "$PYV" --implementation cp --only-binary=:all:
 
 # 发布件自报"我是给哪个 Python、哪个架构出的"——install.sh 开工前先核对这两项。
@@ -47,7 +58,12 @@ printf '%s\n' "$PYV" > "$OUT/wheelhouse/PYTHON_TAG"
 printf '%s\n' "$ARCH" > "$OUT/wheelhouse/ARCH_TAG"
 
 TAR="$SRC/dist/aiintegration-$TARGET-py$PYV.tar.gz"
-tar -C "$SRC/dist" -czf "$TAR" "aiintegration-$TARGET-py$PYV"
+# ★权限与属主写成确定值，不从出包机继承。
+#   在 /mnt/d（drvfs）上打包时，文件一律显示成 777，原样记进 tar ⇒ 解出来代码全局可写，
+#   而服务以 root 跑（2026-09-11 投递 AISERVER 解包时发现）。chmod 在 drvfs 上不一定生效，
+#   所以不改源文件，改 tar 写进去的元数据：文件 644、目录 755、属主 root。
+tar -C "$SRC/dist" --owner=0 --group=0 --numeric-owner --mode="u=rw,go=r,a+X" \
+    -czf "$TAR" "aiintegration-$TARGET-py$PYV"
 echo "=== 产物 ==="
 ls -la "$TAR" | awk '{print "  ", $5, $9}'
 echo "  wheelhouse: $(ls "$OUT/wheelhouse" | wc -l) 个 wheel，$(du -sm "$OUT/wheelhouse" | cut -f1) MB"

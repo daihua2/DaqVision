@@ -86,6 +86,16 @@ if [ -d "$HERE/domains" ]; then
 fi
 mkdir -p "$ROOT/data" "$ROOT/cert"
 
+# ★代码目录权限强制成 目录 755 / 文件 644，不信任发布件带来的元数据。
+#   服务以 root 跑：代码只要有一个文件全局可写，本机任何用户都能往 root 进程里注入代码。
+#   （2026-09-11：在 drvfs 上打的包解出来一律 777，出包侧已修，这里是第二道。）
+find "$ROOT/host" "$ROOT/domains" -type d -exec chmod 755 {} +
+find "$ROOT/host" "$ROOT/domains" -type f -exec chmod 644 {} +
+if find "$ROOT/host" "$ROOT/domains" -perm -o+w | grep -q .; then
+  echo "✗ 代码目录仍有全局可写的文件，拒绝继续注册服务" >&2
+  exit 3
+fi
+
 # ★ system.guid 一个字都不碰：它一经生成永不变。
 #   换掉它 = 先前写入的点变成无主数据，而按对账铁律**绝不自动删**，残留清不掉。
 if [ -f "$ROOT/system.guid" ]; then
