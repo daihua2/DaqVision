@@ -419,8 +419,52 @@ grpcio 是 C 扩展、按"架构 × Python 主次版本"分 wheel ⇒ 那样出�
   而第一次修复用的内联 `wsl bash -lc` 串里 `$f` 被外层展开成空串，**一个文件都没转、也不报错**。
   最后是"脚本文件 + WSL 里按字节计数"才看清。
 
-### 12.5 仍然等授权的
+### 12.5 ~~仍然等授权的~~ —— 2026-09-11 已获授权并部署，见 §13
 
-**部署本身**。以上只是让"真去部署那一刻"少踩坑：出包用 `PYV=3.10 bash make-release.sh amd64-cpu`，
+~~**部署本身**。~~（下面这段是部署前写的预检结论，保留作记录）以上只是让"真去部署那一刻"少踩坑：出包用 `PYV=3.10 bash make-release.sh amd64-cpu`，
 实时库单元名在 AISERVER 上是 `iRtdb.service`（逐台不同，单元文件里已注明），
 端口 50070/50071 现查空闲，`python3 -m venv` 可用。
+
+
+---
+
+## 13. 部署记录：AISERVER（2026-09-11，用户授权）
+
+### 13.1 现状
+
+| 项 | 值 |
+| --- | --- |
+| **系统 guid** | **`db20ff1e-4dfa-4591-ac7c-9633e43924c8`** —— 首启由 `identity.py` 在服务进程里生成（16:15:36 CST） |
+| guid 落盘 | `/home/Project/AIIntegration/system.guid` 与 `/etc/aiintegration/system.guid`，两处一致 |
+| 单元 | `aiintegration.service`，enabled + active。★停启一律 `systemctl` |
+| 口 | gRPC `127.0.0.1:50070`、HTTP `127.0.0.1:50071`（只绑回环） |
+| 运行形态 | **只读**：未配写路径（无证书），结论不回流；调度未起 |
+| 环境 | 独立 venv `/home/Project/AIIntegration/.venv`：Python 3.10.12 / grpcio 1.83.1 / protobuf 7.36.1 |
+| 资源 | RSS 41 MB，10 线程 |
+| 发布件 | `aiintegration-amd64-cpu-py3.10.tar.gz`，sha256 `9ec089079f34689d7e8d5f7dc5c5c2833ca7ef2a8848786348d03944afaeb325`（两端核对一致） |
+
+### 13.2 怎么部署的（每一步都有把关，不过就停）
+
+1. **只读预检**：身份（`/etc/aiintegration` 不存在、应用目录无 guid 文件 —— 排除 `AI-5` 那个已撤回的手工 guid 被首启采纳）、
+   磁盘/内存、实时库与读口、端口空闲、无同名单元；并**记下本机 10 个监听端口的进程号作基线**。
+2. **出包**：`BUILD_PYTHON=/root/aii-build/bin/python PYV=3.10 bash make-release.sh amd64-cpu`。
+3. **发布件校验**（按字节，不经 shell 管道）：标签、wheel 版本与架构、CR=0、无编译缓存、
+   **包内权限 644/755 属主 0:0、无全局可写**、不含 data/ 与 system.guid。
+4. **投递 → 目标机核 sha256 → `install.sh`**：预检 → 独立 venv 离线装 → 铺代码 → 强制权限 → **只注册单元、不启动**。
+5. **`systemctl start`**（先不 enable）→ 核对：状态、启动日志、guid 两处、`/health`、gRPC 探针、端口只绑回环、
+   **现有 10 个端口进程号与基线逐个对照（全部不变）**。
+6. 核对全过 → **`systemctl enable`**。
+
+### 13.3 出包环节又查出的三处（已修，`8777c3d`）
+
+| 缺陷 | 后果 |
+| --- | --- |
+| `make-release.sh` 写死 `python -m pip` | WSL 既无 `python` 命令、系统 python3 也无 pip ⇒ **出包脚本在出包机上跑不起来** |
+| ★在 `/mnt/d`（drvfs）上打的 tar，**文件一律 777** | 服务以 root 跑 ⇒ 代码全局可写 = 本机任何用户能往 root 进程注入代码。两道修：出包写死元数据、安装强制权限 |
+| `__pycache__` 只清了 `host/` | 开发机上的字节码被带进包（校验脚本拦下的） |
+
+### 13.4 仍待办
+
+- **写路径**：等 AICloud 签发客户端证书（投到 `cert/`：`ca.cer` / `client.cer` / `client.key`，文件名写死）**＋ 内部授权**。
+  开写路径 = 开始往实时库写结论点（每绑定 12 个），不自动开。`AI-18 §3`。
+- AICloud 签发前**用 `GetInfo` 现取 guid 核对**（不照抄函件）—— 已在 `AI-18 §3.2` 请求。
