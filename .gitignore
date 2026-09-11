@@ -28,3 +28,5 @@ doc/传感器资料/*.png
 doc/*.pdf
 doc/*.pptx
 doc/*.docx
+# AIIntegration 发布件（make-release.sh 产物，几 MB 的 tar，不入库）
+AIIntegration/dist/
