@@ -146,5 +146,36 @@ class TestFrame(unittest.TestCase):
             Sample(t=datetime(2026, 9, 10, 12, 0), value=1.0, quality=Quality.OK)
 
 
+class TestInputKindAndBlob(unittest.TestCase):
+    """1.4：输入形态 + 非测点输入。"""
+
+    def test_输入形态缺省是测点(self):
+        from aiintegration.types import InputSpec
+        self.assertEqual(InputSpec(role="x").kind, "point")
+
+    def test_未知输入形态被拒(self):
+        from aiintegration.types import InputSpec
+        with self.assertRaises(ValueError):
+            InputSpec(role="x", kind="video")
+
+    def test_非测点输入的时刻必须带时区(self):
+        from datetime import datetime
+        from aiintegration.types import InputBlob
+        with self.assertRaises(ValueError):
+            InputBlob(t=datetime(2026, 9, 11, 9, 30), content_type="image/png", data=b"x")
+
+    def test_非测点输入不许空(self):
+        from aiintegration.types import InputBlob
+        with self.assertRaises(ValueError):
+            InputBlob(t=T0, content_type="image/png", data=b"")
+        with self.assertRaises(ValueError):
+            InputBlob(t=T0, content_type="", data=b"x")
+
+    def test_帧的非测点输入缺省为空(self):
+        from aiintegration.types import Frame
+        f = Frame(domain="d", binding="b", t_start=T0, t_end=T0, channels={})
+        self.assertEqual(f.blobs, {})
+
+
 if __name__ == "__main__":
     unittest.main()

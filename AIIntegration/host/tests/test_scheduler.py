@@ -258,6 +258,54 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(s.run_once(self.bindings.get("nosuch", "dev9"), T0), [])
 
 
+class TestImageOnlyDomain(unittest.TestCase):
+    """1.4：纯图片域**不起轮询线程**，但结论点照建。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        self.points = PointMap(d / "p.db")
+        self.bindings = BindingStore(d / "b.db")
+        self.bindings.put(Binding("vib", "dev1", {"x_acc": 101}, interval_sec=60, window_sec=60))
+        self.bindings.put(Binding("img", "cam1", {}), allow_no_roles=True)
+        self.client = _FakeClient()
+
+    def tearDown(self):
+        self.points.close(); self.bindings.close(); self._tmp.cleanup()
+
+    def _image_domain(self):
+        from aiintegration.domains import Domain, LoadedDomain
+        from aiintegration.types import Declaration, InputSpec, OutputSpec
+
+        class Img(Domain):
+            key = "img"
+            display = "图"
+            version = "1.0.0"
+
+            def declare(self):
+                return Declaration(inputs=(InputSpec(role="image", kind="image"),),
+                                   outputs=(OutputSpec(key="n", display="n", value_type="int"),))
+
+            def infer(self, frame):
+                raise AssertionError("纯图片域不该被调度器调到")
+
+        inst = Img()
+        return LoadedDomain(inst, inst.declare(), frozenset(inst.capabilities()), Path("用例内造"))
+
+    def test_不起线程但点照建(self):
+        s = Scheduler(client=self.client, fetcher=_FakeFetcher(),
+                      domains={"vib": loaded("ok"), "img": self._image_domain()},
+                      bindings=self.bindings, points=self.points)
+        try:
+            alive = s.sync()
+            self.assertEqual(set(s._threads), {("vib", "dev1")}, "只有测点域起线程")
+            self.assertEqual(alive, 1)
+            self.assertIsNotNone(self.points.local_id_of("img", "cam1", "n"),
+                                 "图片域的结论点照建（写路径就绪时事件入口要往里写）")
+        finally:
+            s.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
 

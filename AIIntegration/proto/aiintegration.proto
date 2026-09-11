@@ -139,7 +139,35 @@ message InputSpec {
   string unit        = 2;   // ★仅作核对提示，**我方不做单位换算**（换错了比不换更危险）
   bool   required    = 3;
   string description = 4;
+  // ★输入的**形态**（1.4 新增）：`point` = 测点，绑定时对到 globalId，我方按节拍去取；
+  //   `image` = 图片，**不绑测点**，由现场上传触发（见下方「事件驱动入口」）。
+  //   老版本不发这个字段 ⇒ 空串，请按 `point` 理解。**不是封闭枚举**：将来会有别的形态，请按字符串透传。
+  //
+  //   ⇒ 贵方绑定表单：`point` 类角色画"选测点"，`image` 类角色**不画**；
+  //     一个域若全是 `image` 类输入，它的 `Binding.roles` 就是空的 —— 这种域我方放行空 roles，
+  //     绑定照样要建（台账参数与结论点都挂在绑定上）。
+  string kind        = 5;
 }
+
+// ───────────────────────── 事件驱动入口（1.4，走 HTTP，不在本 service 里）─────────────────────────
+//
+// 图片是大对象，按 C-8 §3 走 HTTP 口（缺省 127.0.0.1:50071）：
+//
+//   POST /infer/{domain}/{binding}
+//     正文：图片原始字节（不是 multipart）
+//     Content-Type  : image/jpeg | image/png | …（必填）
+//     Content-Length: 必填，上限 20 MB（超了 413）
+//     X-Captured-At : ★**拍照时刻**，ISO 8601，**必须带时区**（`Z` 或 `+08:00`）。缺了 / 不带时区 ⇒ 400。
+//                     结论的时刻就是它，不是上传时刻 —— 巡检拍完半小时后才上传，不能记成"现在"。
+//     X-Role        : 域有多路图片输入时指明是哪一路（只有一路可不给）
+//     X-Source      : 来源说明（可选，只搬运）
+//
+//   200 → {"ok", "error", "domain", "binding", "captured_at", "written", "write_note",
+//          "findings": [{"key", "value", "quality", "status_code", "t"}]}
+//     ★`written=false` 时 `write_note` 说明为什么没写进实时库（比如只读运行）—— 请显示出来。
+//     ★质量非 Ok 时 `value` 恒为 null。
+//   404 域未装载 / 没有这个绑定；409 该域没有图片类输入 / 绑定已停用；
+//   400 参数不对（缺时刻、空正文…）；413 太大；503 推理繁忙（请稍后重试，**我方不无限排队**）。
 message OutputSpec {
   string key         = 1;
   string display     = 2;

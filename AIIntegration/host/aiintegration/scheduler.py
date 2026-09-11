@@ -101,7 +101,7 @@ class Scheduler:
             return []
 
         missing = b.missing_required(
-            [i.role for i in loaded.declaration.inputs if i.required])
+            [i.role for i in loaded.declaration.inputs if i.required and i.kind == "point"])
         if missing:
             # 必填角色没绑 —— 这不是"取不到数"，是**配置不全**，要吵，而且每拍都吵。
             logger.warning("绑定 %s/%s 缺必填角色 %s，本拍不推理", b.domain, b.binding, missing)
@@ -169,6 +169,11 @@ class Scheduler:
             self.ensure_points()
             for b in self._bindings.list(only_enabled=True):
                 key = (b.domain, b.binding)
+                dom = self._domains.get(b.domain)
+                if dom is not None and not any(i.kind == "point" for i in dom.declaration.inputs):
+                    # ★纯图片域（事件驱动）**不起轮询线程**：它的数据是现场送来的，不是去取的。
+                    #   起了的样子是每拍拿空帧推理、落一串"没数据"。点照建（上面 ensure_points 已含）。
+                    continue
                 t = self._threads.get(key)
                 if t is not None and t.is_alive():
                     continue

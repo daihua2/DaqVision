@@ -249,5 +249,30 @@ class TestBindingParams(unittest.TestCase):
         self.assertEqual(b.params, {"iso_group": "2"}, "模块改帧不该反噬配置")
 
 
+class TestBindingNoRoles(unittest.TestCase):
+    """1.4：纯图片域的绑定没有测点角色 —— 只在调用方明确放行时收。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = BindingStore(Path(self._tmp.name) / "b.db")
+
+    def tearDown(self):
+        self.store.close(); self._tmp.cleanup()
+
+    def test_缺省仍拒空角色(self):
+        with self.assertRaises(ValueError):
+            self.store.put(Binding("vib", "dev1", {}))
+
+    def test_明确放行时收空角色且台账照存(self):
+        self.store.put(Binding("vision_helmet", "cam1", {}, params={"conf_threshold": "0.5"}),
+                       allow_no_roles=True)
+        got = self.store.get("vision_helmet", "cam1")
+        self.assertEqual((got.roles, got.params), ({}, {"conf_threshold": "0.5"}))
+
+    def test_放行空角色不等于放行非法角色(self):
+        with self.assertRaises(ValueError):
+            self.store.put(Binding("x", "y", {"a": 0}), allow_no_roles=True)
+
+
 if __name__ == "__main__":
     unittest.main()

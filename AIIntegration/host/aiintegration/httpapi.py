@@ -15,9 +15,12 @@ import json
 import logging
 import mimetypes
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+from .events import MAX_BLOB_BYTES, EventError
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,53 @@ class _Handler(BaseHTTPRequestHandler):
             # 片段报告（`C-11 §3.4`：报告是大对象 ⇒ HTTP，与 C-8 定的一致）。
             return self._download(self.ctx["reports_dir"], path[len("/reports/"):], "报告")
         self._err(404, f"没有这个路径: {path}")
+
+    def do_POST(self):
+        path = unquote(urlparse(self.path).path)
+        parts = [p for p in path.split("/") if p]
+        if len(parts) == 3 and parts[0] == "infer":
+            return self._infer(parts[1], parts[2])
+        self._err(404, f"没有这个路径: {path}")
+
+    def _infer(self, domain: str, binding: str):
+        """`POST /infer/{域}/{绑定}`：正文是图片原始字节。来一张算一次。
+
+        请求头：`Content-Type`（必填）、**`X-Captured-At`（拍照时刻，ISO 8601，必须带时区）**、
+        `X-Role`（域有多路图片输入时指明）、`X-Source`（来源说明，可选）。
+        """
+        events = self.ctx.get("events")
+        if events is None:
+            return self._err(503, "本实例未接事件入口")
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._err(411, "必须带 Content-Length（不收分块上传）")
+        if length > MAX_BLOB_BYTES:
+            # 不读正文就回 —— 并断开连接，免得残留的正文被当成下一个请求。
+            self.close_connection = True
+            return self._err(413, f"上传 {length} 字节，超过上限 {MAX_BLOB_BYTES} 字节")
+        data = self.rfile.read(length) if length > 0 else b""
+        captured, why = _parse_captured_at(self.headers.get("X-Captured-At"))
+        if why:
+            return self._err(400, why)
+        try:
+            res = events.submit(domain=domain, binding=binding, data=data,
+                                content_type=self.headers.get("Content-Type", ""),
+                                captured_at=captured, role=self.headers.get("X-Role") or None,
+                                source=self.headers.get("X-Source", ""))
+        except EventError as exc:
+            return self._err(exc.status, exc.message)
+        self._json({
+            "ok": res.run.ok,
+            "error": res.run.error,
+            "domain": domain,
+            "binding": binding,
+            "captured_at": res.frame.t_end.isoformat(),
+            # ★没写就明说没写、为什么 —— 调用方不该以为平台上已经有这条记录。
+            "written": res.written,
+            "write_note": res.write_note,
+            "findings": [_finding_json(f) for f in res.run.findings],
+        })
 
     def _health(self):
         c = self.ctx
@@ -96,8 +146,40 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
 
 
+def _parse_captured_at(raw: str | None) -> tuple[datetime | None, str]:
+    """解析拍照时刻。★没有缺省：缺了、不带时区，一律拒。
+
+    ★Python **3.10** 的 `datetime.fromisoformat` 不认末尾的 `Z`（3.11 起才认），
+      而现场（AISERVER）正是 3.10 —— 不手工换，`2026-09-11T08:00:00Z` 这种最常见的写法在现场会被拒。
+    """
+    if not raw or not raw.strip():
+        return None, ("缺请求头 X-Captured-At（拍照时刻，ISO 8601，必须带时区）"
+                      "—— 结论的时刻是拍照时刻，不是上传时刻，不给就不算")
+    s = raw.strip()
+    if s[-1] in "Zz":
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None, f"X-Captured-At 不是合法的 ISO 8601 时刻: {raw!r}"
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return None, f"X-Captured-At 必须带时区（裸时刻跨机就是另一个时刻）: {raw!r}"
+    return dt, ""
+
+
+def _finding_json(f) -> dict:
+    return {
+        "key": f.key,
+        "value": f.value,                           # 坏质量下恒为 null
+        "quality": f.quality.value,                 # 我方语义（ok / model_not_loaded / …）
+        "status_code": f.quality.to_status_code(),  # daq.StatusCode（-1001 = 台账没填 …）
+        "t": f.t.isoformat(),
+    }
+
+
 def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir: Path,
-                can_write: bool, reports_dir: Path | None = None) -> ThreadingHTTPServer:
+                can_write: bool, reports_dir: Path | None = None,
+                events=None) -> ThreadingHTTPServer:
     host, _, port = listen.rpartition(":")
     artifacts_dir = Path(artifacts_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -107,7 +189,7 @@ def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir:
     handler = type("_Bound", (_Handler,), {"ctx": {
         "guid": guid, "version": version, "domains": domains,
         "artifacts_dir": artifacts_dir, "reports_dir": reports_dir,
-        "can_write": can_write,
+        "can_write": can_write, "events": events,
     }})
     srv = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler)
     srv.daemon_threads = True

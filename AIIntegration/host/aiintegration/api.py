@@ -26,7 +26,7 @@ from .logstore import LogFilter, LogLevel, LogStore
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.3"
+PROTO_VERSION = "1.4"
 
 
 def _ts(dt: datetime) -> object:
@@ -99,7 +99,8 @@ class ApiService(WorkbenchApiMixin):
             )
             for i in d.declaration.inputs:
                 info.inputs.add(role=i.role, unit=i.unit,
-                                required=i.required, description=i.description)
+                                required=i.required, description=i.description,
+                                kind=i.kind)
             for o in d.declaration.outputs:
                 info.outputs.add(key=o.key, display=o.display, value_type=o.value_type,
                                  unit=o.unit, description=o.description)
@@ -124,7 +125,9 @@ class ApiService(WorkbenchApiMixin):
             out.params[k] = v
         loaded = self._domains.get(b.domain)
         if loaded is not None:
-            required = [i.role for i in loaded.declaration.inputs if i.required]
+            # 只算**测点类**必填角色：图片类输入不绑 globalId，由上传触发，不存在"没绑"。
+            required = [i.role for i in loaded.declaration.inputs
+                        if i.required and i.kind == "point"]
             out.missing_required.extend(b.missing_required(required))
         return out
 
@@ -141,13 +144,16 @@ class ApiService(WorkbenchApiMixin):
             # 而配置者以为配好了。
             return pb.PutBindingReply(
                 ok=False, message=f"域 {b.domain!r} 未装载；已装载：{sorted(self._domains)}")
+        # 纯图片域（没有测点类输入）的绑定本就没有 roles —— 只有这种域才放行空 roles。
+        loaded = self._domains[b.domain]
+        no_point_inputs = not any(i.kind == "point" for i in loaded.declaration.inputs)
         try:
             self._bindings.put(Binding(
                 domain=b.domain, binding=b.binding, roles=dict(b.roles),
                 params=dict(b.params),
                 interval_sec=b.interval_sec or 60.0,
                 window_sec=b.window_sec or 60.0,
-                enabled=b.enabled))
+                enabled=b.enabled), allow_no_roles=no_point_inputs)
         except ValueError as exc:
             # 校验失败原样回给调用方（globalId=0、一个角色都没绑…），**不吞**。
             return pb.PutBindingReply(ok=False, message=str(exc))

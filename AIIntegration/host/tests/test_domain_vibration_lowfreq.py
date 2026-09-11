@@ -36,7 +36,9 @@ FULL_PARAMS = {
 
 def _load():
     loaded, failed = discover(DOMAINS_DIR)
-    assert not failed, f"域装载失败：{[(str(p), repr(e)) for p, e in failed]}"
+    # 只断言**本域**没装载失败：别的域（如视觉域）在零依赖环境里缺 cv2 是如实的，不该带红本用例。
+    mine = [(str(p), repr(e)) for p, e in failed if p.name == "vibration_lowfreq.py"]
+    assert not mine, f"低频振动域装载失败：{mine}"
     by_key = {d.key: d for d in loaded}
     assert "vibration_lowfreq" in by_key, f"没装上低频振动域，只装到 {sorted(by_key)}"
     return by_key["vibration_lowfreq"]

@@ -98,8 +98,14 @@ class BindingStore:
         with self._lock:
             self._conn.close()
 
-    def put(self, b: Binding) -> None:
-        if not b.roles:
+    def put(self, b: Binding, *, allow_no_roles: bool = False) -> None:
+        """存绑定。
+
+        `allow_no_roles`：该域**根本没有测点类输入**（纯图片、事件驱动）时由调用方置真。
+        ★这一层不知道域的声明，所以由知道的那层（api）决定 —— 不在这里放宽成"空也行"，
+          否则测点域少绑一个角色都没人拦。
+        """
+        if not b.roles and not allow_no_roles:
             # 一个角色都没绑的绑定不是"待完善"，是"取不到任何数据" —— 存下来只会让
             # 调度器每个周期空转一次并报一次坏值。宁可现在就拒。
             raise ValueError(f"绑定 {b.domain}/{b.binding} 一个角色都没有")

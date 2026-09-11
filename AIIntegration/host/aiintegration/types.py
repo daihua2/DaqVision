@@ -111,6 +111,29 @@ class Sample:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class InputBlob:
+    """一份**非测点**输入（图片等），由现场送来。
+
+    ★`t` 是**采集时刻**（拍照时刻），不是上传时刻、不是收到的时刻。巡检 App 拍完可能半小时后
+      才有网 —— 拿上传时刻当 T，就是把"半小时前的违规"记成"现在的违规"，而且看不出来。
+      所以这里**没有缺省**，且必须带时区。
+    """
+
+    t: datetime
+    content_type: str
+    data: bytes
+    source: str = ""
+    """来源说明（上传通道 / 巡检任务号…）。骨架只搬运，模块可写进判据摘要。"""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "t", _require_utc(self.t, "InputBlob.t"))
+        if not isinstance(self.data, (bytes, bytearray)) or not self.data:
+            raise ValueError("InputBlob.data 不能为空 —— 空上传不是'一张什么都没有的图'，是没传上来")
+        if not self.content_type:
+            raise ValueError("InputBlob.content_type 必填（image/jpeg 之类）")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class ArtifactBlob:
     """一个**已经读进内存**的工件，交给模块用。
 
@@ -153,6 +176,12 @@ class Frame:
     channels: dict[str, Sequence[Sample]]
     """按 `InputSpec.role` 索引的采样序列。缺失的可选输入不出现在字典里。"""
 
+    blobs: dict[str, "InputBlob"] = dataclasses.field(default_factory=dict)
+    """按 `InputSpec.role` 索引的**非测点输入**（图片等）。测点类输入仍在 `channels` 里。
+
+    事件驱动的帧（来一张图算一次）`t_start == t_end == 拍照时刻`，`channels` 为空。
+    """
+
     artifacts: dict[str, "ArtifactBlob"] = dataclasses.field(default_factory=dict)
     """本对象**当前启用**的工件，按 `kind` 索引（`model` / `baseline` / …）。
 
@@ -190,6 +219,20 @@ class InputSpec:
 
     required: bool = True
     description: str = ""
+
+    kind: str = "point"
+    """输入的**形态**：`point`（测点，绑到 globalId、骨架按节拍取）/ `image`（图片，由上传触发）。
+
+    ★两种形态走两条完全不同的路：测点是骨架**去取**，图片是现场**送来**。
+      混在一个字段里靠约定区分（比如"roles 里没写就是图片"），骨架就得猜 —— 猜错的样子是
+      给图片域起一个轮询线程，每拍拿空帧推理、落一串"没数据"。所以显式声明。
+    """
+
+    _KINDS = ("point", "image")
+
+    def __post_init__(self) -> None:
+        if self.kind not in InputSpec._KINDS:
+            raise ValueError(f"InputSpec({self.role}).kind 只能是 {InputSpec._KINDS}，收到 {self.kind!r}")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

@@ -25,6 +25,7 @@ from .artifactcache import ActiveArtifacts
 from .bindings import BindingStore
 from .config import Config
 from .domains import discover
+from .events import EventRunner
 from .fetch import Fetcher
 from .hsclient import HsClient, HsConfig
 from .identity import SystemGuid
@@ -167,10 +168,13 @@ class Service:
         server.start()
         logger.warning("控制面 gRPC 监听 %s（只面向 AICloud 后端，浏览器不直连）", cfg.api_listen)
 
+        # 事件驱动入口（图片类输入）：来一张算一次，与按节拍取测点的调度并列。
+        events = EventRunner(domains=domains, bindings=bindings, points=points,
+                             artifacts=active_arts, client=client, can_write=can_write)
         http = httpapi.make_server(
             cfg.http_listen, guid=guid, version=VERSION, domains=list(domains),
             artifacts_dir=cfg.data_dir / "artifacts",
-            reports_dir=cfg.data_dir / "reports", can_write=can_write)
+            reports_dir=cfg.data_dir / "reports", can_write=can_write, events=events)
         httpapi.serve_in_thread(http)
         logger.warning("大对象 HTTP 监听 %s", cfg.http_listen)
 
