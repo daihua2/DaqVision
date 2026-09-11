@@ -24,6 +24,36 @@ PY="${PYTHON:-python3}"
 echo "=== AIIntegration 安装 → $ROOT ==="
 "$PY" -V
 
+# ── 0. 预检：发布件是不是给这台机器出的（★在建 venv / 铺代码 / 碰 systemd **之前**）──
+#   wheel 按"架构 × Python 主次版本"分。对不上时 pip 会在半路失败 —— 而那时 venv 已经建了一半，
+#   现场看到的是一屏 "No matching distribution"，查不出是出包时选错了版本。
+#   ★这里曾有真实隐患：make-release.sh 写死 cp3.11，AISERVER 现场是 3.10.12（2026-09-11 现查）。
+if [ -d "$HERE/wheelhouse" ]; then
+  HAVE_PYV="$("$PY" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+  HAVE_ARCH="$(uname -m)"
+  if [ -f "$HERE/wheelhouse/PYTHON_TAG" ]; then
+    WANT_PYV="$(tr -d '[:space:]' < "$HERE/wheelhouse/PYTHON_TAG")"
+    if [ "$WANT_PYV" != "$HAVE_PYV" ]; then
+      echo "✗ 发布件是给 Python $WANT_PYV 出的，本机 $PY 是 $HAVE_PYV —— 离线装必然失败。" >&2
+      echo "  请用 PYV=$HAVE_PYV 重新出包（make-release.sh），或 PYTHON=/path/to/python$WANT_PYV 指定解释器。" >&2
+      echo "  ★本次**什么都没动**。" >&2
+      exit 2
+    fi
+  else
+    echo "✗ 发布件缺 wheelhouse/PYTHON_TAG（旧版 make-release.sh 出的包），无法核对 Python 版本。" >&2
+    echo "  请用新版 make-release.sh 重新出包。★本次**什么都没动**。" >&2
+    exit 2
+  fi
+  if [ -f "$HERE/wheelhouse/ARCH_TAG" ]; then
+    WANT_ARCH="$(tr -d '[:space:]' < "$HERE/wheelhouse/ARCH_TAG")"
+    if [ "$WANT_ARCH" != "$HAVE_ARCH" ]; then
+      echo "✗ 发布件是给 $WANT_ARCH 出的，本机是 $HAVE_ARCH。★本次**什么都没动**。" >&2
+      exit 2
+    fi
+  fi
+  echo "--- 预检通过：Python $HAVE_PYV / $HAVE_ARCH 与发布件一致"
+fi
+
 mkdir -p "$ROOT"
 
 # ── 1. venv（现场建）──────────────────────────────────────────────────────

@@ -97,9 +97,47 @@ class Trainer:
     def start(self) -> None:
         if self._thread is not None:
             return
+        # ★先收拾上一个进程留下的烂摊子，再开始取新任务。顺序不能反：
+        #   先起线程的话，恢复与取任务会抢同一批行。
+        self._recover_stale()
         self._thread = threading.Thread(target=self._loop, name="trainer", daemon=True)
         self._thread.start()
         logger.info("训练执行器已启动（串行一条，排队顺序 = 建任务顺序）")
+
+    def _recover_stale(self) -> int:
+        """把上一个进程**跑到一半就死掉**的任务标成失败。返回处置条数。
+
+        ★为什么必须有：执行器只取 `pending`。进程在训练中途死掉（崩溃 / 断电 /
+          `systemctl restart`）之后，那条任务会**永远停在 `running`**——没人跑它、也没人把它标失败，
+          界面上一直显示"训练中"。这正是"看起来在跑、其实没有"那一类。
+
+        ★为什么标**失败**而不是改回 `pending` 重跑：半截训练可能已经吃掉了大量取数配额，
+          也可能正是这个训练把进程搞崩的（内存打爆之类）——自动重跑就是自动再崩一次。
+          重不重跑是人的决定；我方只把"它没跑完、为什么没跑完"如实写上。
+
+        ★前提：**本进程是这个库唯一的执行器**（骨架单进程，见 `service.py` 模块头）。
+          若将来多个进程共用一个工作台库，这里会把别人正在跑的任务误杀 —— 那时要换成租约。
+        """
+        n = 0
+        while True:
+            page = self._wb.list_jobs(status=JOB_RUNNING, limit=1000)
+            if not page.items:
+                break
+            for job in page.items:
+                try:
+                    self._wb.update_job(
+                        job.id, status=JOB_FAILED,
+                        message=(f"服务重启时该任务仍在训练中，未完成（重启前最后状态：{job.message or '无'}）"
+                                 "——未自动重跑，请确认原因后重新开训"))
+                    n += 1
+                except WorkbenchError:
+                    pass                    # 并发下刚好到了终态：不覆盖
+            if len(page.items) < 1000:
+                break
+        if n:
+            # 每次启动都说，不限流：这是"有训练被中断过"的唯一痕迹。
+            logger.warning("启动时发现 %d 条上次未跑完的训练任务，已标失败（未自动重跑）", n)
+        return n
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()

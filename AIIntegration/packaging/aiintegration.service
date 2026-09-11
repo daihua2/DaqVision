@@ -1,6 +1,9 @@
 [Unit]
 Description=AIIntegration —— AI 集成层（骨架 + 域模块）
 # 实时库晚起是常态，故只是 After 而不 Requires：连不上会按退避重试并每周期告警。
+# ★实时库的单元名**逐台不同、大小写敏感**：AISERVER 上是 `iRtdb.service`（2026-09-11 现查），
+#   别的机器可能是 `iRTDB.service`。写错了 systemd **不报错、静默忽略这条 After=** ——
+#   不致命（本服务本就容忍实时库晚起），但部署到别的机器前请 `systemctl list-unit-files | grep -i rtdb` 现查。
 After=network-online.target iRtdb.service
 Wants=network-online.target
 

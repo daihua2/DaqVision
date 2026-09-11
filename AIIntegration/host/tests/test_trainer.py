@@ -348,6 +348,54 @@ class TestCancel(TrainerBase):
             self.tr.cancel(9999)
 
 
+class TestRestart(TrainerBase):
+    """★进程在训练中途死掉（崩溃 / 断电 / systemd restart）之后，那条任务怎么办。
+
+    没有这一条的话：任务永远停在 `running`，没人跑它、也没人把它标失败 ——
+    界面上一直显示"训练中"。这正是"看起来在跑、其实没有"那一类。
+    （本条是自查时发现的：`_next_pending` 只取 pending，启动时对遗留的 running 一句话都不说。）
+    """
+
+    def test_重启后遗留的running任务被标失败并说清原因(self):
+        ds = self.make_dataset()
+        jid = self.tr.submit(domain="vib", dataset_id=ds)
+        # 模拟"上一个进程跑到一半死了"：状态停在 running，没有任何执行器持有它
+        self.wb.update_job(jid, status="running", message="正在组装数据集")
+
+        fresh = Trainer(workbench=self.wb, bindings=self.bindings, domains=self.domains,
+                        fetcher=self.fetcher, artifacts_dir=self.artifacts)
+        try:
+            fresh.start()
+            job = self.wb.get_job(jid)
+            self.assertEqual(job.status, JOB_FAILED,
+                             "遗留的 running 任务不该永远挂在'训练中'")
+            self.assertIn("重启", job.message, "要说清是服务重启导致未完成，不是算法失败")
+        finally:
+            fresh.stop(timeout=5)
+
+    def test_重启后遗留的pending任务照常跑(self):
+        ds = self.make_dataset()
+        jid = self.tr.submit(domain="vib", dataset_id=ds)     # 排着队，进程死了
+        fresh = Trainer(workbench=self.wb, bindings=self.bindings, domains=self.domains,
+                        fetcher=self.fetcher, artifacts_dir=self.artifacts)
+        self.tr = fresh                                       # 让 run_one/tearDown 用新的
+        job = self.run_one(jid)
+        self.assertEqual(job.status, JOB_READY, job.message)
+
+    def test_已终态的任务重启时不被碰(self):
+        ds = self.make_dataset()
+        jid = self.tr.submit(domain="vib", dataset_id=ds)
+        self.wb.update_job(jid, status=JOB_FAILED, message="原本的失败原因")
+        fresh = Trainer(workbench=self.wb, bindings=self.bindings, domains=self.domains,
+                        fetcher=self.fetcher, artifacts_dir=self.artifacts)
+        try:
+            fresh.start()
+            self.assertEqual(self.wb.get_job(jid).message, "原本的失败原因",
+                             "终态不可覆盖 —— 重启处置只管 running")
+        finally:
+            fresh.stop(timeout=5)
+
+
 class TestSerial(TrainerBase):
     def test_排队顺序是建任务顺序且一次只跑一个(self):
         ds = self.make_dataset()
