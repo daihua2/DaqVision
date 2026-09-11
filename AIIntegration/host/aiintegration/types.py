@@ -111,6 +111,31 @@ class Sample:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class ArtifactBlob:
+    """一个**已经读进内存**的工件，交给模块用。
+
+    ★模块只拿到"字节 + 几个说明"，不知道它存在哪、叫什么文件名 —— 与 `TrainedArtifact`
+      是同一条分界的两个方向（交出去 / 拿回来）。
+    """
+
+    id: int
+    kind: str
+    name: str
+    blob: bytes
+    algo: str = ""
+    accuracy: float | None = None
+    meta: dict[str, str] = dataclasses.field(default_factory=dict)
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.blob:
+            # 空工件到不了这里：`TrainedArtifact` 那侧已经挡了。真到了说明文件被截断过。
+            raise ValueError(
+                f"ArtifactBlob({self.id}) 的字节是空的 —— 工件文件被截断或写坏了，"
+                "不许当成一个可用模型交给算法")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class Frame:
     """骨架交给模块的一帧输入。数据已经取好、对齐好，**带真实质量码与真实时刻**。
 
@@ -127,6 +152,16 @@ class Frame:
 
     channels: dict[str, Sequence[Sample]]
     """按 `InputSpec.role` 索引的采样序列。缺失的可选输入不出现在字典里。"""
+
+    artifacts: dict[str, "ArtifactBlob"] = dataclasses.field(default_factory=dict)
+    """本对象**当前启用**的工件，按 `kind` 索引（`model` / `baseline` / …）。
+
+    ★模块要用自己训出来的东西，但**模块不碰存储** —— 于是骨架在成帧时把它读好放进来。
+      没启用就**没有这一档**（不是给一个空的）：模块据此落 `MODEL_NOT_LOADED`，
+      而不是"拿个默认模型顶上"。默认模型顶上去的结论看起来完全正常，这是最坏的一种。
+
+    ★骨架按工件 id 缓存，不每拍重读磁盘；工件一换（有人在界面上点了启用），下一拍就换过来。
+    """
 
     params: dict[str, str] = dataclasses.field(default_factory=dict)
     """被诊断对象的**台账参数**（额定功率等级、支承方式、轴向是哪一轴…），照抄绑定里那份。
@@ -317,6 +352,14 @@ class TrainedArtifact:
 
     algo: str
     """用了什么算法。会显示在界面上（v5 那套是"决策树 / SVM / 神经网络"）。"""
+
+    kind: str = "model"
+    """产出的是哪一类工件：`model`（模型）/ `baseline`（基线）/ …
+
+    ★由**域**说了算，骨架只搬运 —— 低频振动的第 ② 层"训练"出来的是一条基线，不是模型，
+      而它走的是同一条训练面（`AI-13 §5`：基线是资产，与模型同级）。
+      写死成 `model` 会让基线在界面上顶掉真模型的激活位（两者本该各占各的）。
+    """
 
     accuracy: float | None = None
     """★**没测就给 `None`，不许给 0**。"没测过"与"测出来是 0"在界面上必须分得开。"""

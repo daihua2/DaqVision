@@ -159,10 +159,12 @@ class _FakeClient:
 class _FakeFetcher:
     def __init__(self, fail=False):
         self.fail = fail
+        self.last_artifacts = None
 
-    def fetch(self, b, end_time):
+    def fetch(self, b, end_time, artifacts=None):
         if self.fail:
             raise RuntimeError("实时库连不上")
+        self.last_artifacts = dict(artifacts or {})
         return frame(end_time, b.window_sec)
 
 
@@ -203,6 +205,37 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(len(self.client.posted), 2)
         for _, f in self.client.posted:
             self.assertIs(f.quality, Quality.COMPUTE_ERROR)
+
+    def test_推理路径把当前启用的工件带进帧里(self):
+        """★没有这条，"工件到底有没有到模块手里"这件事在调度这一段是没人看的。
+
+        （本条是变异验证逼出来的：把 `arts` 改成恒空，当时**一条用例都没红**。）
+        """
+        class FakeArts:
+            def __init__(self):
+                self.asked = []
+
+            def for_binding(self, domain, binding):
+                self.asked.append((domain, binding))
+                return {"baseline": "占位工件"}
+
+        arts = FakeArts()
+        fetcher = _FakeFetcher()
+        s = Scheduler(client=self.client, fetcher=fetcher, domains={"vib": loaded("ok")},
+                      bindings=self.bindings, points=self.points, artifacts=arts)
+        s.ensure_points()
+        s.run_once(self.bindings.get("vib", "dev1"), T0)
+        self.assertEqual(arts.asked, [("vib", "dev1")])
+        self.assertEqual(fetcher.last_artifacts, {"baseline": "占位工件"})
+
+    def test_没接工件提供者时照常跑(self):
+        # 只是模块拿不到工件（那些结论会落 MODEL_NOT_LOADED）——**如实降级，不是缺陷**。
+        fetcher = _FakeFetcher()
+        s = Scheduler(client=self.client, fetcher=fetcher, domains={"vib": loaded("ok")},
+                      bindings=self.bindings, points=self.points)
+        s.ensure_points()
+        s.run_once(self.bindings.get("vib", "dev1"), T0)
+        self.assertEqual(fetcher.last_artifacts, {})
 
     def test_hs不可用时整拍跳过且不落锚点(self):
         # 与"模块算不出来"不是一回事:我方连取没取到数都不知道,

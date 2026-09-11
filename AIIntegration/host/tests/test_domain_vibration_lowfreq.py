@@ -12,6 +12,7 @@
 5. "没数据"与"有数据但全坏"**给不同的码**。
 """
 
+import dataclasses
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,20 +66,32 @@ def _by_key(findings):
     return {f.key: f for f in findings}
 
 
-class TestLoads(unittest.TestCase):
-    def test_从真目录装得上且只声明infer(self):
-        d = _load()
-        self.assertEqual(d.caps, frozenset({"infer"}),
-                         "本域这一片不做训练，不该出现 train 能力位（前端会据此出训练页）")
+#: 判据类台账 —— 猜错它们的后果**看不出来**（ISO 分级会把"该停机"说成"可长期运行"）。
+#: ⇒ 这四项永远必填、永远没有缺省。加新参数时想给缺省，先问它属不属于这一类。
+JUDGMENT_PARAMS = {"iso_group", "mount_type", "vel_is_rms", "axial_axis"}
 
-    def test_声明的台账参数一个不少且都必填(self):
+
+class TestLoads(unittest.TestCase):
+    def test_从真目录装得上且能力位含infer与train(self):
         d = _load()
-        keys = {p.key for p in d.declaration.params}
-        self.assertEqual(keys, {"iso_group", "mount_type", "vel_is_rms", "axial_axis"})
-        for p in d.declaration.params:
-            self.assertTrue(p.required, f"{p.key} 应为必填")
-            self.assertEqual(p.default, "",
-                             f"{p.key} 不该有缺省 —— 猜错台账的后果看不出来")
+        # ②层起本域会采基线，走的是训练面 ⇒ train 位自动出现（前端据此出训练页）。
+        self.assertEqual(d.caps, frozenset({"infer", "train"}))
+
+    def test_判据类台账永远必填且没有缺省(self):
+        d = _load()
+        specs = {p.key: p for p in d.declaration.params}
+        self.assertTrue(JUDGMENT_PARAMS <= set(specs), f"少了判据参数：{specs.keys()}")
+        for key in JUDGMENT_PARAMS:
+            self.assertTrue(specs[key].required, f"{key} 应为必填")
+            self.assertEqual(specs[key].default, "",
+                             f"{key} 不该有缺省 —— 猜错它的后果看不出来")
+
+    def test_normal_label允许有缺省且理由写在描述里(self):
+        """★唯一一个有缺省的台账。它与那四项的区别是**猜错会当场可见**。"""
+        spec = {p.key: p for p in _load().declaration.params}["normal_label"]
+        self.assertFalse(spec.required)
+        self.assertEqual(spec.default, "正常")
+        self.assertIn("当场可见", spec.description)
 
 
 class TestIsoClassification(unittest.TestCase):
@@ -273,6 +286,197 @@ class TestDominantAxis(unittest.TestCase):
         f = _frame({"x_vel": _samples(2.0)})       # y/z 根本没绑
         ev = _by_key(d.instance.infer(f))["evidence"].value
         self.assertNotIn("无样本", ev, "没绑的轴不该被报成'本窗口无样本'（那是绑了但没数据）")
+
+
+# ═══════════════════ 第②层：基线与偏离 ═══════════════════
+
+import json  # noqa: E402
+
+from aiintegration.types import ArtifactBlob, Dataset, LabeledFrame, ProgressSink  # noqa: E402
+
+
+def _mkframe(x, y=None, z=None, temp=None, params=None):
+    ch = {"x_vel": _samples(x)}
+    if y is not None:
+        ch["y_vel"] = _samples(y)
+    if z is not None:
+        ch["z_vel"] = _samples(z)
+    if temp is not None:
+        ch["temp"] = _samples(temp)
+    return _frame(ch, params)
+
+
+def _train_baseline(domain, xs, ys=None, zs=None, temps=None, label="正常", params=None):
+    items = []
+    for i, x in enumerate(xs):
+        f = _mkframe(x,
+                     ys[i] if ys else None,
+                     zs[i] if zs else None,
+                     temps[i] if temps else None,
+                     params)
+        items.append(LabeledFrame(frame=f, label=label, sample_id=i + 1))
+    ds = Dataset(domain="vibration_lowfreq", binding="dev1", name="基线集",
+                 items=tuple(items))
+    return domain.train(ds, ProgressSink())
+
+
+def _as_artifact(trained):
+    return ArtifactBlob(id=1, kind=trained.kind, name="基线", blob=trained.blob,
+                        algo=trained.algo, accuracy=trained.accuracy,
+                        meta=dict(trained.meta), created_at="2026-09-11")
+
+
+class TestBaselineTraining(unittest.TestCase):
+    def setUp(self):
+        self.d = _load().instance
+
+    def test_采出来的是基线不是模型(self):
+        art = _train_baseline(self.d, [1.0, 1.1, 0.9, 1.05, 0.95, 1.0])
+        # ★kind 由域说了算：写死成 model 会让基线顶掉真模型的激活位。
+        self.assertEqual(art.kind, "baseline")
+        self.assertEqual(art.suffix, ".json")
+        # ★基线没有"准确率"这回事 —— 给 None，别拿 1.0 顶（界面会显示成 100%）。
+        self.assertIsNone(art.accuracy)
+
+    def test_只用被标成正常的样本(self):
+        items = []
+        for i in range(6):
+            items.append(LabeledFrame(frame=_mkframe(1.0), label="正常", sample_id=i))
+        for i in range(3):
+            # 故障样本值很大：混进去会把 μ 抬上去，从此再也报不出这个故障
+            items.append(LabeledFrame(frame=_mkframe(50.0), label="不平衡", sample_id=100 + i))
+        ds = Dataset(domain="vibration_lowfreq", binding="dev1", name="混合集",
+                     items=tuple(items))
+        art = self.d.train(ds, ProgressSink())
+        model = json.loads(art.blob)
+        self.assertAlmostEqual(model["channels"]["x_vel"]["mean"], 1.0, places=6)
+        self.assertEqual(model["frames"], 6)
+
+    def test_正常样本太少当场失败并说清(self):
+        with self.assertRaises(ValueError) as c:
+            _train_baseline(self.d, [1.0, 1.0])
+        msg = str(c.exception)
+        self.assertIn("至少", msg)
+        self.assertIn("σ", msg, "要说清为什么少了不行")
+
+    def test_标签对不上时失败信息带出实际分布(self):
+        with self.assertRaises(ValueError) as c:
+            _train_baseline(self.d, [1.0] * 6, label="良好")
+        self.assertIn("良好", str(c.exception), "要能看出实际有哪些标签")
+
+    def test_可用台账改掉哪个标签算正常(self):
+        art = _train_baseline(self.d, [1.0] * 6, label="良好",
+                              params={**FULL_PARAMS, "normal_label": "良好"})
+        self.assertEqual(json.loads(art.blob)["label"], "良好")
+
+    def test_σ有下限免得任何波动都爆表(self):
+        art = _train_baseline(self.d, [1.0] * 6)      # 完全不变 ⇒ σ=0
+        model = json.loads(art.blob)
+        self.assertGreaterEqual(model["channels"]["x_vel"]["std"], 0.01)
+
+    def test_基线里带上采自哪段与几帧(self):
+        art = _train_baseline(self.d, [1.0, 1.1, 0.9, 1.05, 0.95, 1.0])
+        model = json.loads(art.blob)
+        self.assertEqual(model["frames"], 6)
+        self.assertTrue(model["t_from"] and model["t_to"])
+        # ★"什么时候采的"是它能算资产的前提（C-11 §5 的判据）
+        self.assertEqual(art.meta["frames"], "6")
+        self.assertIn("t_from", art.meta)
+
+    def test_一路速度都没有时失败(self):
+        items = [LabeledFrame(frame=_frame({"x_vel": []}), label="正常", sample_id=i)
+                 for i in range(6)]
+        ds = Dataset(domain="vibration_lowfreq", binding="dev1", name="空集",
+                     items=tuple(items))
+        with self.assertRaises(ValueError) as c:
+            self.d.train(ds, ProgressSink())
+        self.assertIn("一路速度都没能", str(c.exception))
+
+
+class TestDeviation(unittest.TestCase):
+    def setUp(self):
+        self.d = _load().instance
+        # 基线：x 在 1.0 附近波动，z 在 0.5 附近，温度 40℃
+        self.art = _as_artifact(_train_baseline(
+            self.d,
+            xs=[1.0, 1.1, 0.9, 1.05, 0.95, 1.0],
+            zs=[0.5, 0.52, 0.48, 0.51, 0.49, 0.5],
+            temps=[40.0, 40.2, 39.8, 40.1, 39.9, 40.0]))
+
+    def _infer(self, x, z=None, temp=None, artifact=True, params=None):
+        f = _frame({k: v for k, v in {
+            "x_vel": _samples(x),
+            "z_vel": _samples(z) if z is not None else None,
+            "temp": _samples(temp) if temp is not None else None,
+        }.items() if v is not None}, params)
+        if artifact:
+            f = dataclasses.replace(f, artifacts={"baseline": self.art})
+        return _by_key(self.d.infer(f))
+
+    def test_没有基线时那四条落MODEL_NOT_LOADED而ISO照出(self):
+        out = self._infer(3.0, artifact=False)
+        for k in ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score"):
+            self.assertIs(out[k].quality, Quality.MODEL_NOT_LOADED, k)
+            self.assertIsNone(out[k].value)
+        self.assertIs(out["iso_zone"].quality, Quality.OK)
+        self.assertIn("无可用基线", out["evidence"].value)
+
+    def test_正常波动时z分数小(self):
+        out = self._infer(1.02, z=0.5, temp=40.0)
+        self.assertIs(out["vel_z_max"].quality, Quality.OK)
+        self.assertLess(abs(out["vel_z_max"].value), 3.0)
+        self.assertLess(out["anomaly_score"].value, 30)
+
+    def test_明显升高时z分数大且异常分跟着上去(self):
+        out = self._infer(3.0, z=0.5, temp=40.0)
+        self.assertGreater(out["vel_z_max"].value, 3.0)
+        self.assertGreater(out["anomaly_score"].value, 30)
+        self.assertIn("σ", out["evidence"].value)
+
+    def test_温升算得出且方向对(self):
+        out = self._infer(1.0, z=0.5, temp=48.0)
+        self.assertAlmostEqual(out["temp_rise"].value, 8.0, places=1)
+        self.assertIn("温度较基线高", out["evidence"].value)
+
+    def test_没绑温度就不给温升而不是给0(self):
+        out = self._infer(1.0, z=0.5)
+        self.assertIs(out["temp_rise"].quality, Quality.NO_INPUT)
+        self.assertIsNone(out["temp_rise"].value)
+
+    def test_三轴比例漂移算得出(self):
+        # 基线 z/x = 0.5；现在 z 抬到与 x 齐平 ⇒ 漂移 +0.5
+        out = self._infer(1.0, z=1.0, temp=40.0)
+        self.assertIs(out["ratio_drift"].quality, Quality.OK)
+        self.assertAlmostEqual(out["ratio_drift"].value, 0.5, places=2)
+        self.assertIn("不对中", out["evidence"].value)
+
+    def test_基线工件读不懂时落坏码而不是掀翻整拍(self):
+        bad = ArtifactBlob(id=9, kind="baseline", name="坏的", blob=b"{not json")
+        f = dataclasses.replace(_frame({"x_vel": _samples(2.0)}), artifacts={"baseline": bad})
+        out = _by_key(self.d.infer(f))
+        self.assertIs(out["anomaly_score"].quality, Quality.MODEL_NOT_LOADED)
+        self.assertIs(out["iso_zone"].quality, Quality.OK, "①层不该被②层的坏工件带倒")
+        self.assertIn("读不懂", out["evidence"].value)
+
+    def test_格式版本不认的基线被拒(self):
+        bad = ArtifactBlob(id=9, kind="baseline", name="老格式",
+                           blob=json.dumps({"format": "别的@0", "channels": {"x_vel": {}}}
+                                           ).encode("utf-8"))
+        f = dataclasses.replace(_frame({"x_vel": _samples(2.0)}), artifacts={"baseline": bad})
+        out = _by_key(self.d.infer(f))
+        self.assertIs(out["vel_z_max"].quality, Quality.MODEL_NOT_LOADED)
+
+    def test_证据里写明基线采自哪段(self):
+        out = self._infer(1.0, z=0.5, temp=40.0)
+        self.assertIn("基线采自", out["evidence"].value)
+
+    def test_基线里没采过的轴不参与比较(self):
+        # 基线只有 x/z；本帧多了 y —— y 没有基线，不该被硬比
+        f = _frame({"x_vel": _samples(1.0), "y_vel": _samples(99.0), "z_vel": _samples(0.5)})
+        f = dataclasses.replace(f, artifacts={"baseline": self.art})
+        out = _by_key(self.d.infer(f))
+        self.assertLess(out["vel_z_max"].value, 3.0,
+                        "y 轴没有基线，不该拿它算出一个天文数字的 z")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from concurrent import futures
 import grpc
 
 from . import api, httpapi
+from .artifactcache import ActiveArtifacts
 from .bindings import BindingStore
 from .config import Config
 from .domains import discover
@@ -102,8 +103,10 @@ class Service:
         client = HsClient(HsConfig(
             read_addr=cfg.hs_read_addr, write_addr=cfg.hs_write_addr,
             ca_file=cfg.ca_file, cert_file=cfg.cert_file, key_file=cfg.key_file))
+        # 当前启用工件的提供者：推理时交给模块（模块不碰存储）。
+        active_arts = ActiveArtifacts(workbench, cfg.data_dir / "artifacts")
         sched = Scheduler(client=client, fetcher=Fetcher(client), domains=domains,
-                          bindings=bindings, points=points)
+                          bindings=bindings, points=points, artifacts=active_arts)
         # 训练执行器：串行一条，排队顺序 = 建任务顺序（见 trainer 模块头 §2）。
         # ★没有写路径也照起 —— 训练只读实时库、只写本地工件，与结论回流无关。
         trainer = Trainer(workbench=workbench, bindings=bindings, domains=domains,
@@ -137,11 +140,13 @@ class Service:
             if b is None:
                 raise RuntimeError(
                     f"{seg.domain}/{seg.binding} 没有绑定 —— 不知道该取哪些点，无法回溯判别")
-            frame = Fetcher(client).fetch(b, seg.t_to)
+            frame = Fetcher(client).fetch(
+                b, seg.t_to, artifacts=active_arts.for_binding(seg.domain, seg.binding))
             # 片段的窗口就是片段本身的时间范围，不是绑定上配的那个 window_sec。
             frame = Frame(domain=frame.domain, binding=frame.binding,
                           t_start=seg.t_from, t_end=seg.t_to,
-                          channels=frame.channels, params=frame.params)
+                          channels=frame.channels, params=frame.params,
+                          artifacts=frame.artifacts)
             res = run_domain(loaded_dom, frame)
             names = {o.key: o.display for o in loaded_dom.declaration.outputs}
             note = ("用当前配置与模型重跑；**未写回实时库**"

@@ -51,7 +51,8 @@ class Fetcher:
     def __init__(self, client: HsClient) -> None:
         self._client = client
 
-    def fetch(self, b: Binding, end_time: datetime) -> Frame:
+    def fetch(self, b: Binding, end_time: datetime,
+              artifacts: dict | None = None) -> Frame:
         """取 `[end - window, end]` 这一段，成一帧。
 
         ★`end_time` 由调度器给，且**通常是"上一个整节拍"而不是 `now()`** ——
@@ -93,4 +94,7 @@ class Fetcher:
         return Frame(domain=b.domain, binding=b.binding,
                      t_start=start, t_end=end_time, channels=channels,
                      # 台账参数照抄，**不解释、不填缺省** —— 缺什么由模块自己发现并落码。
-                     params=dict(b.params))
+                     params=dict(b.params),
+                     # 当前启用的工件（推理路径才给；**训练路径不给** —— 训的时候拿旧模型
+                     # 当输入，就成了模型喂自己，漂了也看不出来）。
+                     artifacts=dict(artifacts or {}))

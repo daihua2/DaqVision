@@ -57,12 +57,15 @@ class Scheduler:
 
     def __init__(self, *, client: HsClient, fetcher: Fetcher,
                  domains: dict[str, LoadedDomain], bindings: BindingStore,
-                 points: PointMap) -> None:
+                 points: PointMap, artifacts=None) -> None:
         self._client = client
         self._fetcher = fetcher
         self._domains = domains
         self._bindings = bindings
         self._points = points
+        # 当前启用工件的提供者（`ActiveArtifacts`）。没接 = 模块永远拿不到工件，
+        # 于是靠模型/基线的那些结论一律落 MODEL_NOT_LOADED —— 那是**如实**的降级，不是缺陷。
+        self._artifacts = artifacts
         self._stop = threading.Event()
         self._threads: dict[tuple[str, str], threading.Thread] = {}
         self._last_tick: dict[tuple[str, str], datetime] = {}
@@ -104,7 +107,9 @@ class Scheduler:
             logger.warning("绑定 %s/%s 缺必填角色 %s，本拍不推理", b.domain, b.binding, missing)
             return []
 
-        frame = self._fetcher.fetch(b, tick)      # hs 不可用会抛，由调用方按退避处置
+        # ★推理路径**带上当前启用的工件**；训练路径不带（拿旧模型当输入 = 模型喂自己）。
+        arts = self._artifacts.for_binding(b.domain, b.binding) if self._artifacts else {}
+        frame = self._fetcher.fetch(b, tick, artifacts=arts)   # hs 不可用会抛，调用方按退避处置
         result = run_domain(loaded, frame)
 
         items: list[tuple[int, Finding]] = []

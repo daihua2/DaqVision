@@ -57,7 +57,7 @@ from .fetch import Fetcher
 from .types import Dataset, LabeledFrame, ProgressSink, TrainedArtifact
 from .workbench import (
     JOB_CANCELED, JOB_FAILED, JOB_PENDING, JOB_READY, JOB_RUNNING,
-    KIND_MODEL, Workbench, WorkbenchError,
+    Workbench, WorkbenchError,
 )
 
 logger = logging.getLogger(__name__)
@@ -293,7 +293,7 @@ class Trainer:
     # ── 落盘 ──────────────────────────────────────────────────────────────
     def _store(self, job, dataset: Dataset, art: TrainedArtifact,
                skipped: list[tuple[int, str]]) -> int:
-        rel = f"{job.domain}/{job.id}-{_safe(art.algo)}{art.suffix}"
+        rel = f"{job.domain}/{art.kind}/{job.id}-{_safe(art.algo)}{art.suffix}"
         target = self._artifacts_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         blob = bytes(art.blob)
@@ -310,7 +310,8 @@ class Trainer:
             meta.setdefault("skipped_sample_ids",
                             ",".join(str(sid) for sid, _ in skipped[:50]))
         return self._wb.add_artifact(
-            domain=job.domain, name=f"{dataset.name}-{job.id}", kind=KIND_MODEL,
+            # ★`kind` 由域说了算（模型 / 基线 / …）。骨架写死会让基线顶掉模型的激活位。
+            domain=job.domain, name=f"{dataset.name}-{job.id}", kind=art.kind,
             binding=job.binding, algo=art.algo, dataset_id=job.dataset_id,
             sample_count=len(dataset), feature_count=art.feature_count,
             accuracy=art.accuracy, path=rel, size=len(blob),

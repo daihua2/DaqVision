@@ -23,13 +23,35 @@
 
 | 层 | 内容 | 状态 |
 | --- | --- | --- |
-| ① | ISO 10816-3 烈度判级 + 方向性倾向 | **本文件** |
-| ② | 基线与趋势（μ/σ、EWMA 斜率、温升、剩余可用天数） | 待骨架给"域私有状态"的落点（要能备份/授权，不许模块自己存文件） |
-| ③ | 多变量异常检测（IsolationForest 一类） | 依赖 ②的基线 |
+| ① | ISO 10816-3 烈度判级 + 方向性倾向 | ✅ 本文件 |
+| ② | **基线与偏离**（μ/σ、三轴比例漂移、温升、异常分） | ✅ 本文件（2026-09-11） |
+| ②′ | **趋势外推**（EWMA 斜率、剩余可用天数） | ⛔ 见 §0.5 —— 它要的东西骨架还没有，**不硬做** |
+| ③ | 多变量异常检测（IsolationForest 一类） | 依赖 ②，且要引第三方库，另议 |
 | ④ | 证据包 + LLM 解释 | 依赖 ②③，且 LLM 出网待议 |
 
-★①**不需要训练、不需要历史状态、不需要第三方库**，所以它能第一个落地，
+★①**不需要训练、不需要历史状态、不需要第三方库**，所以它第一个落地，
   而且它恰好是文档里写的"最该先做的"：**把数值变成该不该停机**。
+★②需要一条**基线**。基线走训练面产出（`train()`），落 `artifacts` 表 `kind='baseline'`
+  —— 判据是 AICloud `C-11 §5` 给的："要能看见它是什么时候采的、能不能重采的，就是资产"。
+  换工况必须重采，运维必须看得见是哪段数据采的 ⇒ 两样都成立 ⇒ 它是资产，不是中间量。
+
+## 0.5 ★为什么**趋势外推**这一片不做（不是忘了）
+
+改造方案 §3 轨A② 里还有两件：`ewma_trend`（劣化速度，dB/天）与
+`days_to_threshold`（按趋势外推的剩余可用天数）。**本文件不做它们**，理由是：
+
+它们要的不是"这一帧"，是**同一路输入在很多天上的走向**。而模块拿到的只有一帧
+（骨架按节拍取的那个窗口）。要做只有两条路，**两条现在都不该走**：
+
+| 路 | 为什么现在不走 |
+| --- | --- |
+| 把绑定的窗口拉到几十天 | 每一拍都取几十天的点，只为算一个斜率 —— 这是把实时库当批处理引擎用 |
+| 让模块自己攒跨帧状态 | 与分界直接冲突（状态归骨架）。而且进程一重启就从头攒，界面上看不出"这条趋势是从什么时候开始的" |
+
+⇒ **等骨架真给"跨帧运行状态"或"长窗口取数"那一格时再做**，
+  而那一格应当由一个真需求逼出来 —— 就像台账参数（1.1）与推理时的工件（本轮）那样。
+  在那之前**宁可少一条结论，也不给一个每次重启就归零的"剩余可用天数"**：
+  那种数字看起来最像专业结论，也最容易被人当真。
 
 ## 0.3 为什么必须有台账参数（`Declaration.params`）
 
@@ -56,10 +78,14 @@ from datetime import datetime
 
 # ★域模块 import 骨架一律用**绝对包名**（`aiintegration.…`）：
 #   装载器是按文件路径 exec 的，模块不在包里，相对 import 会当场炸。
+import json
+import math
+
 from aiintegration.domains import Domain
 from aiintegration.quality import Quality
 from aiintegration.types import (
-    Declaration, Finding, Frame, InputSpec, OutputSpec, ParamSpec,
+    Dataset, Declaration, Finding, Frame, InputSpec, OutputSpec, ParamSpec,
+    ProgressSink, TrainedArtifact,
 )
 
 # ─────────────────────────── ISO 10816-3 边界表 ───────────────────────────
@@ -94,6 +120,23 @@ _AXES = ("x", "y", "z")
 _AXIAL_SIGNIFICANT = 0.5   # 轴向 / 径向 ≥ 此值 ⇒ 轴向占比异常
 _RADIAL_BALANCED = 0.8     # 径向两轴互比落在 [0.8, 1/0.8] ⇒ 视为各向同性
 
+#: 基线格式版本。**存进工件里**——将来改了格式，老工件要能被认出来而不是被误读。
+BASELINE_FORMAT = "vibration_lowfreq/baseline@1"
+
+#: 采基线至少要几帧。★少于这个数算出来的 σ 没有意义，
+#: 而一个 σ≈0 的基线会让**任何**正常波动都变成"z 分数爆表"。
+MIN_BASELINE_FRAMES = 5
+
+#: σ 的下限（mm/s）。传感器分辨率与量化噪声决定它不可能真的是 0。
+#: ★不设下限的后果是除零或者天文数字的 z 分数 —— 后者更坏，因为它看着像个结论。
+MIN_SIGMA = 0.01
+
+#: 认为"偏离显著"的 z 分数。经验值，用于合成异常分与证据措辞，**不是国标**。
+_Z_NOTABLE = 3.0
+
+#: 采基线时认哪个标签算"正常"。可被台账参数 `normal_label` 覆盖。
+DEFAULT_NORMAL_LABEL = "正常"
+
 
 class LowFreqVibration(Domain):
     """低频振动诊断（L1+ 档：烈度分级 + 方向性倾向）。"""
@@ -114,6 +157,9 @@ class LowFreqVibration(Domain):
                           description="Y 轴速度"),
                 InputSpec(role="z_vel", unit="mm/s", required=False,
                           description="Z 轴速度"),
+                # 第②层用：温升是轴承劣化的**独立佐证**（振动没变而温度升了，多半是润滑/冷却）。
+                InputSpec(role="temp", unit="℃", required=False,
+                          description="测点温度（有就用它算温升，没有就不给那一条结论）"),
             ),
             params=(
                 ParamSpec(
@@ -151,6 +197,13 @@ class LowFreqVibration(Domain):
                         "沿转轴方向的那一轴。★没有缺省：'一般是 Z' 猜错会把不对中说成不平衡。"
                         "缺它只影响方向性两条结论，ISO 分级照出"),
                 ),
+                ParamSpec(
+                    key="normal_label", display="采基线时认哪个标签算正常",
+                    value_type="string", default=DEFAULT_NORMAL_LABEL, required=False,
+                    description=(
+                        "采基线只用被标成这个标签的样本。★这一项**允许有缺省**，"
+                        "与上面四项不同 —— 猜错它的后果是**当场可见的**（一条样本都匹配不上，"
+                        "训练直接失败并说清），而不是悄悄算出一个偏了的结论")),
             ),
             outputs=(
                 OutputSpec(key="vel_max", display="速度最大值", value_type="float", unit="mm/s",
@@ -167,10 +220,95 @@ class LowFreqVibration(Domain):
                            description="轴向轴 ÷ 径向两轴的较大者。偏高指向不对中"),
                 OutputSpec(key="direction_hint", display="方向性倾向", value_type="string",
                            description="★倾向性判断，不是确诊 —— 无频谱数据，置信度明显低于谱诊断"),
+                # ── 第②层：相对**这台机器自己的基线**的偏离 ──
+                OutputSpec(key="vel_z_max", display="速度偏离(最大 z)", value_type="float",
+                           description="各轴 (当前−基线μ)/基线σ 的最大值。>3 视为显著偏离"),
+                OutputSpec(key="ratio_drift", display="三轴比例漂移", value_type="float",
+                           description="轴向/径向比相对基线的变化量。★没有频谱时判故障类型的主要抓手"),
+                OutputSpec(key="temp_rise", display="温升", value_type="float", unit="℃",
+                           description="相对基线的温度变化。轴承劣化的独立佐证"),
+                OutputSpec(key="anomaly_score", display="异常分", value_type="float",
+                           description="0~100，由上面几项合成。★不是概率，是**排序用的分数**"),
                 OutputSpec(key="evidence", display="判据摘要", value_type="string",
                            description="人能直接读的一句话：用了哪几轴、判到哪一档、为什么"),
             ),
         )
+
+    # ── 训练（采基线）──────────────────────────────────────────────────────
+    def train(self, dataset: Dataset, report: ProgressSink) -> TrainedArtifact:
+        """采一条**基线**：这台机器"正常运行"时各轴速度与温度的 μ/σ 与三轴比例。
+
+        ★这不是在训一个模型，是在记录"这台机器好的时候长什么样"。
+          走同一条训练面，是因为它与模型有**同样的身份问题**：
+          谁采的、什么时候采的、能不能重采、现在用的是哪一条 —— 都要答得上（`AI-13 §5`）。
+
+        ★**只用被标成"正常"的样本**。哪个标签算正常由台账 `normal_label` 定，缺省"正常"。
+          一条都匹配不上就**当场失败并说清**，不是拿全部样本凑合 ——
+          拿故障数据采出来的基线，会把故障态当成常态，从此再也报不出这个故障。
+        """
+        wanted = DEFAULT_NORMAL_LABEL
+        for it in dataset.items:                 # 台账在帧上，各帧同一个绑定故取第一个
+            wanted = it.frame.params.get("normal_label", "").strip() or DEFAULT_NORMAL_LABEL
+            break
+
+        normals = [it for it in dataset.items if it.label == wanted]
+        if len(normals) < MIN_BASELINE_FRAMES:
+            raise ValueError(
+                f"采基线需要至少 {MIN_BASELINE_FRAMES} 帧标为 {wanted!r} 的样本，"
+                f"实际只有 {len(normals)} 帧（训练集里共 {len(dataset)} 帧，"
+                f"标签分布 {dataset.label_counts()}）—— "
+                "样本太少算出来的 σ 没有意义，而 σ≈0 的基线会让任何正常波动都变成异常")
+
+        report.report(0.2, f"用 {len(normals)} 帧 {wanted!r} 样本采基线")
+
+        channels: dict[str, dict[str, float]] = {}
+        for role in [f"{a}_vel" for a in _AXES] + ["temp"]:
+            vals = []
+            for it in normals:
+                v = _window_peak(it.frame, role) if role != "temp" else _window_mean(it.frame, role)
+                if v is not None:
+                    vals.append(v)
+            if len(vals) >= MIN_BASELINE_FRAMES:
+                mu, sigma = _mean_std(vals)
+                channels[role] = {"mean": mu, "std": max(sigma, MIN_SIGMA), "n": len(vals)}
+
+        if not any(k.endswith("_vel") for k in channels):
+            raise ValueError(
+                "一路速度都没能采到足够样本 —— 检查绑定与这段时间实时库里有没有数据")
+
+        report.report(0.8, "统计完成")
+
+        # 三轴比例（轴向/径向）也进基线：不对中的抓手是"比例变了"，不是"值变大了"。
+        ratio = None
+        axial = ""
+        for it in normals:
+            axial = (it.frame.params.get("axial_axis", "") or "").strip().lower()
+            break
+        if axial in _AXES:
+            ax = channels.get(f"{axial}_vel")
+            rad = [channels[f"{a}_vel"]["mean"] for a in _AXES
+                   if a != axial and f"{a}_vel" in channels]
+            if ax and rad and max(rad) > 0:
+                ratio = ax["mean"] / max(rad)
+
+        model = {
+            "format": BASELINE_FORMAT,
+            "label": wanted,
+            "frames": len(normals),
+            "t_from": min(it.frame.t_start for it in normals).isoformat(),
+            "t_to": max(it.frame.t_end for it in normals).isoformat(),
+            "axial_axis": axial,
+            "axial_ratio": ratio,
+            "channels": channels,
+        }
+        blob = json.dumps(model, ensure_ascii=False, indent=1).encode("utf-8")
+        return TrainedArtifact(
+            blob=blob, algo="基线统计", kind="baseline", suffix=".json",
+            # ★基线没有"准确率"这回事 —— 给 None，别拿 1.0 顶（那会在界面上显示成"100%"）。
+            accuracy=None, feature_count=len(channels),
+            meta={"format": BASELINE_FORMAT, "normal_label": wanted,
+                  "frames": str(len(normals)),
+                  "t_from": model["t_from"], "t_to": model["t_to"]})
 
     # ── 推理 ──────────────────────────────────────────────────────────────
     def infer(self, frame: Frame) -> list[Finding]:
@@ -250,6 +388,24 @@ class LowFreqVibration(Domain):
                     Finding(key="direction_hint", value=hint, quality=Quality.OK, t=t),
                 ]
 
+        # ③′ 第②层：相对基线的偏离。没有基线就整组落 MODEL_NOT_LOADED。
+        base_note = ""
+        baseline = frame.artifacts.get("baseline")
+        if baseline is None:
+            base_note = "无可用基线（未采或未启用），偏离与异常分未给"
+            out += _bad_group(frame, ("vel_z_max", "ratio_drift", "temp_rise",
+                                      "anomaly_score"), Quality.MODEL_NOT_LOADED, t)
+        else:
+            try:
+                model = _parse_baseline(baseline.blob)
+            except Exception as exc:  # noqa: BLE001 —— 坏工件不许掀翻整拍推理
+                base_note = f"基线工件读不懂（{type(exc).__name__}），偏离与异常分未给"
+                out += _bad_group(frame, ("vel_z_max", "ratio_drift", "temp_rise",
+                                          "anomaly_score"), Quality.MODEL_NOT_LOADED, t)
+            else:
+                out2, base_note = _deviation(model, axis_peak, frame, t, axial, dir_bad)
+                out += out2
+
         # ④ 证据摘要 —— 把上面每一条"为什么没给"都摊开写。
         parts = [f"三轴取窗口内最大值：{used}；最大在 {dominant} 轴 {vel_max:.3f} mm/s"]
         if iso_bad:
@@ -264,6 +420,8 @@ class LowFreqVibration(Domain):
             parts.append(f"方向性倾向未给：{dir_bad}")
         else:
             parts.append(f"方向性：{hint}")
+        if base_note:
+            parts.append(base_note)
         parts.append("★本域无频谱数据，方向性为倾向判断而非确诊；要判到零件级需上频带谱能量(L2)以上的传感器")
         if degraded:
             parts.append("降级：" + "；".join(degraded))
@@ -360,6 +518,132 @@ def _direction(peaks: dict[str, float], axial: str, radials: list[str]) -> tuple
     if ratio >= _AXIAL_SIGNIFICANT:
         return ratio, "轴向占比偏高 —— 倾向不对中 / 联轴器问题"
     return ratio, "径向主导且轴向较弱 —— 倾向不平衡"
+
+
+def _window_peak(frame: Frame, role: str) -> float | None:
+    """窗口内可信样本的最大值。与推理侧取值口径**一致** —— 基线与当前值必须同口径，
+    否则 z 分数比的是两把不同的尺子。"""
+    best = None
+    for s in frame.channels.get(role, []):
+        if s.quality is not Quality.OK:
+            continue
+        v = _as_float(s.value)
+        if v is not None and (best is None or v > best):
+            best = v
+    return best
+
+
+def _window_mean(frame: Frame, role: str) -> float | None:
+    """窗口内可信样本的均值（温度用它 —— 温度取峰值没有意义，它本来就慢）。"""
+    vals = [v for s in frame.channels.get(role, [])
+            if s.quality is Quality.OK and (v := _as_float(s.value)) is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _mean_std(vals: list[float]) -> tuple[float, float]:
+    """样本均值与**样本标准差**（n-1）。n<2 时 σ 给 0，由调用方套下限。"""
+    n = len(vals)
+    mu = sum(vals) / n
+    if n < 2:
+        return mu, 0.0
+    var = sum((v - mu) ** 2 for v in vals) / (n - 1)
+    return mu, math.sqrt(var)
+
+
+def _parse_baseline(blob: bytes) -> dict:
+    """解析基线工件。**格式不认就抛** —— 拿不认识的结构去算，算出来的数没人看得出是错的。"""
+    model = json.loads(blob.decode("utf-8"))
+    if not isinstance(model, dict):
+        raise ValueError("基线工件不是一个对象")
+    fmt = model.get("format", "")
+    if fmt != BASELINE_FORMAT:
+        raise ValueError(f"基线格式是 {fmt!r}，本域只认 {BASELINE_FORMAT!r}")
+    if not isinstance(model.get("channels"), dict) or not model["channels"]:
+        raise ValueError("基线里一路通道都没有")
+    return model
+
+
+def _deviation(model: dict, axis_peak: dict[str, float], frame: Frame,
+               t: datetime, axial: str, dir_bad: str) -> tuple[list[Finding], str]:
+    """相对基线的偏离。逐条各判质量 —— 与第①层同一条纪律。"""
+    chans = model["channels"]
+    out: list[Finding] = []
+    notes: list[str] = []
+
+    # ① 各轴 z 分数取最大。**只比基线里有的那些轴**：基线没采过的轴，比不了。
+    zs: dict[str, float] = {}
+    for axis, cur in axis_peak.items():
+        c = chans.get(f"{axis}_vel")
+        if not c:
+            continue
+        sigma = max(float(c.get("std") or 0.0), MIN_SIGMA)
+        zs[axis] = (cur - float(c["mean"])) / sigma
+    if zs:
+        worst = max(zs, key=lambda a: zs[a])
+        out.append(Finding(key="vel_z_max", value=round(zs[worst], 3),
+                           quality=Quality.OK, t=t))
+        if zs[worst] >= _Z_NOTABLE:
+            notes.append(f"{worst} 轴较基线偏高 {zs[worst]:.1f}σ")
+    else:
+        out.append(Finding(key="vel_z_max", value=None,
+                           quality=Quality.INSUFFICIENT_SAMPLES, t=t))
+        notes.append("本帧没有与基线同轴的可信样本，z 分数未给")
+
+    # ② 三轴比例漂移。要基线里存过比例，且本帧方向性算得出来。
+    base_ratio = model.get("axial_ratio")
+    if base_ratio is None or dir_bad or axial not in axis_peak:
+        out.append(Finding(key="ratio_drift", value=None,
+                           quality=Quality.CONFIG_INCOMPLETE if base_ratio is None
+                           else Quality.INSUFFICIENT_SAMPLES, t=t))
+        if base_ratio is None:
+            notes.append("基线里没有三轴比例（采基线时轴向未填），比例漂移未给")
+    else:
+        radials = [axis_peak[a] for a in _AXES if a != axial and a in axis_peak]
+        cur_ratio = axis_peak[axial] / max(radials) if radials and max(radials) > 0 else None
+        if cur_ratio is None:
+            out.append(Finding(key="ratio_drift", value=None,
+                               quality=Quality.INSUFFICIENT_SAMPLES, t=t))
+        else:
+            drift = cur_ratio - float(base_ratio)
+            out.append(Finding(key="ratio_drift", value=round(drift, 4),
+                               quality=Quality.OK, t=t))
+            if abs(drift) >= 0.2:
+                notes.append(f"三轴比例较基线漂移 {drift:+.2f}"
+                             f"（{'轴向占比升高，倾向不对中' if drift > 0 else '轴向占比下降'}）")
+
+    # ③ 温升。没绑温度、或基线里没温度，就不给 —— 不拿 0 顶。
+    base_temp = chans.get("temp")
+    cur_temp = _window_mean(frame, "temp")
+    if base_temp is None or cur_temp is None:
+        out.append(Finding(key="temp_rise", value=None,
+                           quality=Quality.NO_INPUT if cur_temp is None
+                           else Quality.MODEL_NOT_LOADED, t=t))
+    else:
+        rise = cur_temp - float(base_temp["mean"])
+        out.append(Finding(key="temp_rise", value=round(rise, 3), quality=Quality.OK, t=t))
+        if rise >= 5.0:
+            notes.append(f"温度较基线高 {rise:.1f}℃")
+
+    # ④ 异常分：把上面几项合成一个 0~100 的**排序用**分数。
+    #    ★不是概率、不是置信度。写清楚是因为一个 0~100 的数最容易被当成概率读。
+    if not zs:
+        out.append(Finding(key="anomaly_score", value=None,
+                           quality=Quality.INSUFFICIENT_SAMPLES, t=t))
+    else:
+        z_part = min(1.0, max(0.0, max(zs.values())) / (2 * _Z_NOTABLE))
+        got_drift = next((f for f in out if f.key == "ratio_drift"), None)
+        d_part = min(1.0, abs(got_drift.value) / 0.5) if (
+            got_drift is not None and got_drift.value is not None) else 0.0
+        got_temp = next((f for f in out if f.key == "temp_rise"), None)
+        t_part = min(1.0, max(0.0, got_temp.value) / 10.0) if (
+            got_temp is not None and got_temp.value is not None) else 0.0
+        score = 100.0 * (0.6 * z_part + 0.25 * d_part + 0.15 * t_part)
+        out.append(Finding(key="anomaly_score", value=round(score, 1),
+                           quality=Quality.OK, t=t))
+
+    head = (f"基线采自 {model.get('t_from', '?')[:16]}~{model.get('t_to', '?')[:16]}"
+            f"（{model.get('frames', '?')} 帧 {model.get('label', '?')}）")
+    return out, head + ("；" + "；".join(notes) if notes else "；本帧未见相对基线的显著偏离")
 
 
 def _bad_group(frame: Frame, keys: tuple[str, ...], q: Quality, t: datetime) -> list[Finding]:
