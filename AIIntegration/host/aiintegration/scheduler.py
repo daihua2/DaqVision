@@ -95,6 +95,10 @@ class Scheduler:
         #   entitystream.go）每次建立订阅都重走一遍全量，所以它那两段点重启后原数回来了。
         self._resnap_lock = threading.Lock()
         self._need_resnapshot = False
+        #: 上次见到的对端**实例身份**（`PingRes.instanceId`，实时库 1.9.441 起）。
+        #  ★这才是精确判据：引擎重启即换实例 ⇒ 我方的快照失效 ⇒ 必须重推。
+        #    空串 = 对端是老引擎（没有这一格）⇒ 退回下面那个周期兜底，**不当成"变了"**。
+        self._peer_instance: str | None = None
         #: 最近一次**成功推送**全量快照的单调时刻；None = 从没推过。
         #  ★不叫"已被当前引擎实例接受" —— 那是本方 AI-32 版里说过而做不到的话：
         #    推送成功只证明"推的那一刻对端收了"，证明不了"现在这个实例手上还有"。
@@ -176,7 +180,7 @@ class Scheduler:
                 #   那一拍的值会落在"引擎还不认识这个点"的窗口里。
                 # ★两个触发:① 断连过(写失败);② **到周期**——后者才是主力,
                 #   因为实时库重启时写入根本不会失败(C-32 实测)。
-                if self._need_resnapshot or self._resnapshot_due():
+                if self._need_resnapshot or self._peer_changed() or self._resnapshot_due():
                     self._republish_snapshot()
                 tick = aligned_tick(datetime.now(timezone.utc), b.interval_sec)
                 if self._last_tick.get((domain, binding)) != tick:
@@ -200,13 +204,40 @@ class Scheduler:
           「失败长得像一切正常」的做法。
         """
         with self._resnap_lock:
-            if not (self._need_resnapshot or self._resnapshot_due()):
+            if not (self._need_resnapshot or self._peer_changed() or self._resnapshot_due()):
                 return                      # 别的线程刚推过
-            why = "断而复连" if self._need_resnapshot else "到周期"
+            why = ("断而复连" if self._need_resnapshot
+                   else "对端换了实例" if self._peer_changed() else "到周期")
             n = self.ensure_points()        # 抛出 ⇒ 标志不清,外层退避后重来
             self._need_resnapshot = False
+            try:                                # 推成了才认下新实例身份
+                self._peer_instance = self._client.instance_id() or self._peer_instance
+            except Exception:                   # noqa: BLE001
+                pass
             logger.info("%s:已重推全量结论点快照(%d 个点)—— 引擎重启会丢掉未重推的点定义,"
                         "而值照样写得进、健康口照样绿(AICloud C-27/C-32)", why, n)
+
+    def _peer_changed(self) -> bool:
+        """对端是不是换实例了（引擎重启）。★这是**精确判据**，周期那条只是兜底。
+
+        ★**空串不特判**（老引擎没有这一格）：直接记住并比较，三种情形都对 ——
+          · 老引擎恒空：`"" == ""` ⇒ 不变，靠周期兜底；
+          · **老引擎升级成新引擎**：`"" → "inst-A"` ⇒ **判变、立刻重推** ——
+            升级必然重启，快照确实失效，这一推是该推的；
+          · 新引擎重启：`"A" → "B"` ⇒ 判变。
+          ★先前这里特判了空串（`if not cur: return False`），**变异验证发现它没有作用**，
+            而且它会让上面第二种情形错过一次该推的重推。去掉。
+        ★探活失败回 False：那一支由调用方的退避与 `_need_resnapshot` 管，
+          不在这里把"问不到"当成"变了"。
+        """
+        try:
+            cur = self._client.instance_id()
+        except Exception:                       # noqa: BLE001 —— 连不上，交给退避支路
+            return False
+        if self._peer_instance is None:
+            self._peer_instance = cur           # 第一次见到，不算"变了"（启动已推过）
+            return False
+        return cur != self._peer_instance
 
     def _resnapshot_due(self) -> bool:
         """到周期没有。从没推过 ⇒ 到期（启动路径会先推一次，这里是兜底）。"""

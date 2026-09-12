@@ -222,6 +222,20 @@ class HsClient:
             response_deserializer=resp_cls.FromString,
         )(req, timeout=timeout)
 
+    def instance_id(self) -> str:
+        """对端**进程实例**的身份（`PingRes.instanceId`，实时库 1.9.441 起）。
+
+        ★用途：引擎重启后我方的**实体配置快照失效**（点定义没了），而**值照样写得进** ——
+          写入不失败、`LookupGlobal` 也答不了（映射仍在，丢的只是实体配置）。
+          于是"该不该重推"只能靠这一格：**记住它，变了就重推全量快照**。
+        ★老引擎回**空串**（proto3 未知字段静默丢）⇒ 调用方按「缺失即不支持」退回定期重推，
+          **别把空串当成"实例变了"** —— 那会变成每拍都推。
+        """
+        try:
+            return self.ping().instanceId or ""
+        except Exception:                       # 探活失败交给调用方的退避，不在这里吞
+            raise
+
     def ping(self) -> hs.PingRes:
         """探活。★受限连接**不能**用 `GetServerStatus`（那是全量门，必被拒），用 `Ping`。"""
         ch = self._write_channel() if self._cfg.can_write() else self._read_channel()

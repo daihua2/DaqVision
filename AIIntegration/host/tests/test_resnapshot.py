@@ -230,3 +230,76 @@ class TestPeriodicResnapshot(unittest.TestCase):
         s._loop("d", "b")
         self.assertGreater(c.snapshots, before, "到周期必须重推，哪怕一次异常都没有")
         self.assertFalse(s._need_resnapshot)
+
+
+class TestPeerInstanceChange(unittest.TestCase):
+    """★精确判据：对端换实例（引擎重启）就重推 —— 实时库 1.9.441 起的 PingRes.instanceId。
+
+    这是 C-32 那条"没有精确判据可用"的正解：引擎重启后我方快照失效而**值照样写得进**，
+    写入不失败、LookupGlobal 也答不了（映射仍在，丢的只是实体配置）——
+    只有"对端是不是换了个实例"这一格答得了。
+    """
+
+    def _mk(self, ids):
+        """ids: instance_id() 依次返回的值（模拟对端）。"""
+        s, c = _mk()
+        seq = list(ids)
+        c.instance_id = lambda: seq.pop(0) if len(seq) > 1 else seq[0]
+        return s, c
+
+    def test_same_instance_does_not_republish(self):
+        s, c = self._mk(["inst-A"])
+        s.ensure_points()
+        before = c.snapshots
+        self.assertFalse(s._peer_changed())      # 第一次见到，不算变
+        self.assertFalse(s._peer_changed())      # 之后恒等
+        self.assertEqual(c.snapshots, before)
+
+    def test_changed_instance_triggers(self):
+        s, c = self._mk(["inst-A", "inst-A", "inst-B"])
+        s.ensure_points()
+        self.assertFalse(s._peer_changed())      # 记住 A
+        self.assertFalse(s._peer_changed())      # 仍是 A
+        self.assertTrue(s._peer_changed())       # ★换成 B ⇒ 要重推
+
+    def test_old_engine_empty_id_stays_unchanged(self):
+        """老引擎恒回空串 ⇒ 恒等 ⇒ 不判变（靠周期兜底），不会每拍都推。"""
+        s, c = self._mk([""])
+        s.ensure_points()
+        for _ in range(5):
+            self.assertFalse(s._peer_changed())
+
+    def test_upgrade_from_old_engine_counts_as_changed(self):
+        """★老引擎升级成新引擎（空串 → 有 id）**要判变** —— 升级必然重启，快照确实失效。
+
+        先前这里特判了空串（空就直接回 False），会让这一次该推的重推被漏掉；
+        变异验证显示那个特判对其它情形也没有作用，已去掉。
+        """
+        s, c = self._mk(["", "", "inst-A"])
+        s.ensure_points()
+        self.assertFalse(s._peer_changed())      # 记住 ""
+        self.assertFalse(s._peer_changed())      # 仍是老引擎
+        self.assertTrue(s._peer_changed())       # ★升级后必须判变
+
+    def test_ping_failure_is_not_a_change(self):
+        """探活失败交给退避支路，不在这里当成"变了"。"""
+        s, c = _mk()
+        def boom():
+            raise RuntimeError("连不上")
+        c.instance_id = boom
+        self.assertFalse(s._peer_changed())
+
+    def test_loop_republishes_when_instance_changes(self):
+        """★端到端：一拍都没失败、也没到周期，仅因为对端换了实例就重推。"""
+        s, c = self._mk(["inst-A", "inst-A", "inst-B", "inst-B", "inst-B"])
+        s._bindings = type("B", (), {
+            "get": staticmethod(lambda d, b: _Binding()),
+            "list": staticmethod(lambda only_enabled=True: []),
+        })()
+        s.run_once = lambda b, tick: None        # 从不抛异常
+        s.ensure_points()
+        s._peer_changed()                        # 记住 A
+        before = c.snapshots
+        s._stop = _Stop(3)
+        s._loop("d", "b")
+        self.assertGreater(c.snapshots, before, "对端换实例必须触发重推")

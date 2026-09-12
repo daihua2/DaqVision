@@ -1,7 +1,7 @@
 # historystore 契约的 vendor 副本
 
 来源仓：historystore（同一责任人，但**是另一个仓**）
-来源提交：00d184b
+来源提交：c2c43c1
 取用日期：2026-09-13
 
 ## 为什么 vendor 而不是构建时去拉
