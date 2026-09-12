@@ -23,10 +23,25 @@ import enum
 
 # daq.StatusCode 里我方用到的那几个（数值取自 daqcontract.proto，勿改）。
 STATUS_OK = 1
+STATUS_QUALITY_GOOD = 5000
+STATUS_QUALITY_PENDING = 5004
 STATUS_QUALITY_BAD = -1000
 STATUS_QUALITY_CONFIG_ERROR = -1001
 STATUS_QUALITY_NOT_CONNECTED = -1002
 STATUS_QUALITY_OUT_OF_SERVICE = -1007
+
+# ── 入向：哪些码算「这笔输入可信」────────────────────────────────────────
+# ★依据 `daq.StatusCode`，并经**现场实测**（2026-09-12，AISERVER 全量口回读 khb 组
+#   gid 810/814/818/806）：实时库**点值的好码是 `QualityGood(5000)`**，
+#   `Ok(1)` 属通用操作成功那一族。本模块此前只认 `1`，**把 5000 判成了坏** ——
+#   后果是每一笔真实输入都被当不可信、结论每拍落坏质量。未上线前查出（见 AI-25）。
+#   ⇒ 两个都留：`1` 有现网用法（别处的「原值 1=Ok」），`5000` 是点值实际用的。
+# `5004 QualityPending`：实测**每个点的末拍恒为它**（未最终确认），值是真实采样、
+#   不在 Bad 族里，故算可信。
+# 其余 Uncertain 族（`5001/5002/5003/5005`、`6000`、`9000` 族）**一律不算可信** ——
+#   它们语义各异，替上游发明「可不可信」不是我方的事；
+#   原始码照旧原样留在 `Sample.status_code`，要细分的模块自己看。
+TRUSTED_INPUT_CODES = frozenset({STATUS_OK, STATUS_QUALITY_GOOD, STATUS_QUALITY_PENDING})
 
 
 class Quality(enum.Enum):
@@ -88,9 +103,11 @@ class Quality(enum.Enum):
         那等于替上游发明语义（"设备故障"和"通讯失败"到了我方都只影响一件事：
         这笔输入不可信）。原始码由 `Sample.status_code` 原样留着，要细分的模块自己看。
 
-        判据与 hs 一致：**只有 `Ok(1)` 算好**，其余一律不可信。
+        判据见 `TRUSTED_INPUT_CODES`：`Ok(1)` / `QualityGood(5000)` / `QualityPending(5004)`
+        算好，其余一律不可信。★**不要写成 `code == 1`** —— 实时库点值的好码是 5000，
+        只认 1 会把全部真实输入判成坏（2026-09-12 实测查出）。
         """
-        return Quality.OK if code == STATUS_OK else Quality.INPUT_BAD
+        return Quality.OK if code in TRUSTED_INPUT_CODES else Quality.INPUT_BAD
 
 
 _TO_STATUS: dict[Quality, int] = {
