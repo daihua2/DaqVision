@@ -81,8 +81,12 @@ rm -rf "$ROOT/host"
 cp -r "$HERE/host" "$ROOT/host"
 mkdir -p "$ROOT/domains"
 # 域模块：**只补不删** —— 现场可能手工放过域，升级不该把它抹掉。
+# ★**缺依赖的域不铺**（见 host/aiintegration/domaindeps.py 模块头）：
+#   发布件带着仓里所有域，而域的第三方依赖（视觉域要 cv2/numpy/onnxruntime）不一定在这个发布件里。
+#   全铺下去 = 现场启动即装载失败、GetInfo.load_errors 常驻一条红的（AICloud 界面会显示它）。
+#   2026-09-12 手工移过一次文件，那只治标：不改这里，下次部署它照样回来。
 if [ -d "$HERE/domains" ]; then
-  cp -r "$HERE/domains/." "$ROOT/domains/"
+  PYTHONPATH="$ROOT/host" "$VENV/bin/python" -m aiintegration.domaindeps "$HERE/domains" "$ROOT/domains"
 fi
 mkdir -p "$ROOT/data" "$ROOT/cert"
 

@@ -36,6 +36,11 @@ import json
 import math
 import threading
 
+# ★安装期用（`aiintegration/domaindeps.py` 用 ast 读它，**不 import 本模块**）：
+#   本域要这三个第三方包。发布件不带它们时，安装脚本**不把本文件铺到现场** ——
+#   否则现场启动即装载失败，`GetInfo.load_errors` 里常驻一条红的。
+REQUIRES = ("cv2", "numpy", "onnxruntime")
+
 import cv2
 import numpy as np
 import onnxruntime as ort
