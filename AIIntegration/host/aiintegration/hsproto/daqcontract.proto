@@ -159,6 +159,11 @@ enum	StatusCode
 	QualityOverFlowBad			= -1031;
 	QualityOverHighBad			= -1032;
 	QualityOverLowBad			= -1033;
+	// 模型/基线未加载:算法侧(AI 集成服务等)对这个点**尚无可用模型或基线**,算不出结论。
+	// 形态仍是 NullValue + 本负码。★与采集链路无关 —— 别当成 -1007 那种\"服务退出/采集中断\"去查链路。
+	// 2026-09-13 应 historystore H-233 新增(daqgate D-231 取甲):-1007 已同时被
+	// 「通道退出服务」(daqgate)与「采集中断锚点」(historystore)占着,再叠一层就只能靠查来源才读得懂。
+	QualityModelNotLoaded		= -1034;
 }
 message Status
 {

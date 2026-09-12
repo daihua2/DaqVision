@@ -115,3 +115,30 @@ class TestEndToEndVQT(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOutboundModelNotLoaded(unittest.TestCase):
+    """出向：`MODEL_NOT_LOADED` 用**专用码** `-1034`，不再挪用 `-1007`。
+
+    由来（2026-09-13）：`-1007 QualityOutofService` 已被占两次 —— historystore 的
+    「采集中断锚点」（读路径契约带行为约定"断线，别连过去"）、daqgate 的「通道退出服务」。
+    三个事实共用一个码 ⇒ 现场看到 AI 结论点写「质量坏[服务退出]」会去查采集链路，
+    而采集完全正常。H-233 申请、daqgate D-231 取甲新增 `QualityModelNotLoaded = -1034`。
+    """
+
+    def test_maps_to_dedicated_code(self):
+        self.assertEqual(Quality.MODEL_NOT_LOADED.to_status_code(), CODE["QualityModelNotLoaded"])
+
+    def test_no_longer_1007(self):
+        """★钉住"不再是 -1007" —— 这正是要解决的那件事。"""
+        self.assertNotEqual(Quality.MODEL_NOT_LOADED.to_status_code(),
+                            CODE["QualityOutofService"])
+
+    def test_dedicated_code_is_negative(self):
+        """我方对外承诺：好恒为正、坏恒为负（AI-26 §3.1）——对端判据是 code < 0。"""
+        self.assertLess(Quality.MODEL_NOT_LOADED.to_status_code(), 0)
+
+    def test_still_not_trusted_on_the_way_back_in(self):
+        """回读时 -1034 仍属不可信输入（它不在白名单里）。"""
+        self.assertIs(Quality.from_status_code(CODE["QualityModelNotLoaded"]),
+                      Quality.INPUT_BAD)

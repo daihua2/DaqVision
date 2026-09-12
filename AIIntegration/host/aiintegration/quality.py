@@ -29,6 +29,7 @@ STATUS_QUALITY_BAD = -1000
 STATUS_QUALITY_CONFIG_ERROR = -1001
 STATUS_QUALITY_NOT_CONNECTED = -1002
 STATUS_QUALITY_OUT_OF_SERVICE = -1007
+STATUS_QUALITY_MODEL_NOT_LOADED = -1034   # 2026-09-13 新增,见下方映射处的由来
 
 # ── 入向：哪些码算「这笔输入可信」────────────────────────────────────────
 # ★依据 `daq.StatusCode`，并经**现场实测**（2026-09-12，AISERVER 全量口回读 khb 组
@@ -114,8 +115,16 @@ _TO_STATUS: dict[Quality, int] = {
     Quality.OK: STATUS_OK,
     # 上游断流 —— 语义与既有码逐字对上。
     Quality.NO_INPUT: STATUS_QUALITY_NOT_CONNECTED,
-    # "不在服务中" —— 语义与既有码对上（该域此刻不提供服务）。
-    Quality.MODEL_NOT_LOADED: STATUS_QUALITY_OUT_OF_SERVICE,
+    # 模型/基线未加载 —— **专用码**（daqgate 2026-09-13 应 H-233 新增，D-231 取甲）。
+    # ★由来：此前落 -1007(QualityOutofService)，而那个码已被占了两次 ——
+    #   historystore 用它做「采集中断锚点」（读路径契约还带着行为约定"断线，别连过去"）、
+    #   daqgate 用它表示「通道退出服务」。三个事实共用一个码 ⇒ 归因不可解：
+    #   现场看到 AI 结论点写着「质量坏[服务退出]」，会去查采集链路，而采集完全正常。
+    #   （2026-09-13 01:00 第一个绑定建成后，现场真出现了 4 个这样的点。）
+    # ★切换前置（D-231 §1.4）：**消费端先升、生产方后改**。proto3 枚举开放，老 daqgate
+    #   收到 -1034 只会显示「未知状态码:-1034」= 换一种误导。AISERVER 的 daqgate 已升
+    #   v1.0.10-1265（D-233 已回执"AI 侧可以切了"），本映射才改。
+    Quality.MODEL_NOT_LOADED: STATUS_QUALITY_MODEL_NOT_LOADED,
     # 台账没配全 ⇒ "配置错"，语义逐字对得上。★不是 -1007：那个码在 hs 读路径里
     # 已经是"采集中断"，与本档的处置方向（去补配置 vs 去查设备）正相反。见枚举处。
     Quality.CONFIG_INCOMPLETE: STATUS_QUALITY_CONFIG_ERROR,
