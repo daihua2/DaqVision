@@ -192,6 +192,7 @@ class Service:
             cfg.http_listen, guid=guid, version=VERSION, domains=list(domains),
             artifacts_dir=cfg.data_dir / "artifacts",
             reports_dir=cfg.data_dir / "reports", can_write=can_write, events=events,
+            scheduler=sched,      # /health 的 snapshot 那一格要问它（AICloud C-27 §3.2）
             # 外部工件导入：只在本进程里写工作台库（"唯一写者"前提），命令行工具只是 HTTP 客户端。
             importer=ArtifactImporter(workbench=workbench, domains=domains,
                                       artifacts_dir=cfg.data_dir / "artifacts"))

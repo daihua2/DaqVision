@@ -70,6 +70,18 @@ class Scheduler:
         self._threads: dict[tuple[str, str], threading.Thread] = {}
         self._last_tick: dict[tuple[str, str], datetime] = {}
         self._sync_lock = threading.Lock()
+        # ★「写路径断而复连 ⇒ 必须重推全量快照」的标志（AICloud C-27）。
+        #   由来：实时库 1.9.437→1.9.438 升级重启后，12 个结论点的**点定义**从实体流里没了
+        #   （平台镜像 2130→2118、按来源 guid 过滤 12→0），而**值照样写得进**、`/health` 照样 ready。
+        #   引擎重启 = 这一侧的快照要重新提交；而本类此前只在**服务启动**与**绑定变更**时推快照，
+        #   调度线程的异常支路只退避重试 —— 于是没有任何路径会再推一次点定义，**不会自愈**。
+        #   ★这条规矩是我方自己写下的（`hsclient` 模块头 ③：SNAPSHOT_BEGIN…END 之间断流 =
+        #   半份快照被丢弃，**重连必须重推全量**），却没在这里兑现。网关侧（ProtocolGate
+        #   entitystream.go）每次建立订阅都重走一遍全量，所以它那两段点重启后原数回来了。
+        self._resnap_lock = threading.Lock()
+        self._need_resnapshot = False
+        #: 最近一次全量快照是否已被**当前这个引擎实例**接受（供 /health 用）。
+        self._snapshot_ok = False
 
     # ── 点表 ──────────────────────────────────────────────────────────────
     def ensure_points(self) -> int:
@@ -90,6 +102,7 @@ class Scheduler:
                     unit=o.unit, value_type=o.value_type)
         rows = self._points.all()
         self._client.push_snapshot(rows)
+        self._snapshot_ok = True
         return len(rows)
 
     # ── 一拍 ──────────────────────────────────────────────────────────────
@@ -141,16 +154,48 @@ class Scheduler:
                 logger.info("绑定 %s/%s 已停用，调度线程退出", domain, binding)
                 return
             try:
+                # ★断而复连的第一件事:重推全量快照,再谈这一拍(AICloud C-27)。
+                #   顺序不能反 —— 先写值再推快照,那一拍的值会落在"引擎还不认识这个点"的窗口里。
+                if self._need_resnapshot:
+                    self._republish_snapshot()
                 tick = aligned_tick(datetime.now(timezone.utc), b.interval_sec)
                 if self._last_tick.get((domain, binding)) != tick:
                     self.run_once(b, tick)
                 backoff = 0.0
             except Exception as exc:  # noqa: BLE001
-                # ★hs 不可用这一支:**整拍跳过、不落锚点** —— 我方连取没取到数都不知道，
+                # ★hs 不可用这一支:**整拍跳过、不落锚点** —— 我方连取没取到数都不知道,
                 #   落锚点等于替上游断言"这段没数据"。
+                # ★并标记"下次通了要重推快照":连接断过,对端可能已经是**另一个引擎实例**,
+                #   它手上没有我方这份快照。宁可多推一次(全量快照是幂等的),不可少推。
+                self._need_resnapshot = True
+                self._snapshot_ok = False
                 self._client.log_degraded(f"调度 {domain}/{binding}", exc)
                 backoff = min(MAX_BACKOFF_SEC, backoff * 2 if backoff else 5.0)
             self._stop.wait(backoff if backoff else min(b.interval_sec / 4, 5.0))
+
+    def _republish_snapshot(self) -> None:
+        """断而复连后重推一次全量快照。**多个调度线程只推一次**。
+
+        ★失败不吞:让它抛给调用方的退避支路 —— 那说明连接还没真好,下一轮再试,
+          标志留着。吞掉的话会把"没推成"记成"已推过",而这正是 C-27 那类
+          「失败长得像一切正常」的做法。
+        """
+        with self._resnap_lock:
+            if not self._need_resnapshot:
+                return                      # 别的线程已经推过了
+            n = self.ensure_points()        # 抛出 ⇒ 标志不清,外层退避后重来
+            self._need_resnapshot = False
+            logger.warning("写路径断而复连:已重推全量结论点快照(%d 个点)—— "
+                           "引擎重启会丢掉未重推的点定义,值却照样写得进(AICloud C-27)", n)
+
+    @property
+    def snapshot_ok(self) -> bool:
+        """全量快照是否已被**当前这个引擎实例**接受。供 `/health` 用。
+
+        ★与 `writePath: ready` 不是一回事:后者只说"配了写路径且证书齐",
+          C-27 那次就是 `ready` 而点定义已经丢了 —— 健康口当时说不出这件事。
+        """
+        return self._snapshot_ok
 
     # ── 与绑定表同步 ──────────────────────────────────────────────────────
     def sync(self) -> int:

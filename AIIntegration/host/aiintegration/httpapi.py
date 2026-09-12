@@ -139,6 +139,11 @@ class _Handler(BaseHTTPRequestHandler):
             "domains": sorted(c["domains"]),
             # ★写路径没配就明说，不装作正常：没有它，结论不回流，平台侧永远看不到 AI 结果。
             "writePath": "ready" if c["can_write"] else "未配置（结论不回流）",
+            # ★与 writePath 不是一回事（AICloud C-27 §3.2 要的那一格）：
+            #   writePath 只说"配了写路径且证书齐"，而实体流是否认得这些点，它说不出来 ——
+            #   实时库重启后点定义会丢，值却照样写得进、writePath 照样 ready，
+            #   现场只能靠数平台镜像的行数才发现。这一格直说：快照被**当前这个引擎实例**接受了没有。
+            "snapshot": _snapshot_state(c),
         })
 
     def _download(self, root: Path, rel: str, what: str):
@@ -203,9 +208,19 @@ def _finding_json(f) -> dict:
     }
 
 
+def _snapshot_state(c) -> str:
+    """健康口里那一格的取值。`scheduler` 没接（只读运行/夹具）时说"不适用"，不谎称正常。"""
+    if not c.get("can_write"):
+        return "不适用（未配置写路径）"
+    sched = c.get("scheduler")
+    if sched is None:
+        return "未知（调度未接）"
+    return "accepted" if sched.snapshot_ok else "stale（断连后尚未重推，点定义可能已丢）"
+
+
 def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir: Path,
                 can_write: bool, reports_dir: Path | None = None,
-                events=None, importer=None) -> ThreadingHTTPServer:
+                events=None, importer=None, scheduler=None) -> ThreadingHTTPServer:
     host, _, port = listen.rpartition(":")
     artifacts_dir = Path(artifacts_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -216,6 +231,7 @@ def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir:
         "guid": guid, "version": version, "domains": domains,
         "artifacts_dir": artifacts_dir, "reports_dir": reports_dir,
         "can_write": can_write, "events": events, "importer": importer,
+        "scheduler": scheduler,
     }})
     srv = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler)
     srv.daemon_threads = True
