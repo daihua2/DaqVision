@@ -23,7 +23,7 @@ import grpc
 from . import api, httpapi
 from .artifactcache import ActiveArtifacts
 from .bindings import BindingStore
-from .config import Config
+from .config import Config, ConfigError
 from .domains import discover
 from .artifact_import import ArtifactImporter
 from .events import EventRunner
@@ -75,6 +75,15 @@ class Service:
         for line in cfg.describe():
             logger.info("配置生效值: %s", line)
 
+        # ⓪ 监听地址先校验（★在生成身份、建库、连 hs **之前**：fail fast）。
+        #   绑到错地址的服务"起得来、健康口正常、日志正常"，而 AICloud 永远拨不到它 ——
+        #   现场只看得到"连不上"。与其起一个找不到的服务，不如当场说清哪个变量错了。
+        try:
+            cfg.validate_listen()
+        except ConfigError as e:
+            logger.error("监听地址不合规：%s —— 服务不启动（改对再起）", e)
+            return 2
+
         # ① 身份：读得到就用，两处都没有才生成；生成后立刻两处都写、永不重生成。
         guid = SystemGuid(cfg.guid_paths).load_or_create()
         logger.warning("系统 guid = %s", guid)
@@ -98,10 +107,17 @@ class Service:
         can_write = cfg.can_write()
         if not can_write:
             # ★降级可见：每次启动都吵一句，且健康口也说。静默降级 = 现场以为在跑其实没结果。
-            logger.warning(
-                "写路径未就绪（AII_HS_WRITE=%r，证书目录 %s）—— "
-                "**结论不会回流实时库**，平台侧看不到 AI 结果。只读运行。",
-                cfg.hs_write_addr, cfg.cert_dir)
+            #   ★地址本身写错时**点名说是地址错**，否则现场会去查证书、查网络、查对端 ——
+            #     那正是「只看得到连不上、看不出配置错」的老坑（AICloud C-20 §4 同类）。
+            why = cfg.write_addr_problem()
+            if why:
+                logger.warning(
+                    "写路径地址不合规：%s —— **结论不会回流实时库**。只读运行。", why)
+            else:
+                logger.warning(
+                    "写路径未就绪（AII_HS_WRITE=%r，证书目录 %s）—— "
+                    "**结论不会回流实时库**，平台侧看不到 AI 结果。只读运行。",
+                    cfg.hs_write_addr, cfg.cert_dir)
         client = HsClient(HsConfig(
             read_addr=cfg.hs_read_addr, write_addr=cfg.hs_write_addr,
             ca_file=cfg.ca_file, cert_file=cfg.cert_file, key_file=cfg.key_file))

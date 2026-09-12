@@ -17,6 +17,65 @@ from pathlib import Path
 DEFAULT_ROOT = Path("/home/Project/AIIntegration")
 
 
+class ConfigError(ValueError):
+    """配置本身不成立 —— 起来也没意义，不如当场说清楚。"""
+
+
+def check_addr(addr: str, *, what: str) -> tuple[str, int]:
+    """拆 `host:port` 并校验端口；不合规抛 `ConfigError`。返回 `(host, port)`。
+
+    ★**端口 0 一律拒**。两端的理由不同，结论一样：
+
+    · **监听端** `:0` 是「内核挑一个空闲端口」的语义。我方这两个口是**要被 AICloud
+      拨号找到的**（地址登记在对方平台上），绑到随机端口 = 服务在、健康口正常、日志也正常，
+      **而对方永远连不上**；现场只看得到"连不上"，排查方向会被带去"服务没起 / 网络不通"。
+      ★实测（2026-09-12）：`grpc.add_insecure_port("127.0.0.1:0")` 回的是**真实端口号**
+      （如 37511，非 0），所以"返回 0 才算绑定失败"那条判据**挡不住它**；
+      `ThreadingHTTPServer(("127.0.0.1", 0))` 同样静默随机化。
+    · **拨号端** `:0` 永远连不上。
+
+    （同一类的另一半由 AICloud `C-20 §4` 报出：他们把 `127.0.0.1:0` 存进了库。）
+
+    ★**只认数字端口**，不查 `/etc/services` 的服务名：本进程的地址来自运维写的环境变量，
+      不是人在界面上敲的，没有"写 `https` 更顺手"的场景；认服务名只会让错字多一条活路。
+    """
+    raw = (addr or "").strip()
+    if not raw:
+        raise ConfigError(f"{what} 是空的；要填 host:port（如 127.0.0.1:50070）")
+    if raw.startswith("["):                       # [::1]:50070 这种写法
+        host, sep, port_s = raw.rpartition("]:")
+        host, port_s = host + "]", port_s if sep else ""
+    else:
+        host, sep, port_s = raw.rpartition(":")
+        if not sep:
+            raise ConfigError(f"{what}={raw!r} 少了端口；要填 host:port（如 127.0.0.1:50070）")
+    if not host:
+        raise ConfigError(f"{what}={raw!r} 少了主机；要填 host:port，监听全部网卡写 0.0.0.0")
+    if not port_s.isdigit():                      # 负号、空白、服务名一并落这里
+        raise ConfigError(
+            f"{what}={raw!r} 的端口 {port_s!r} 不是数字；只认 1-65535 的数字端口")
+    port = int(port_s)
+    if port == 0:
+        raise ConfigError(
+            f"{what}={raw!r} 的端口是 0。0 是「由内核挑一个空闲端口」的写法："
+            f"绑得上、日志和健康口都正常，**而对方永远拨不到这个服务**。要填确定的端口号")
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"{what}={raw!r} 的端口 {port} 超范围；要在 1-65535 之间")
+    return host, port
+
+
+def addr_problem(addr: str, *, what: str) -> str | None:
+    """同上，但**不抛**：合规回 `None`，不合规回一句人能读的原因。
+
+    给「坏了也要继续跑」的那一侧用（写路径坏掉应降级只读，不该掀翻整个服务）。
+    """
+    try:
+        check_addr(addr, what=what)
+    except ConfigError as e:
+        return str(e)
+    return None
+
+
 def _env(name: str, default: str) -> tuple[str, bool]:
     """返回 (值, 是否来自环境)。第二项用来在启动日志里标 (env)/(default)。"""
     v = os.environ.get(name)
@@ -85,7 +144,26 @@ class Config:
     def key_file(self) -> Path:
         return self.cert_dir / "client.key"
 
+    def write_addr_problem(self) -> str | None:
+        """写路径地址不合规时的原因；没配（空）回 `None` —— 那是合法的只读运行。"""
+        if not self.hs_write_addr:
+            return None
+        return addr_problem(self.hs_write_addr, what="AII_HS_WRITE")
+
+    def validate_listen(self) -> None:
+        """校验两个**监听**地址；不合规抛 `ConfigError`。
+
+        ★监听地址错 = 服务起得来但没人找得到它（见 `check_addr` 模块注释）。
+          故这一条是**拒绝启动**，不是降级：降级的前提是"还能干点什么"，这里什么也干不了。
+        """
+        check_addr(self.api_listen, what="AII_API_LISTEN")
+        check_addr(self.http_listen, what="AII_HTTP_LISTEN")
+
     def can_write(self) -> bool:
+        # ★地址不合规一律不当"能写"：拿着 :0 这种地址去连，现象是连不上而不是配置错，
+        #   与 write_addr_problem() 的报错话术配套（service 启动时会把原因打出来）。
+        if self.write_addr_problem() is not None:
+            return False
         return bool(self.hs_write_addr) and all(
             p.is_file() for p in (self.ca_file, self.cert_file, self.key_file))
 

@@ -53,10 +53,12 @@ class TestServiceBoot(unittest.TestCase):
             guid_paths=[root / "system.guid", root / "system.guid.bak"],
             hs_read_addr="127.0.0.1:1",      # 故意连不上：本用例不碰实时库
             hs_write_addr="",                 # 无写路径 ⇒ 只读运行，调度不起
-            api_listen="127.0.0.1:0", http_listen="127.0.0.1:0",
+            api_listen="127.0.0.1:50931", http_listen="127.0.0.1:50932",
             log_capacity=100,
         )
-        # 端口 0 会让 grpc 自己挑，但 service 内部拿不到挑中的号 —— 这里给定端口。
+        # ★这里曾写 `:0`，靠下一行覆盖成固定端口，注释写的是"端口 0 会让 grpc 自己挑、
+        #   service 内部拿不到挑中的号"—— 也就是说这个行为我方**早就知道**，只是没把它
+        #   当配置错误拦。2026-09-12 起 `:0` 一律拒（见 config.check_addr），这里直接写死端口。
         cls.cfg = _with_ports(cls.cfg, "127.0.0.1:50931", "127.0.0.1:50932")
 
         cls.svc = Service(cls.cfg)
