@@ -34,6 +34,21 @@ from .types import Finding
 
 logger = logging.getLogger(__name__)
 
+#: 无条件重推全量快照的周期（秒）。
+#  ★为什么是「定期无条件」而不是「检测到重连再推」—— AICloud C-32 的实测结论：
+#    实时库重启后**写入照样成功**（通道透明重连；引擎按 localId 收得下 VQT，
+#    哪怕它手上已经没有这些点的实体配置）⇒ 调度循环**从不抛异常** ⇒
+#    挂在异常支路上的「要重推」标志**永不置位**，于是点定义一直不回来。
+#    本方 AI-32 那一版就修在这个错信号上，C-31 的受控验收把它证伪了。
+#  ★而现有契约里**拿不到引擎实例身份**：`PingRes` 只有 token / listenAddrs；
+#    `/health` 的 idSpaceEpoch 是**持久化**的（INSERT OR IGNORE），重启不变。
+#    ⇒ 没有精确判据可用，只能定期推。
+#  ★全量快照幂等、本例只有 12 行 ⇒ 定期重推代价可忽略；
+#    而「永不触发」的代价是点定义一直缺着，且**值照写、健康口照绿**，没人会去查。
+#  ★这是**过渡**：正解是引擎报实例身份（本方作为 historystore owner 会给 PingRes 加一格），
+#    届时改成「实例变了就推」，这个周期可以拉长或去掉。
+RESNAPSHOT_INTERVAL_SEC = 300.0
+
 #: hs 不可用时的退避上限（秒）。与 `hsclient.RETRY_INTERVAL_SEC` 同量级 ——
 #: 退避不是为了少打扰对端，是为了不让日志被刷爆；降级态 WARN 仍每周期都打。
 MAX_BACKOFF_SEC = 60.0
@@ -80,8 +95,11 @@ class Scheduler:
         #   entitystream.go）每次建立订阅都重走一遍全量，所以它那两段点重启后原数回来了。
         self._resnap_lock = threading.Lock()
         self._need_resnapshot = False
-        #: 最近一次全量快照是否已被**当前这个引擎实例**接受（供 /health 用）。
-        self._snapshot_ok = False
+        #: 最近一次**成功推送**全量快照的单调时刻；None = 从没推过。
+        #  ★不叫"已被当前引擎实例接受" —— 那是本方 AI-32 版里说过而做不到的话：
+        #    推送成功只证明"推的那一刻对端收了"，证明不了"现在这个实例手上还有"。
+        #    C-32 实测：点定义已丢的两分钟里，那一格一直报 accepted，**在说假话**。
+        self._last_snapshot_mono: float | None = None
 
     # ── 点表 ──────────────────────────────────────────────────────────────
     def ensure_points(self) -> int:
@@ -102,7 +120,7 @@ class Scheduler:
                     unit=o.unit, value_type=o.value_type)
         rows = self._points.all()
         self._client.push_snapshot(rows)
-        self._snapshot_ok = True
+        self._last_snapshot_mono = time.monotonic()
         return len(rows)
 
     # ── 一拍 ──────────────────────────────────────────────────────────────
@@ -154,9 +172,11 @@ class Scheduler:
                 logger.info("绑定 %s/%s 已停用，调度线程退出", domain, binding)
                 return
             try:
-                # ★断而复连的第一件事:重推全量快照,再谈这一拍(AICloud C-27)。
-                #   顺序不能反 —— 先写值再推快照,那一拍的值会落在"引擎还不认识这个点"的窗口里。
-                if self._need_resnapshot:
+                # ★重推全量快照要排在这一拍之前(AICloud C-27):顺序反了的话,
+                #   那一拍的值会落在"引擎还不认识这个点"的窗口里。
+                # ★两个触发:① 断连过(写失败);② **到周期**——后者才是主力,
+                #   因为实时库重启时写入根本不会失败(C-32 实测)。
+                if self._need_resnapshot or self._resnapshot_due():
                     self._republish_snapshot()
                 tick = aligned_tick(datetime.now(timezone.utc), b.interval_sec)
                 if self._last_tick.get((domain, binding)) != tick:
@@ -168,7 +188,6 @@ class Scheduler:
                 # ★并标记"下次通了要重推快照":连接断过,对端可能已经是**另一个引擎实例**,
                 #   它手上没有我方这份快照。宁可多推一次(全量快照是幂等的),不可少推。
                 self._need_resnapshot = True
-                self._snapshot_ok = False
                 self._client.log_degraded(f"调度 {domain}/{binding}", exc)
                 backoff = min(MAX_BACKOFF_SEC, backoff * 2 if backoff else 5.0)
             self._stop.wait(backoff if backoff else min(b.interval_sec / 4, 5.0))
@@ -181,21 +200,31 @@ class Scheduler:
           「失败长得像一切正常」的做法。
         """
         with self._resnap_lock:
-            if not self._need_resnapshot:
-                return                      # 别的线程已经推过了
+            if not (self._need_resnapshot or self._resnapshot_due()):
+                return                      # 别的线程刚推过
+            why = "断而复连" if self._need_resnapshot else "到周期"
             n = self.ensure_points()        # 抛出 ⇒ 标志不清,外层退避后重来
             self._need_resnapshot = False
-            logger.warning("写路径断而复连:已重推全量结论点快照(%d 个点)—— "
-                           "引擎重启会丢掉未重推的点定义,值却照样写得进(AICloud C-27)", n)
+            logger.info("%s:已重推全量结论点快照(%d 个点)—— 引擎重启会丢掉未重推的点定义,"
+                        "而值照样写得进、健康口照样绿(AICloud C-27/C-32)", why, n)
+
+    def _resnapshot_due(self) -> bool:
+        """到周期没有。从没推过 ⇒ 到期（启动路径会先推一次，这里是兜底）。"""
+        if self._last_snapshot_mono is None:
+            return True
+        return (time.monotonic() - self._last_snapshot_mono) >= RESNAPSHOT_INTERVAL_SEC
 
     @property
-    def snapshot_ok(self) -> bool:
-        """全量快照是否已被**当前这个引擎实例**接受。供 `/health` 用。
+    def snapshot_age_sec(self) -> float | None:
+        """距最近一次**成功推送**多少秒；None = 从没推过。供 `/health` 用。
 
-        ★与 `writePath: ready` 不是一回事:后者只说"配了写路径且证书齐",
-          C-27 那次就是 `ready` 而点定义已经丢了 —— 健康口当时说不出这件事。
+        ★它回答的是"多久以前推过一次",**不是**"当前这个引擎实例手上有没有" ——
+          后者本方现在答不了（契约里拿不到实例身份），所以**不装作答得了**。
+          C-32 那一格报 `accepted` 而点定义已丢，就是装作答得了的后果。
         """
-        return self._snapshot_ok
+        if self._last_snapshot_mono is None:
+            return None
+        return time.monotonic() - self._last_snapshot_mono
 
     # ── 与绑定表同步 ──────────────────────────────────────────────────────
     def sync(self) -> int:

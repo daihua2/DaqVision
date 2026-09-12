@@ -209,13 +209,22 @@ def _finding_json(f) -> dict:
 
 
 def _snapshot_state(c) -> str:
-    """健康口里那一格的取值。`scheduler` 没接（只读运行/夹具）时说"不适用"，不谎称正常。"""
+    """健康口里那一格。★**只说得出"多久以前推过一次"**，说不出"当前引擎实例手上有没有"。
+
+    由来（AICloud C-32）：本方 AI-32 那一版把这一格做成 `accepted`，语义是"最后一次推送成功过"，
+    于是**点定义已丢的两分钟里它一直报 accepted** —— 一个会主动说"没问题"的指标，
+    比没有这个指标更容易让人停止排查。现在它只报事实（多久以前推的），**不下"当前有效"的断言**。
+    """
     if not c.get("can_write"):
         return "不适用（未配置写路径）"
     sched = c.get("scheduler")
     if sched is None:
         return "未知（调度未接）"
-    return "accepted" if sched.snapshot_ok else "stale（断连后尚未重推，点定义可能已丢）"
+    age = sched.snapshot_age_sec
+    if age is None:
+        return "从未推送"
+    from .scheduler import RESNAPSHOT_INTERVAL_SEC
+    return "%d 秒前推送（每 %d 秒无条件重推一次）" % (int(age), int(RESNAPSHOT_INTERVAL_SEC))
 
 
 def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir: Path,

@@ -57,12 +57,11 @@ class TestResnapshot(unittest.TestCase):
     def test_marks_need_after_failure(self):
         s, c = _mk()
         self.assertFalse(s._need_resnapshot)
-        self.assertFalse(s.snapshot_ok)
+        self.assertIsNone(s.snapshot_age_sec)
         s.ensure_points()
-        self.assertTrue(s.snapshot_ok)
+        self.assertIsNotNone(s.snapshot_age_sec)
         s._need_resnapshot = True          # 模拟一拍失败
-        s._snapshot_ok = False
-        self.assertFalse(s.snapshot_ok)
+        self.assertTrue(s._need_resnapshot)
 
     def test_republish_pushes_once_and_clears(self):
         s, c = _mk()
@@ -71,7 +70,7 @@ class TestResnapshot(unittest.TestCase):
         s._republish_snapshot()
         self.assertEqual(c.snapshots, before + 1)
         self.assertFalse(s._need_resnapshot)
-        self.assertTrue(s.snapshot_ok)
+        self.assertIsNotNone(s.snapshot_age_sec)
 
     def test_only_once_across_threads(self):
         """★多个调度线程同时发现要重推 —— 只推一次。"""
@@ -92,7 +91,7 @@ class TestResnapshot(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             s._republish_snapshot()
         self.assertTrue(s._need_resnapshot, "推失败后标志必须留着")
-        self.assertFalse(s.snapshot_ok)
+        self.assertIsNone(s.snapshot_age_sec, "没推成就不该记推送时刻")
         c.fail_push = False
         s._republish_snapshot()            # 下一轮
         self.assertEqual(c.snapshots, 1)
@@ -112,14 +111,15 @@ class TestHealthSnapshotCell(unittest.TestCase):
     def test_no_scheduler(self):
         self.assertIn("未知", self._state(can_write=True, scheduler=None))
 
-    def test_accepted_and_stale(self):
+    def test_reports_only_facts(self):
+        """★不许再出现"accepted"那种"当前有效"的断言（C-32：它会让人停止排查）。"""
         s, _ = _mk()
-        s._snapshot_ok = True
-        self.assertEqual(self._state(can_write=True, scheduler=s), "accepted")
-        s._snapshot_ok = False
+        self.assertIn("从未推送", self._state(can_write=True, scheduler=s))
+        s.ensure_points()
         got = self._state(can_write=True, scheduler=s)
-        self.assertIn("stale", got)
-        self.assertIn("点定义", got)       # 要说清后果，不只说状态名
+        self.assertIn("秒前推送", got)
+        self.assertIn("重推", got)          # 要告诉人多久会自己再推一次
+        self.assertNotIn("accepted", got)
 
 
 if __name__ == "__main__":
@@ -167,6 +167,7 @@ class TestLoopActuallyRepublishes(unittest.TestCase):
                 raise RuntimeError("hs 不可用（模拟实时库重启）")
 
         s.run_once = run_once
+        s.ensure_points()      # 模拟启动路径那一次推送 —— 否则"从没推过"本身就算到期
         return s, c, calls
 
     def test_republishes_after_a_failed_tick(self):
@@ -179,9 +180,53 @@ class TestLoopActuallyRepublishes(unittest.TestCase):
         self.assertFalse(s._need_resnapshot)
 
     def test_no_republish_when_nothing_failed(self):
-        """没断过就不该平白多推 —— 否则每拍都推，白占对端。"""
+        """没断过、也没到周期，就不该平白多推 —— 否则每拍都推，白占对端。"""
         s, c, calls = self._sched(fail_first=False)
         s._stop = _Stop(3)
         before = c.snapshots
         s._loop("d", "b")
         self.assertEqual(c.snapshots, before, "没断过不该重推")
+
+
+class TestPeriodicResnapshot(unittest.TestCase):
+    """★到周期就无条件重推 —— C-31 受控验收证伪了"靠写失败触发"那一版。
+
+    实测形态：实时库重启后写入**照样成功**（通道透明重连、引擎按 localId 收得下 VQT），
+    调度循环从不抛异常 ⇒ 挂在异常上的标志永不置位 ⇒ 点定义一直不回来，
+    而值照写、健康口照绿。**没有任何一处会报错。**
+    """
+
+    def test_due_when_never_pushed(self):
+        s, _ = _mk()
+        self.assertTrue(s._resnapshot_due(), "从没推过应视为到期")
+
+    def test_not_due_right_after_push(self):
+        s, _ = _mk()
+        s.ensure_points()
+        self.assertFalse(s._resnapshot_due())
+
+    def test_due_after_interval(self):
+        import time as _t
+        from aiintegration.scheduler import RESNAPSHOT_INTERVAL_SEC
+        s, _ = _mk()
+        s.ensure_points()
+        s._last_snapshot_mono = _t.monotonic() - RESNAPSHOT_INTERVAL_SEC - 1
+        self.assertTrue(s._resnapshot_due())
+
+    def test_loop_republishes_on_period_without_any_failure(self):
+        """★关键一条：**一拍都没失败过**，到周期照样重推。"""
+        import time as _t
+        from aiintegration.scheduler import RESNAPSHOT_INTERVAL_SEC
+        s, c = _mk()
+        s._bindings = type("B", (), {
+            "get": staticmethod(lambda d, b: _Binding()),
+            "list": staticmethod(lambda only_enabled=True: []),
+        })()
+        s.run_once = lambda b, tick: None          # 从不抛异常 —— 正是现场那个形态
+        s.ensure_points()                          # 启动那次
+        before = c.snapshots
+        s._last_snapshot_mono = _t.monotonic() - RESNAPSHOT_INTERVAL_SEC - 1
+        s._stop = _Stop(2)
+        s._loop("d", "b")
+        self.assertGreater(c.snapshots, before, "到周期必须重推，哪怕一次异常都没有")
+        self.assertFalse(s._need_resnapshot)
