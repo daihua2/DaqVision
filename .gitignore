@@ -30,3 +30,6 @@ doc/*.pptx
 doc/*.docx
 # AIIntegration 发布件（make-release.sh 产物，几 MB 的 tar，不入库）
 AIIntegration/dist/
+
+# Claude Code：settings.json 与 CLAUDE.md 入库共享；个人本地设置不入库
+.claude/settings.local.json
