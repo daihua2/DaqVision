@@ -11,7 +11,9 @@
       "PowerShell(git status:*)",
       "PowerShell(git diff:*)",
       "PowerShell(git log:*)",
-      "PowerShell(git show:*)"
+      "PowerShell(git show:*)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push:*)",
+      "PowerShell(git add:*)", "PowerShell(git commit:*)", "PowerShell(git push:*)"
     ],
     "ask": [
       "Bash(git push --force:*)",
