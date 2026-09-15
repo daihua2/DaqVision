@@ -13,17 +13,17 @@
       "PowerShell(git log:*)",
       "PowerShell(git show:*)",
       "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push:*)",
-      "PowerShell(git add:*)", "PowerShell(git commit:*)", "PowerShell(git push:*)"
+      "PowerShell(git add:*)", "PowerShell(git commit:*)", "PowerShell(git push:*)",
+      "Bash(ssh aiserver:*)",
+      "PowerShell(ssh aiserver:*)",
+      "Bash(scp:*)",
+      "PowerShell(scp:*)"
     ],
     "ask": [
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "PowerShell(git push --force:*)",
-      "PowerShell(git push -f:*)",
-      "Bash(ssh aiserver:*)",
-      "PowerShell(ssh aiserver:*)",
-      "Bash(scp:*)",
-      "PowerShell(scp:*)"
+      "PowerShell(git push -f:*)"
     ]
   }
 }
