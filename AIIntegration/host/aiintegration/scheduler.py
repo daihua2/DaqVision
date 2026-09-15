@@ -47,7 +47,21 @@ logger = logging.getLogger(__name__)
 #    而「永不触发」的代价是点定义一直缺着，且**值照写、健康口照绿**，没人会去查。
 #  ★这是**过渡**：正解是引擎报实例身份（本方作为 historystore owner 会给 PingRes 加一格），
 #    届时改成「实例变了就推」，这个周期可以拉长或去掉。
+#  ★2026-09-15 已到那一步：AISERVER 实时库升到 1.9.445，`PingRes.instanceId` 真有了，
+#    「对端换了实例」现场 5 秒内触发（AICloud C-34 §1/§2，最终验收通过）。
+#    ⇒ 本值退为**老引擎（报不出实例身份）时的兜底**；对端报得出时用下面那个长周期。
 RESNAPSHOT_INTERVAL_SEC = 300.0
+
+#: 对端**报得出实例身份**时的重推周期（秒）。
+#  ★为什么还留着周期、不干脆关掉：C-27/C-32 这条线的失败形态是**静默的** —— 点定义丢了而
+#    **值照样写得进、健康口照样绿**，没人会去查。精确判据只覆盖"引擎换了实例"这一种成因；
+#    成因未知的那类没有判据可挂（C-34 §3 记的点表整表替换点数对不上就还没查清）。
+#    留一格兜底，代价是一天 24 次幂等重推；撤掉它，代价是下次静默丢定义再没人发现。
+#  ★为什么从 300 拉到 3600：historystore H-240 §4.1 实测，我方这个每 5 分钟一次的全量重推
+#    **占了实时库这个服务几乎全部的 WARNING**（24 小时 291 条，该服务共约 300 条），
+#    并建议有了实例编号之后改成"实例变了才推"；AICloud C-34 §4.1 转来请我方定。
+#    ⇒ 291/天 → 约 24/天，兜底不撤。
+RESNAPSHOT_INTERVAL_KNOWN_PEER_SEC = 3600.0
 
 #: hs 不可用时的退避上限（秒）。与 `hsclient.RETRY_INTERVAL_SEC` 同量级 ——
 #: 退避不是为了少打扰对端，是为了不让日志被刷爆；降级态 WARN 仍每周期都打。
@@ -211,7 +225,11 @@ class Scheduler:
             n = self.ensure_points()        # 抛出 ⇒ 标志不清,外层退避后重来
             self._need_resnapshot = False
             try:                                # 推成了才认下新实例身份
-                self._peer_instance = self._client.instance_id() or self._peer_instance
+                # ★**空串也要认下**，不能 `or 旧值` 兜回去：那样引擎一旦从新版**回退**到老版
+                #   （有 id → 空串），旧 id 会一直留着，`_peer_changed` 从此**每拍都判变、每拍都推**。
+                #   认下空串则推一次就稳住，并由 `_resnapshot_interval_sec` 退回 300 秒兜底。
+                #   探活抛异常那一支才留旧值 —— 那是"问不到"，不是"变了"。
+                self._peer_instance = self._client.instance_id()
             except Exception:                   # noqa: BLE001
                 pass
             logger.info("%s:已重推全量结论点快照(%d 个点)—— 引擎重启会丢掉未重推的点定义,"
@@ -243,7 +261,29 @@ class Scheduler:
         """到周期没有。从没推过 ⇒ 到期（启动路径会先推一次，这里是兜底）。"""
         if self._last_snapshot_mono is None:
             return True
-        return (time.monotonic() - self._last_snapshot_mono) >= RESNAPSHOT_INTERVAL_SEC
+        return (time.monotonic() - self._last_snapshot_mono) >= self._resnapshot_interval_sec()
+
+    def _resnapshot_interval_sec(self) -> float:
+        """这一刻的周期取哪个 —— **看对端报不报实例身份**，不看我方版本号。
+
+        ★判据是"最近一次问到的 `instanceId` 非空"：非空 ⇒ 精确判据可用，周期只是兜底（1 小时）；
+          空串（老引擎）或还没问到过 ⇒ 精确判据不可用，**退回 300 秒，和升级前一模一样**。
+        ★所以引擎**回退**到老版本也是对的：`_republish_snapshot` 会认下空串身份，
+          下一拍这里自动退回 300 秒，不需要谁去改配置、也不需要重启本服务。
+        """
+        if self._peer_instance:
+            return RESNAPSHOT_INTERVAL_KNOWN_PEER_SEC
+        return RESNAPSHOT_INTERVAL_SEC
+
+    @property
+    def resnapshot_interval_sec(self) -> float:
+        """当前生效的兜底周期（秒）。供 `/health` 用 —— 那一格若写死 300 就会说假话。"""
+        return self._resnapshot_interval_sec()
+
+    @property
+    def peer_instance_known(self) -> bool:
+        """对端最近一次报得出实例身份没有。False = 老引擎或还没问到 ⇒ 精确判据不可用。"""
+        return bool(self._peer_instance)
 
     @property
     def snapshot_age_sec(self) -> float | None:

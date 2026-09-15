@@ -303,3 +303,83 @@ class TestPeerInstanceChange(unittest.TestCase):
         s._stop = _Stop(3)
         s._loop("d", "b")
         self.assertGreater(c.snapshots, before, "对端换实例必须触发重推")
+
+
+class TestResnapshotInterval(unittest.TestCase):
+    """★兜底周期按**对端报不报实例身份**取值（AICloud C-34 §4.1 / historystore H-240 §4.1）。
+
+    由来：我方这个每 5 分钟一次的全量重推，在实时库那侧 24 小时刷了 291 条 WARNING，
+    占了该服务几乎全部的 WARNING。1.9.445 起对端报得出 `instanceId`，精确判据已现场验收
+    （引擎起来 5 秒内重推，C-34 §1），周期退为兜底 ⇒ 拉到 1 小时；**不撤**，因为
+    "点定义丢了而值照写、健康口照绿"是静默失败，精确判据只覆盖"换实例"这一种成因。
+    """
+
+    def _mk_peer(self, ids):
+        s, c = _mk()
+        seq = list(ids)
+        c.instance_id = lambda: seq.pop(0) if len(seq) > 1 else seq[0]
+        return s, c
+
+    def test_known_peer_uses_long_interval(self):
+        from aiintegration.scheduler import RESNAPSHOT_INTERVAL_KNOWN_PEER_SEC
+        s, c = self._mk_peer(["inst-A"])
+        s._peer_changed()                     # 问到一次 ⇒ 记住 A
+        self.assertTrue(s.peer_instance_known)
+        self.assertEqual(s.resnapshot_interval_sec, RESNAPSHOT_INTERVAL_KNOWN_PEER_SEC)
+
+    def test_old_engine_keeps_short_interval(self):
+        """老引擎（恒空串）⇒ 周期**和升级前一模一样**，兜底不能被顺手拉长。"""
+        from aiintegration.scheduler import RESNAPSHOT_INTERVAL_SEC
+        s, c = self._mk_peer([""])
+        s._peer_changed()
+        self.assertFalse(s.peer_instance_known)
+        self.assertEqual(s.resnapshot_interval_sec, RESNAPSHOT_INTERVAL_SEC)
+
+    def test_known_peer_not_due_at_old_period(self):
+        """★钉住实效：对端报实例时，过了 300 秒**不该**再推；过了 1 小时才推。"""
+        import time as _t
+        from aiintegration.scheduler import (RESNAPSHOT_INTERVAL_SEC,
+                                             RESNAPSHOT_INTERVAL_KNOWN_PEER_SEC)
+        s, c = self._mk_peer(["inst-A"])
+        s.ensure_points()                     # 启动那次
+        s._peer_changed()
+        s._last_snapshot_mono = _t.monotonic() - RESNAPSHOT_INTERVAL_SEC - 1
+        self.assertFalse(s._resnapshot_due(), "对端报得出实例身份时，300 秒不再是周期")
+        s._last_snapshot_mono = _t.monotonic() - RESNAPSHOT_INTERVAL_KNOWN_PEER_SEC - 1
+        self.assertTrue(s._resnapshot_due(), "兜底没撤：满 1 小时仍要推一次")
+
+    def test_rollback_to_old_engine_settles(self):
+        """★引擎**回退**到老版本（有 id → 空串）：推一次就稳住，并退回 300 秒兜底。
+
+        先前 `_republish_snapshot` 里写的是 `instance_id() or 旧值`，空串会被兜回旧 id ⇒
+        `_peer_changed` 从此**每拍都判变、每拍都重推**，正好把我方要治的刷屏放大到极致。
+        """
+        from aiintegration.scheduler import RESNAPSHOT_INTERVAL_SEC
+        s, c = self._mk_peer(["inst-A", ""])
+        s.ensure_points()
+        self.assertFalse(s._peer_changed())   # 记住 A
+        self.assertTrue(s._peer_changed())    # 回退成老引擎 ⇒ 判变一次，该推
+        before = c.snapshots
+        s._republish_snapshot()
+        self.assertEqual(c.snapshots, before + 1)
+        for _ in range(5):
+            self.assertFalse(s._peer_changed(), "认下空串后不该再每拍判变")
+        self.assertEqual(s.resnapshot_interval_sec, RESNAPSHOT_INTERVAL_SEC)
+
+    def test_health_cell_tells_which_regime(self):
+        """`/health` 那一格要说出**现在按哪套在跑**，不能写死一个周期（写死 = 有一半情形在说假话）。"""
+        from aiintegration.httpapi import _snapshot_state
+        s, c = self._mk_peer(["inst-A"])
+        s.ensure_points()
+        s._peer_changed()
+        got = _snapshot_state({"can_write": True, "scheduler": s})
+        self.assertIn("换实例", got)
+        self.assertIn("3600", got)
+        self.assertNotIn("每 300 秒", got)
+
+        s2, _ = self._mk_peer([""])
+        s2.ensure_points()
+        s2._peer_changed()
+        got2 = _snapshot_state({"can_write": True, "scheduler": s2})
+        self.assertIn("300", got2)
+        self.assertIn("未报实例身份", got2)

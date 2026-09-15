@@ -223,8 +223,15 @@ def _snapshot_state(c) -> str:
     age = sched.snapshot_age_sec
     if age is None:
         return "从未推送"
+    # ★周期取的是**调度当下生效的那个**，不是写死的常量：对端报得出实例身份时周期是 1 小时，
+    #   报不出（老引擎）才是 300 秒。写死一个值会让这一格在另一半情形里说假话 —— 与 C-32 同类。
     from .scheduler import RESNAPSHOT_INTERVAL_SEC
-    return "%d 秒前推送（每 %d 秒无条件重推一次）" % (int(age), int(RESNAPSHOT_INTERVAL_SEC))
+    interval = getattr(sched, "resnapshot_interval_sec", RESNAPSHOT_INTERVAL_SEC)
+    if getattr(sched, "peer_instance_known", False):
+        how = "对端换实例即重推，另每 %d 秒兜底重推一次" % int(interval)
+    else:
+        how = "对端未报实例身份，靠每 %d 秒无条件重推" % int(interval)
+    return "%d 秒前推送（%s）" % (int(age), how)
 
 
 def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir: Path,
