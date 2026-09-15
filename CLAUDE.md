@@ -56,7 +56,7 @@ wsl bash /mnt/c/Project/DaqVision/AIIntegration/host/run-tests.sh py310    # 只
 
 ## Git 提交约定
 
-- 主分支 `master`，直接在上面提交（已定）。**不 push、不改历史，除非用户明确要求。**
+- 主分支 `master`，直接在上面提交（已定）。**提交与推送 origin 可自行决定，不必事先问**（2026-09-15 用户授权）；做完在回复里报提交号。**force push、改写已推送的历史、删分支仍须先问。**
 - 标题：`类型(范围): 结论 —— 补一句为什么`，中文。类型用 `feat` / `fix` / `docs` / `chore` / `research`，范围如 `AIIntegration`、`AIIntegration/packaging`；AIIntegration 的行为改动也常直接写 `AIIntegration: …`。
   - 例：`fix(AIIntegration): 端口 0 不再静默随机化 —— 监听地址不合规拒绝启动，写路径不合规降级只读`
 - 正文按需写：**现象 → 根因 → 改法 → 验证**。验证写实数：用例条数（+新增）、变异验证几发几红、三环境各多少通过；现场还没生效的写清卡在哪。引用往来函编号（`C-32 §4`、`AI-35`）。

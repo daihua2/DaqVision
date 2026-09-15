@@ -14,8 +14,10 @@
       "PowerShell(git show:*)"
     ],
     "ask": [
-      "Bash(git push:*)",
-      "PowerShell(git push:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "PowerShell(git push --force:*)",
+      "PowerShell(git push -f:*)",
       "Bash(ssh aiserver:*)",
       "PowerShell(ssh aiserver:*)",
       "Bash(scp:*)",
