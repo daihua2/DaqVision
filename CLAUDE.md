@@ -29,15 +29,15 @@ AIIntegration 内部：`host/aiintegration/`（骨架）、`domains/*.py`（算�
 
 ## 测试（AIIntegration）
 
-在 **WSL** 里跑，stdlib `unittest`，零测试依赖：
+在 **WSL** 里跑，stdlib `unittest`，零测试依赖。用脚本，**从 PowerShell 调**（已在 `.claude/settings.json` 免确认；Git Bash 会把 `/mnt/c/...` 改写成 Windows 路径，调不到）：
 
-```bash
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY   # ★必须：否则访问 127.0.0.1 的 HTTP 用例全走代理回 502，看着像代码坏了
-cd /mnt/c/Project/DaqVision/AIIntegration/host
-python3 -m unittest discover -s tests                 # 3.12（系统 python，跳过视觉用例）
-~/aii-py310/bin/python -m unittest discover -s tests  # 3.10（AISERVER 现场版本）
-~/aii-vision/bin/python -m unittest discover -s tests # 含 onnxruntime 的视觉用例
+```powershell
+wsl bash /mnt/c/Project/DaqVision/AIIntegration/host/run-tests.sh          # 三环境串行
+wsl bash /mnt/c/Project/DaqVision/AIIntegration/host/run-tests.sh py310    # 只跑一个：312 | py310 | vision
 ```
+
+三个环境：`/usr/bin/python3`（3.12，跳过视觉用例）、`~/aii-py310`（3.10，AISERVER 现场版本）、`~/aii-vision`（3.10 + onnxruntime，含视觉用例）。
+★手工跑时**先 `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY`**，否则访问 127.0.0.1 的 HTTP 用例全走代理回 502，看着像代码坏了（脚本已内置）。
 
 - **三环境必须串行**（整机用例绑固定端口），且**三个都要过**才算过 —— 现场是 Python 3.10.12，只在 3.12 上跑过的曾经装不上。
 - `tests/live_*_check.py` 是联机自检（要真 hs），不在 discover 里，按需手动跑。

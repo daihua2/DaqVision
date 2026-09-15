@@ -7,6 +7,7 @@
       "Bash(git log:*)",
       "Bash(git show:*)",
       "Bash(git branch:*)",
+      "PowerShell(wsl bash /mnt/c/Project/DaqVision/AIIntegration/host/run-tests.sh:*)",
       "PowerShell(git status:*)",
       "PowerShell(git diff:*)",
       "PowerShell(git log:*)",
