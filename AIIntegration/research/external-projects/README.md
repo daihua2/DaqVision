@@ -370,3 +370,201 @@ IQR 更稳健 —— 我方基线只有 10 帧样本，**一两个离群值就�
 
 ★**1~3 三条都不依赖新数据、不依赖传感器选型，是现在就能做的**。
 但 1 要跨拍状态（与"骨架给不给跨帧状态"那一格绑在一起），2 和 3 纯域内改动。
+
+---
+---
+
+# 第二批（2026-09-17，用户指名的 6 个）
+
+| 项目 | 大小 | 值得看什么 |
+| --- | --- | --- |
+| ★[`LGDiMaggio/predictive-maintenance-mcp`](https://github.com/LGDiMaggio/predictive-maintenance-mcp) | 120.4 MB | **MCP 服务**，ISO 20816-3 判级；★**限值表与我方逐值相同**；三条我方没做的 |
+| ★[`VictorBauler/awesome-bearing-dataset`](https://github.com/VictorBauler/awesome-bearing-dataset) | 40.2 MB | **28 个公开数据集**的清单；★**推翻我方"没有真实工业现场数据"的判断** |
+| ★[`masha548/bearing-fault-diagnostics`](https://github.com/masha548/bearing-fault-diagnostics) | 40.5 MB | **只用时域标量特征**分轴承故障 —— 与我方处境最接近的一个 |
+| [`biswajitsahoo1111/cbm_codes_open`](https://github.com/biswajitsahoo1111/cbm_codes_open) | 98.2 MB | 可复现的 CBM 方法集（notebooks） |
+| [`ash-kev/Vibration-Fault_Detection`](https://github.com/ash-kev/Vibration-Fault_Detection) | 14.6 MB | 端到端系统（FastAPI + React + sklearn） |
+| [`Xiaohan-Chen/bear_fault_diagnosis`](https://github.com/Xiaohan-Chen/bear_fault_diagnosis) | 0.3 MB | 多尺度 CNN+LSTM 论文基线（Keras→PyTorch） |
+
+---
+
+## 10. ★★`predictive-maintenance-mcp` —— 限值表与我方逐值相同，但它多做了三件
+
+### 10.1 独立佐证：我方 ISO 表是对的
+
+它的 `src/diagnostics/iso20816.py`：
+
+```python
+_ZONE_BOUNDARIES = {
+    (1, "rigid"):    (2.3, 4.5, 7.1),   # Group 1 (>300 kW) 刚性
+    (1, "flexible"): (3.5, 7.1, 11.0),
+    (2, "rigid"):    (1.4, 2.8, 4.5),   # Group 2 (15~300 kW) 刚性
+    (2, "flexible"): (2.3, 4.5, 7.1),
+}
+```
+
+★**与我方 `domains/vibration_lowfreq.py` 的 `_ISO_LIMITS` 一字不差。**
+一个带 DOI、带测试与覆盖率、明确引标准的项目独立给出同一张表 ⇒ **我方第①层的判据表可以放心。**
+
+（对照 §2.3：node-red 那个项目用的是 Class I~IV，与它注释声称的 10816-3 对不上。**同一个判据，三方里两方一致、一方错。**）
+
+### 10.2 ★我方欠的第一件：**标准版本已更新，我方引的是被取代的那版**
+
+```
+Zone boundaries from ISO 10816-3:2009 (four-zone A-D scheme).
+ISO 20816-3:2022 supersedes that edition and merges zones A and B;
+the A/B boundary is kept here for practitioner familiarity.
+```
+
+⇒ **ISO 10816-3:2009 已被 ISO 20816-3:2022 取代**，新版**把 A 区与 B 区合并成一个"可接受区"**。
+
+它的处置值得学：**限值仍用 2009 版（因为从业者熟悉四区方案），但把这条出处说明
+（`THRESHOLD_PROVENANCE`）附在每一个评估结果上**。
+
+★我方现在只在代码注释里写"ISO 10816-3"，**结论里不带出处** ——
+运维看到 `iso_zone=C` 不知道它依据的是哪一版标准。**这条要补。**
+
+### 10.3 ★我方欠的第二件：**评估频带是判据的一部分，它写死在常量里**
+
+```python
+_ISO_BAND_UPPER_HZ = 1000.0        # ISO 20816-3 评估带上沿
+_ISO_BAND_CLAMP_FRACTION = 0.95    # 数字滤波器上沿不能坐在奈奎斯特上
+_ISO_MIN_FS_HZ = ceil(2*1000/0.95) # ≈ 2106 Hz：低于它就够不到 1000 Hz 带顶
+```
+
+★**它把"采样率够不够支撑 ISO 评估带"变成了一个可检查的前置条件。**
+
+⇒ 这正对上我方在 `doc/传感器资料/README.md` 记的那条硬伤：
+**有人 SVT10 的频响是 10~1600 Hz，而 ISO 要求 10~1000 Hz 带内的速度 RMS** ——
+若传感器在整个响应带内算 RMS，报值偏高、判级偏严。
+**我方只是记了这个问题，没有把它变成代码里的判据。**
+
+### 10.4 ★我方欠的第三件：**适用范围下限会被拒绝，不是悄悄照算**
+
+```
+Scope: industrial machines with rated power above 15 kW…
+When the machine power is declared and falls below 15 kW the assessment is
+refused; when it is unknown the scope limit is documented but not enforceable.
+```
+
+★**三态处置**：功率已声明且 <15 kW ⇒ **拒绝评估**；功率未知 ⇒ **记录范围限制但不强制**；≥15 kW ⇒ 正常评估。
+
+我方的 `iso_group` 选项里写着"3 组：泵类，独立驱动（**≥15kW**）"，**隐含了这个门槛但从不检查** ——
+一台 5 kW 的小泵配成 3 组，我方照样出 `iso_zone`。⇒ **这一条要补，而且补法就照它的三态。**
+
+### 10.5 ★★一条设计纪律，比我方表述得更好
+
+> **the server refuses to guess**. No diagnosis is ever inferred from filenames or
+> statistical parameters alone — **a fault indication requires matching spectral evidence**.
+> Every severity claim cites ISO 20816-3, and **the evaluative wording in reports is
+> authored by the server, not improvised by the model**. The AI orchestrates the analysis
+> and presents the evidence… while **the final judgment stays with the engineer**.
+
+三条与我方一致（不猜、要证据、结论带出处），但**第三条我方没有明确写过**：
+
+★★**评价性措辞由服务端写死，不让模型即兴发挥。**
+
+⇒ 这对我方**尚未开工的 LLM 解释层**是个关键原则：LLM 负责**组织与呈现证据**，
+**不负责给出评价词**（"严重"、"建议立即停机"这类）。那些词必须来自判据层，
+否则同一组数据两次问会得到两种说法。**这条现在就该写进 `doc/模块划分.md` 关于 LLM 那一格。**
+
+---
+
+## 11. ★★`awesome-bearing-dataset` —— 推翻我方"没有真实工业现场数据"的判断
+
+28 个数据集的结构化清单（机构 / 年份 / 任务 / **故障生成方式** / **信号种类**）。
+
+★**我方前两天说过"公开数据集全是实验台，没有真实工业现场的"。这个判断错了**，清单里至少两个直接相关：
+
+### 11.1 ★`SCA Bearing Dataset`（Mittuniversitetet，2024）—— **真实工厂的自然故障**
+
+| | |
+| --- | --- |
+| 来源 | **运行中的纸浆厂**（operational pulp mill），2019~2022 |
+| 故障 | ★**Natural (Industrial)** —— 自然发生，不是人工制造 |
+| 内容 | 11 个案例：有记录的轴承失效 + ★**1 个确认的非轴承故障（轴不对中）** |
+| 结构 | **train 文件 = 健康数据；test 文件 = 走向失效的数据** |
+| 带什么 | 信号、**时间戳**、★**转速**、**故障标签** |
+| 工况 | 现场真实工况，**转速与负载变化很大** |
+
+★**这是清单里唯一标注 "Natural (Industrial)" 的**，正是我方一直缺的东西。三点直接有用：
+
+1. **train/test 结构天然适合单类异常检测**（只用健康数据建模）—— 与 §6 那个项目的方法、
+   以及我方第②层"对着自己的基线比"是同一形状；
+2. ★**带转速** ⇒ 支持 §2.1 学到的 a→v 换算；
+3. ★**那 1 个轴不对中案例**对我方 `direction_hint`（轴向/径向比判不对中）有对照价值。
+
+### 11.2 `Politecnico di Torino`（2024）—— **振动 + 温度 + 转速**三样齐全
+
+中大型**球面滚子轴承**（重工业常用），人工缺陷，多工况。
+★**清单里唯一同时有温度与转速的**，与我方 13 标量的构成最接近（我方有 `temp`）。
+
+### 11.3 其余按"我方缺什么"筛出来的
+
+| 数据集 | 为什么可能有用 |
+| --- | --- |
+| `PU Time-Varying Run-to-Failure`（2024） | 振动 + **温度**，自然加速失效 |
+| `University of Ottawa`（2018/2023） | 振动 + 声 + **转速**，人工与自然故障都有 |
+| `UOS / SDOL`（2022） | 振动 + **温度** |
+| `KAIST`（~2023） | **电流** + 振动 + 转矩 —— 若将来做伺服/VFD 模块可对照 |
+| `University of Arkansas`（2023） | ★**单故障与双故障** —— 现实里故障常常叠加，这类数据少见 |
+
+⇒ ★**订正我方此前的说法**：不是"没有合适的数据集"，是**我方前两天只搜到了最常被引用的那几个**
+（CWRU / MAFAULDA / PU / IMS）。**这份清单本身就是一件该早点找到的东西。**
+
+---
+
+## 12. ★`bearing-fault-diagnostics` —— 与我方处境最接近，而它的结论对我方不利
+
+它**只用时域标量特征**（不碰波形）分四类轴承状态（正常 / 滚珠 / 内圈 / 外圈）：
+
+```
+max, min, mean, sd, rms, skewness, kurtosis, crest, form     ← 9 个
+RandomForest(n_estimators=80, class_weight="balanced")
+train_test_split(test_size=0.2, stratify=y) + StratifiedKFold(3)
+```
+
+★**乍看像是"标量也能分开故障"的正面证据，但仔细看恰恰相反**：
+
+| | 它的 9 个标量 | 我方的 13 个标量 |
+| --- | --- | --- |
+| 来源 | **从波形算的时域统计量** | **传感器内部算好的物理量** |
+| 含 `kurtosis`（峭度） | ✅ | ❌ |
+| 含 `crest`（波峰因子） | ✅ | ❌ |
+| 含 `skewness` / `form` | ✅ | ❌ |
+| 含三轴速度/加速度/位移/频率 | ❌ | ✅ |
+
+★★**峭度与波峰因子正是改造方案 L3a（轴承冲击检出）点名要的两个** ——
+它们对**冲击**敏感，而轴承故障的本质就是周期性冲击（见 §6.2）。
+
+⇒ **它能用标量分开轴承故障，靠的恰恰是我方没有的那几个标量。**
+我方的 13 个里没有任何冲击敏感量 ⇒ **这是对"13 标量能不能分开五类"的一个有力的间接否定证据**，
+与 `doc/模块划分.md` 里"第③层已定不做"的结论一致。
+
+★**它的评测比 v5 强但仍不够**：有 `stratify` 与 `StratifiedKFold`（v5 是 `fit` 后自测），
+但用的是 **random split 而非 order split** ⇒ 按 §8 的判据，准确率仍可能偏乐观。
+
+---
+
+## 13. 另外三个：扫过，价值有限
+
+| 项目 | 看到什么 |
+| --- | --- |
+| `cbm_codes_open` | 目标是"**可复现**的 CBM 结果"，全是 notebooks + 项目页。方法学取向与 §8 那个基准一致，但没有可直接搬的工程件 |
+| `ash-kev/Vibration-Fault_Detection` | 端到端系统（FastAPI + React + sklearn），形态完整但**没有超出前面几个的判据设计**；可作"系统长什么样"的参考 |
+| `Xiaohan-Chen/bear_fault_diagnosis` | 多尺度 CNN+LSTM 的论文基线（已从 Keras 转 PyTorch）。★**它自己在 README 里说"Keras 与 TF 更新后大量 API 不可用，所以重写"** —— 与我方"不引重依赖、保持零依赖"的取舍互为印证：**框架会漂，判据不会** |
+
+---
+
+## 14. 第二批带回的待办（接 §9，编号续）
+
+| # | 事项 | 出处 | 优先级 |
+| --- | --- | --- | --- |
+| 8 | ★结论里带**判据出处**（哪一版 ISO）；并记 20816-3:2022 已合并 A/B 区 | §10.2 | 高（改动小，运维直接受益） |
+| 9 | ★把**评估频带**（10~1000 Hz）变成代码里的可检查前置，而不只是文档里的一条记录 | §10.3 | 高（现有传感器 10~1600 Hz 就踩这条） |
+| 10 | ★`iso_group` 增**功率下限三态检查**（<15 kW 拒绝 / 未知记录 / ≥15 kW 正常） | §10.4 | 中 |
+| 11 | ★LLM 解释层的原则：**评价性措辞由判据层给，模型只组织与呈现** | §10.5 | 中（现在写进设计，动工前定死） |
+| 12 | ★取 `SCA Bearing Dataset` 做可分性/异常检测实验 —— **真实工业现场 + 转速 + 故障标签** | §11.1 | 高（它比 MAFAULDA 更贴近现场） |
+| 13 | 台账增 `rated_power_kw`（ISO 适用范围要用） | §10.4 | 中 |
+
+★**8~10 三条都是"把已知的判据前提变成代码里的检查"**，不依赖任何新数据，现在就能做，
+与 §9 的 1~3 条合起来是一组**纯内功**的改进。
