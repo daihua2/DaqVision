@@ -88,7 +88,7 @@ class TestInfoAndDomains(ApiTestBase):
     def test_GetInfo_带身份与契约版本(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
         self.assertEqual(r.guid, "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(r.proto_version, "1.6")
+        self.assertEqual(r.proto_version, "1.7")
         self.assertEqual(r.domain_count, 1)
 
     def test_装载失败不藏(self):

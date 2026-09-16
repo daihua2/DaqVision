@@ -26,7 +26,7 @@ from .logstore import LogFilter, LogLevel, LogStore
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.6"
+PROTO_VERSION = "1.7"
 
 
 def _ts(dt: datetime) -> object:

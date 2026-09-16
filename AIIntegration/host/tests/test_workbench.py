@@ -561,3 +561,53 @@ class TestBindingDataOrigin(unittest.TestCase):
             self.assertEqual(b.roles, {"x_vel": 100})
         finally:
             st.close()
+
+
+class TestDeactivate(WbBase):
+    """停用（契约 1.7）—— 补的是一个**现场撞出来的**缺口：能启用、不能停用。"""
+
+    def test_停用后就没有激活件了(self):
+        a = self.wb.add_artifact(domain="vib", name="m1", binding="dev1")
+        self.wb.activate_artifact(a)
+        self.assertEqual(self.wb.active_artifact("vib", binding="dev1").id, a)
+        self.assertTrue(self.wb.deactivate_artifact(a))
+        self.assertIsNone(self.wb.active_artifact("vib", binding="dev1"),
+                          "停用之后该对象就该是「没有可用工件」，调用方据此落 -1034")
+
+    def test_重复停用不是错但要分得清(self):
+        a = self.wb.add_artifact(domain="vib", name="m1", binding="dev1")
+        self.wb.activate_artifact(a)
+        self.assertTrue(self.wb.deactivate_artifact(a), "本来是激活的 → True")
+        self.assertFalse(self.wb.deactivate_artifact(a), "本来就没激活 → False，不是抛错")
+
+    def test_没这个工件要响亮地失败(self):
+        with self.assertRaises(WorkbenchError):
+            self.wb.deactivate_artifact(99999)
+
+    def test_作用域建错的全域通用件能被取消(self):
+        """★这条就是 2026-09-16 现场那一幕，是本次加这一口的全部理由。
+
+        训练时 binding 传了空串 ⇒ 工件落成"全域通用"并激活。启用别的件顶不掉它
+        （不同作用域），删又删不得（激活中）—— 在 1.7 之前它就永远卡在那里，
+        而该域任何新绑定都会静默回退捡到它。
+        """
+        wrong = self.wb.add_artifact(domain="vib", name="误创-全域通用",
+                                     kind=KIND_BASELINE, binding="")
+        right = self.wb.add_artifact(domain="vib", name="对的-绑定专属",
+                                     kind=KIND_BASELINE, binding="dev1")
+        self.wb.activate_artifact(wrong)
+        self.wb.activate_artifact(right)
+        # ★先证明"顶不掉"：两个都还激活着，因为作用域不同
+        actives = {x.id for x in self.wb.list_artifacts(domain="vib").items if x.active}
+        self.assertEqual(actives, {wrong, right}, "作用域不同，启用一个顶不掉另一个")
+        # ★也证明"删不得"
+        with self.assertRaises(WorkbenchError):
+            self.wb.delete_artifact(wrong)
+        # ⇒ 只有停用这一条路
+        self.assertTrue(self.wb.deactivate_artifact(wrong))
+        self.assertIsNone(self.wb.active_artifact("vib", KIND_BASELINE, ""),
+                          "全域通用那一档不该再有激活件 —— 否则新绑定仍会回退捡到它")
+        self.assertEqual(self.wb.active_artifact("vib", KIND_BASELINE, "dev1").id, right,
+                         "绑定专属那一档不受影响")
+        # 停用之后就删得掉了
+        self.assertTrue(self.wb.delete_artifact(wrong))

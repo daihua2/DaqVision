@@ -66,6 +66,13 @@ service AIIntegrationService {
   // ── 模型工件（含基线：同一张表，`kind` 区分）──
   rpc ListArtifacts    (ListArtifactsReq) returns (ListArtifactsRes);
   rpc ActivateArtifact (IdReq)            returns (MutateRes);
+  // 停用（1.7 新增）。★**启用只让同作用域的旧件让位**，所以作用域本身建错的那个件
+  //   （训练时 `binding` 传空落成"全域通用"）此前**永远取消不掉** —— 同作用域里没有
+  //   别的件能顶掉它，而 `DeleteArtifact` 又拒删激活中的。我方 2026-09-16 现场撞上了。
+  // ★停用后该对象**没有可用工件**，结论会落 `MODEL_NOT_LOADED(-1034)` —— 这是对的：
+  //   没有基线就该说没有基线。界面上请按"会让该对象停止出第②层结论"来提示。
+  // `ok=true, id=<1 本来是激活的 / 0 本来就没激活>`；没这个工件则 `ok=false`。
+  rpc DeactivateArtifact (IdReq)          returns (MutateRes);
   rpc DeleteArtifact   (IdReq)            returns (MutateRes);   // ★激活中的不让删
 
   // ── 训练任务（★可查询状态的任务，不是阻塞调用；C-11 §3.3）──

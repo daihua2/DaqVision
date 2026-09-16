@@ -824,6 +824,29 @@ class Workbench:
                 self._conn.rollback()
                 raise
 
+    def deactivate_artifact(self, artifact_id: int) -> bool:
+        """停用一个工件。返回"本来是不是激活的"（已经停用的回 `False`，不是错）。
+
+        ★**为什么必须有这一口**：此前只有"启用"没有"停用" —— 启用只让**同作用域**
+          (域,种类,对象) 的旧件让位，于是作用域本身建错的那个件（例如训练时 `binding`
+          传了空串，落成"全域通用"）**永远没法取消**：同作用域里没有别的件能顶掉它，
+          而 `delete_artifact` 又拒删激活中的。2026-09-16 现场真撞上了。
+
+        ★停用之后那个对象就**没有可用工件**了 —— 该域的结论会落
+          `MODEL_NOT_LOADED(-1034)`，这是**对的**：没有基线就该说没有基线，
+          不是退回"随便挑一个最新的"。调用方要清楚这一点，所以命令行入口要求 `--yes`。
+        """
+        with self._lock:
+            row = self._conn.execute("SELECT active FROM artifacts WHERE id=?",
+                                     (artifact_id,)).fetchone()
+            if row is None:
+                raise WorkbenchError(f"没有 id={artifact_id} 这个工件")
+            if not row["active"]:
+                return False
+            self._conn.execute("UPDATE artifacts SET active=0 WHERE id=?", (artifact_id,))
+            self._conn.commit()
+        return True
+
     def active_artifact(self, domain: str, kind: str = KIND_MODEL,
                         binding: str = "") -> Artifact | None:
         """取当前激活的那个。**没有就是没有** —— 调用方据此落 `MODEL_NOT_LOADED`，

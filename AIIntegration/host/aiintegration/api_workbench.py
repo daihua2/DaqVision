@@ -215,6 +215,13 @@ class WorkbenchApiMixin:
         return pb.MutateRes(ok=True, id=request.id)
 
     @_guard
+    def DeactivateArtifact(self, request, context):
+        was = self._wb.deactivate_artifact(request.id)
+        # ★如实回"本来是不是激活的"：重复停用不是错，但要让调用方分得清这两种情形。
+        return pb.MutateRes(ok=True, id=1 if was else 0,
+                            message="" if was else "该工件本来就不是激活状态")
+
+    @_guard
     def DeleteArtifact(self, request, context):
         ok = self._wb.delete_artifact(request.id)
         return pb.MutateRes(ok=ok, message="" if ok else "没有这个工件")
@@ -359,6 +366,7 @@ def method_specs(pb_mod, svc):
         "CopySamples":       (svc.CopySamples, pb_mod.CopySamplesReq, pb_mod.MutateRes),
         "ListArtifacts":     (svc.ListArtifacts, pb_mod.ListArtifactsReq, pb_mod.ListArtifactsRes),
         "ActivateArtifact":  (svc.ActivateArtifact, pb_mod.IdReq, pb_mod.MutateRes),
+        "DeactivateArtifact": (svc.DeactivateArtifact, pb_mod.IdReq, pb_mod.MutateRes),
         "DeleteArtifact":    (svc.DeleteArtifact, pb_mod.IdReq, pb_mod.MutateRes),
         "ListTrainJobs":     (svc.ListTrainJobs, pb_mod.ListTrainJobsReq, pb_mod.ListTrainJobsRes),
         "StartTraining":     (svc.StartTraining, pb_mod.StartTrainingReq, pb_mod.MutateRes),

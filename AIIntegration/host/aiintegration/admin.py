@@ -84,8 +84,12 @@ def _list_artifacts(a: argparse.Namespace) -> int:
     for x in res.items:
         flag = "★启用中" if x.active else "      "
         origin = "外部导入·训练数据未核实" if x.origin == "imported" else (x.origin or "trained")
+        # ★空 = 未声明，**不是现场**（契约 1.6）。显示成"未声明"而不是留白，
+        #   留白会被当成"这一项没问题"。
+        data_origin = {"simulated": "仿真数据", "field": "现场工况"}.get(
+            x.data_origin, f"未声明（{x.data_origin}）" if x.data_origin else "未声明")
         print(f"{flag} id={x.id} [{x.kind}] {x.name}  对象={x.binding or '(全域)'}  "
-              f"{x.size} 字节  来历={origin}")
+              f"{x.size} 字节  来历={origin}  训练数据来源={data_origin}")
         if x.source:
             print(f"         来源：{x.source}")
         if x.training_data:
@@ -105,6 +109,22 @@ def _activate_artifact(a: argparse.Namespace) -> int:
         print(f"✗ {res.message}", file=sys.stderr)
         return 1
     print(f"✓ 已启用工件 {a.id}")
+    return 0
+
+
+def _deactivate_artifact(a: argparse.Namespace) -> int:
+    if not a.yes:
+        # ★比"启用"更要说清楚：停用之后那个对象**没有可用工件**，第②层结论会落
+        #   -1034（模型/基线未加载）。这是对的，但得是人明知道了才做。
+        print("✗ 停用后该对象将没有可用工件，结论会落 -1034（模型未加载）—— "
+              "确认后加 --yes 再执行", file=sys.stderr)
+        return 2
+    from .apiproto import aiintegration_pb2 as pb
+    res = _grpc_call(a.api, "DeactivateArtifact", pb.IdReq(id=a.id), pb.MutateRes)
+    if not res.ok:
+        print(f"✗ {res.message}", file=sys.stderr)
+        return 1
+    print(f"✓ 已停用工件 {a.id}" if res.id else f"· 工件 {a.id} 本来就不是激活状态")
     return 0
 
 
@@ -137,6 +157,13 @@ def main(argv: list[str] | None = None) -> int:
     act.add_argument("--yes", action="store_true")
     act.add_argument("--api", default=DEFAULT_API)
     act.set_defaults(fn=_activate_artifact)
+
+    deact = sub.add_parser("deactivate-artifact",
+                           help="停用工件（必须带 --yes）★停用后该对象会落 -1034")
+    deact.add_argument("--id", type=int, required=True)
+    deact.add_argument("--yes", action="store_true")
+    deact.add_argument("--api", default=DEFAULT_API)
+    deact.set_defaults(fn=_deactivate_artifact)
 
     a = p.parse_args(argv)
     return a.fn(a)

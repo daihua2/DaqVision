@@ -236,6 +236,25 @@ class TestArtifactsWire(WbApiBase):
         self.call("ActivateArtifact", pb.IdReq(id=b), pb.MutateRes)
         self.assertTrue(self.call("DeleteArtifact", pb.IdReq(id=a), pb.MutateRes).ok)
 
+    def test_停用那一口(self):
+        """契约 1.7。★补的是现场撞出来的缺口：作用域建错的件此前取消不掉。"""
+        a = self.wb.add_artifact(domain="vib", name="误创-全域通用", binding="")
+        self.call("ActivateArtifact", pb.IdReq(id=a), pb.MutateRes)
+        r = self.call("DeactivateArtifact", pb.IdReq(id=a), pb.MutateRes)
+        self.assertTrue(r.ok)
+        self.assertEqual(r.id, 1, "本来是激活的 ⇒ id=1")
+        # 停用之后删得掉了（此前激活中的删不得，于是永远卡着）
+        self.assertTrue(self.call("DeleteArtifact", pb.IdReq(id=a), pb.MutateRes).ok)
+
+    def test_重复停用如实回而不是假装做了事(self):
+        a = self.wb.add_artifact(domain="vib", name="m1", binding="dev1")
+        self.call("ActivateArtifact", pb.IdReq(id=a), pb.MutateRes)
+        self.assertEqual(self.call("DeactivateArtifact", pb.IdReq(id=a), pb.MutateRes).id, 1)
+        again = self.call("DeactivateArtifact", pb.IdReq(id=a), pb.MutateRes)
+        self.assertTrue(again.ok, "重复停用不是错")
+        self.assertEqual(again.id, 0)
+        self.assertIn("本来就不是激活", again.message)
+
     def test_空binding与不过滤要分得开(self):
         """★`binding=''` 是"全域通用"那一档，不是"不过滤" —— 靠 `binding_set` 区分。"""
         self.wb.add_artifact(domain="vib", name="全域", binding="")
@@ -340,7 +359,7 @@ class TestNoWorkbench(WbApiBase):
 
     def test_原有那几口照常(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
-        self.assertEqual(r.proto_version, "1.6")
+        self.assertEqual(r.proto_version, "1.7")
 
 
 if __name__ == "__main__":
