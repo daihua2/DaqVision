@@ -389,3 +389,175 @@ class TestPersistence(WbBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDataOriginSnapshot(WbBase):
+    """来源性质在**入集那一刻**打快照（契约 1.6，AICloud `C-36 §4`）。
+
+    与 `label` 快照同一条道理，但后果更重：label 错了是"模型用了旧判断"，
+    这一格错了是"仿真数据训出来的基线在界面上看着像现场基线"，而且**从数值上看不出来**。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ds = self.wb.put_dataset(domain="vib", name="A")
+
+    def test_入集时按绑定打快照(self):
+        a = self.ann(0, binding="sim1")
+        self.wb.add_samples(self.ds, [a], {"sim1": "simulated"})
+        self.assertEqual(self.wb.list_samples(self.ds).items[0].data_origin, "simulated")
+
+    def test_没给来源的绑定留空而不是现场(self):
+        a = self.ann(0, binding="dev1")
+        self.wb.add_samples(self.ds, [a], {"sim1": "simulated"})   # dev1 不在表里
+        self.assertEqual(self.wb.list_samples(self.ds).items[0].data_origin, "")
+
+    def test_一次入集多个绑定各取各的(self):
+        a1, a2 = self.ann(0, binding="sim1"), self.ann(1, binding="dev1")
+        self.wb.add_samples(self.ds, [a1, a2],
+                            {"sim1": "simulated", "dev1": "field"})
+        got = {s.binding: s.data_origin for s in self.wb.list_samples(self.ds).items}
+        self.assertEqual(got, {"sim1": "simulated", "dev1": "field"})
+
+    def test_再次加入同一标注不改写快照(self):
+        # ★幂等那条路不能变成"改写快照"的后门：绑定后来改了，重点一次"加入"
+        #   就把当初的记录洗掉，那这份快照等于没有。
+        a = self.ann(0, binding="sim1")
+        self.wb.add_samples(self.ds, [a], {"sim1": "simulated"})
+        self.assertEqual(self.wb.add_samples(self.ds, [a], {"sim1": "field"}), 0)
+        self.assertEqual(self.wb.list_samples(self.ds).items[0].data_origin, "simulated")
+
+    def test_复制训练集连快照一起复制(self):
+        a = self.ann(0, binding="sim1")
+        self.wb.add_samples(self.ds, [a], {"sim1": "simulated"})
+        new_id = self.wb.copy_dataset(self.ds, "A-副本")
+        self.assertEqual(self.wb.list_samples(new_id).items[0].data_origin, "simulated")
+
+    def test_工件那一格存得住取得回(self):
+        aid = self.wb.add_artifact(domain="vib", name="基线", kind=KIND_BASELINE,
+                                   data_origin="simulated")
+        got = {x.id: x.data_origin for x in self.wb.list_artifacts(domain="vib").items}
+        self.assertEqual(got[aid], "simulated")
+
+    def test_老工件那一格是空不是现场(self):
+        aid = self.wb.add_artifact(domain="vib", name="老的")
+        got = {x.id: x.data_origin for x in self.wb.list_artifacts(domain="vib").items}
+        self.assertEqual(got[aid], "", "1.6 之前的老工件是未声明，**不是现场**")
+
+    def test_训练集的域查得出来(self):
+        self.assertEqual(self.wb.dataset_domain(self.ds), "vib")
+        self.assertEqual(self.wb.dataset_domain(99999), "")
+
+
+class TestDataOriginMigration(unittest.TestCase):
+    """★1.5 时代的老库（AISERVER 上正跑着的就是这一份）开库即补列。
+
+    `CREATE TABLE IF NOT EXISTS` 对已存在的表一个字都不改 —— 不补列，就是读的时候才炸
+    （`no such column`），而且是在现场。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "wb.db"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_老库补列且老行一律未声明(self):
+        import sqlite3
+        conn = sqlite3.connect(str(self.path))
+        conn.executescript("""
+        CREATE TABLE datasets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL, name TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(domain, name));
+        CREATE TABLE samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, dataset_id INTEGER NOT NULL,
+            annotation_id INTEGER, binding TEXT NOT NULL, t_from_us INTEGER NOT NULL,
+            t_to_us INTEGER NOT NULL, label TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(dataset_id, annotation_id));
+        CREATE TABLE artifacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'model', binding TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL, algo TEXT NOT NULL DEFAULT '', dataset_id INTEGER,
+            sample_count INTEGER NOT NULL DEFAULT 0, feature_count INTEGER NOT NULL DEFAULT 0,
+            accuracy REAL, active INTEGER NOT NULL DEFAULT 0, path TEXT NOT NULL DEFAULT '',
+            size INTEGER NOT NULL DEFAULT 0, sha256 TEXT NOT NULL DEFAULT '',
+            meta_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            origin TEXT NOT NULL DEFAULT 'trained', source TEXT NOT NULL DEFAULT '',
+            training_data TEXT NOT NULL DEFAULT '', license TEXT NOT NULL DEFAULT '');
+        INSERT INTO datasets(id,domain,name) VALUES(1,'vib','老集');
+        INSERT INTO samples(dataset_id,annotation_id,binding,t_from_us,t_to_us,label)
+            VALUES(1,1,'sim1',0,1000,'正常');
+        INSERT INTO artifacts(domain,name,dataset_id) VALUES('vib','老基线',1);
+        """)
+        conn.commit(); conn.close()
+
+        wb = Workbench(self.path)
+        try:
+            (a,) = wb.list_artifacts(domain="vib").items
+            self.assertEqual(a.data_origin, "", "老工件必须是未声明，**不许**被回填成现场")
+            (s,) = wb.list_samples(1).items
+            self.assertEqual(s.data_origin, "", "老样本没有快照就是没有")
+            # 补列之后新写的照常带得上
+            aid = wb.add_artifact(domain="vib", name="新的", data_origin="simulated")
+            got = {x.id: x.data_origin for x in wb.list_artifacts(domain="vib").items}
+            self.assertEqual(got[aid], "simulated")
+        finally:
+            wb.close()
+
+
+class TestBindingDataOrigin(unittest.TestCase):
+    """绑定上那一格：存得住、老库补得上、空不是现场。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "b.db"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_存得住取得回(self):
+        from aiintegration.bindings import Binding, BindingStore
+        st = BindingStore(self.path)
+        try:
+            st.put(Binding("vib", "sim1", {"x_vel": 100}, data_origin="simulated"))
+            self.assertEqual(st.get("vib", "sim1").data_origin, "simulated")
+            # 改成现场（真机接入那一刻）——绑定这一格是**可以**改的，改的是"以后"。
+            st.put(Binding("vib", "sim1", {"x_vel": 100}, data_origin="field"))
+            self.assertEqual(st.get("vib", "sim1").data_origin, "field")
+        finally:
+            st.close()
+
+    def test_没声明就是空不是现场(self):
+        from aiintegration.bindings import Binding, BindingStore
+        st = BindingStore(self.path)
+        try:
+            st.put(Binding("vib", "d1", {"x_vel": 100}))
+            self.assertEqual(st.get("vib", "d1").data_origin, "")
+        finally:
+            st.close()
+
+    def test_老库开库即补列(self):
+        import sqlite3
+        from aiintegration.bindings import BindingStore
+        conn = sqlite3.connect(str(self.path))
+        conn.executescript("""
+        CREATE TABLE bindings (
+            domain TEXT NOT NULL, binding TEXT NOT NULL, roles_json TEXT NOT NULL,
+            params_json TEXT NOT NULL DEFAULT '{}', interval_sec REAL NOT NULL,
+            window_sec REAL NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (domain, binding));
+        INSERT INTO bindings(domain,binding,roles_json,interval_sec,window_sec)
+            VALUES('vib','老绑定','{"x_vel": 100}',60,60);
+        """)
+        conn.commit(); conn.close()
+        st = BindingStore(self.path)
+        try:
+            b = st.get("vib", "老绑定")
+            self.assertEqual(b.data_origin, "", "老绑定必须是未声明，不许当现场")
+            self.assertEqual(b.roles, {"x_vel": 100})
+        finally:
+            st.close()

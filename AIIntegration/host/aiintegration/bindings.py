@@ -20,6 +20,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import dataorigin
+
 logger = logging.getLogger(__name__)
 
 #: 缺省节拍与窗口。标量域（如 v5 的 13 点）一分钟一帧足够；域可以在绑定里覆盖。
@@ -32,6 +34,8 @@ CREATE TABLE IF NOT EXISTS bindings (
     binding      TEXT NOT NULL,
     roles_json   TEXT NOT NULL,
     params_json  TEXT NOT NULL DEFAULT '{}',
+    -- 这组点接的是仿真信号还是现场工况（契约 1.6）。老库由 _migrate 补列。
+    data_origin  TEXT NOT NULL DEFAULT '',
     interval_sec REAL NOT NULL,
     window_sec   REAL NOT NULL,
     enabled      INTEGER NOT NULL DEFAULT 1,
@@ -56,6 +60,16 @@ class Binding:
     ★**骨架只搬运不解释**（照 hs 的 `GatewayIdentity.attrs`）：键名与取值由域自述，
       骨架不枚举、不校验语义 —— 否则"新增一个域只写一个 .py"当场不成立。
       校验归模块；**模块读不到就落坏质量码，不许替它猜**。
+    """
+
+    data_origin: str = ""
+    """这组点接的是**仿真信号还是现场工况**（契约 1.6，AICloud `C-36 §4`）。
+
+    `simulated` / `field` / 空（未声明）。取值与取最严规则见 `dataorigin` 模块头。
+
+    ★**空 ≠ 现场**。它决定的是"这个绑定训出来的结论能不能用来说现场设备的话"，
+      所以不知道的时候必须说不知道 —— 猜一个 `field` 会让仿真数据训出的模型
+      在界面上看着像现场基线，而**从数值上看不出来**。
     """
 
     interval_sec: float = DEFAULT_INTERVAL_SEC
@@ -93,6 +107,11 @@ class BindingStore:
             self._conn.execute(
                 "ALTER TABLE bindings ADD COLUMN params_json TEXT NOT NULL DEFAULT '{}'")
             logger.info("绑定表已补列 params_json（老库升级）")
+        if "data_origin" not in have:
+            # ★补成空（未声明），**不猜 field** —— 空 ≠ 现场（契约 1.6 §1）。
+            self._conn.execute(
+                "ALTER TABLE bindings ADD COLUMN data_origin TEXT NOT NULL DEFAULT ''")
+            logger.info("绑定表已补列 data_origin（老库升级；老绑定一律未声明，不当现场）")
 
     def close(self) -> None:
         with self._lock:
@@ -125,15 +144,16 @@ class BindingStore:
                     f"收到 {type(v).__name__}（契约里 params 是 map<string,string>）")
         with self._lock:
             self._conn.execute(
-                "INSERT INTO bindings(domain,binding,roles_json,params_json,interval_sec,window_sec,enabled) "
-                "VALUES(?,?,?,?,?,?,?) "
+                "INSERT INTO bindings(domain,binding,roles_json,params_json,data_origin,"
+                "interval_sec,window_sec,enabled) "
+                "VALUES(?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(domain,binding) DO UPDATE SET "
                 "roles_json=excluded.roles_json, params_json=excluded.params_json, "
-                "interval_sec=excluded.interval_sec, "
+                "data_origin=excluded.data_origin, interval_sec=excluded.interval_sec, "
                 "window_sec=excluded.window_sec, enabled=excluded.enabled, "
                 "updated_at=datetime('now')",
                 (b.domain, b.binding, json.dumps(b.roles, ensure_ascii=False),
-                 json.dumps(b.params, ensure_ascii=False),
+                 json.dumps(b.params, ensure_ascii=False), dataorigin.normalize(b.data_origin),
                  float(b.interval_sec), float(b.window_sec), 1 if b.enabled else 0),
             )
             self._conn.commit()
@@ -181,6 +201,7 @@ def _to_binding(row: sqlite3.Row) -> Binding:
         binding=row["binding"],
         roles={k: int(v) for k, v in json.loads(row["roles_json"]).items()},
         params={k: str(v) for k, v in json.loads(row["params_json"] or "{}").items()},
+        data_origin=row["data_origin"] or "",
         interval_sec=float(row["interval_sec"]),
         window_sec=float(row["window_sec"]),
         enabled=bool(row["enabled"]),

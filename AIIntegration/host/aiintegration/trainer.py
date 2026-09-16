@@ -51,6 +51,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
+from . import dataorigin
 from .bindings import Binding, BindingStore
 from .domains import LoadedDomain
 from .fetch import Fetcher
@@ -225,7 +226,7 @@ class Trainer:
         started = time.monotonic()
 
         try:
-            dataset, skipped = self._assemble(job, sink)
+            dataset, skipped, origins = self._assemble(job, sink)
             if sink.canceled:
                 return self._cancel_now(job.id, "组装数据集阶段被取消")
             if not dataset.items:
@@ -248,7 +249,7 @@ class Trainer:
                     f"域 {job.domain} 的 train() 返回了 {type(artifact).__name__}，"
                     "应为 TrainedArtifact")
 
-            art_id = self._store(job, dataset, artifact, skipped)
+            art_id = self._store(job, dataset, artifact, skipped, origins)
             secs = time.monotonic() - started
             self._wb.update_job(
                 job.id, status=JOB_READY, progress=1.0, artifact_id=art_id,
@@ -296,6 +297,9 @@ class Trainer:
         items: list[LabeledFrame] = []
         skipped: list[tuple[int, str]] = []
         bindings_cache: dict[str, Binding | None] = {}
+        # 来源性质，只收**真正参与训练**的那些样本 —— 取不到数的样本没进模型，
+        # 它是仿真还是现场都影响不了这个工件（契约 1.6，C-36 §4.2.2）。
+        origins: list[str] = []
 
         for i, s in enumerate(samples):
             if sink.canceled:
@@ -322,15 +326,17 @@ class Trainer:
                 skipped.append((s.id, "该时段在实时库里已无数据"))
                 continue
             items.append(LabeledFrame(frame=frame, label=s.label, sample_id=s.id))
+            origins.append(dataorigin.effective(s.data_origin, b.data_origin))
             if i % 20 == 0:
                 self._wb.update_job(job.id, progress=0.1 * (i + 1) / max(1, len(samples)))
 
-        return Dataset(domain=job.domain, binding=job.binding, name=ds_name,
-                       items=tuple(items), skipped=tuple(skipped)), skipped
+        return (Dataset(domain=job.domain, binding=job.binding, name=ds_name,
+                        items=tuple(items), skipped=tuple(skipped)),
+                skipped, origins)
 
     # ── 落盘 ──────────────────────────────────────────────────────────────
     def _store(self, job, dataset: Dataset, art: TrainedArtifact,
-               skipped: list[tuple[int, str]]) -> int:
+               skipped: list[tuple[int, str]], origins: list[str] | None = None) -> int:
         rel = f"{job.domain}/{art.kind}/{job.id}-{_safe(art.algo)}{art.suffix}"
         target = self._artifacts_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -359,8 +365,28 @@ class Trainer:
             origin="trained", source=f"训练任务 {job.id}",
             training_data=(f"训练集「{dataset.name}」（id={job.dataset_id}）{len(dataset)} 条样本，"
                            f"标签分布 {dataset.label_counts()}"
-                           + (f"；另有 {len(skipped)} 条样本取不到数据、未参与训练" if skipped else "")),
-            license="")
+                           + (f"；另有 {len(skipped)} 条样本取不到数据、未参与训练" if skipped else "")
+                           + _origin_note(origins or [])),
+            license="",
+            # ★来源性质同样由骨架写：按**参与训练**的样本快照取最严（契约 1.6）。
+            #   域碰不到这一格 —— 它是"这条结论能不能说现场设备的话"，不是算法的事。
+            data_origin=dataorigin.fold(origins or []))
+
+
+def _origin_note(origins: list[str]) -> str:
+    """来源性质写进训练数据说明。**只在混了的时候写**（AICloud `C-36 §4.2.2` 点名要的）。
+
+    工件上那一格按取最严压成了一个词；**混了多少比例在这句话里** ——
+    否则"十段里有一段是仿真"与"十段全是仿真"在界面上长得一模一样。
+    """
+    counts: dict[str, int] = {}
+    for o in origins:
+        counts[o or dataorigin.UNDECLARED] = counts.get(o or dataorigin.UNDECLARED, 0) + 1
+    if len(counts) < 2:
+        return ""
+    names = {dataorigin.SIMULATED: "仿真", dataorigin.FIELD: "现场", dataorigin.UNDECLARED: "未声明"}
+    detail = "、".join(f"{names.get(k, k)} {n} 条" for k, n in sorted(counts.items()))
+    return f"；★训练数据来源性质**不一致**（{detail}），工件那一格已按取最严记为 {dataorigin.fold(origins)}"
 
 
 def _safe(name: str) -> str:

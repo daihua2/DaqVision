@@ -26,7 +26,7 @@ from .logstore import LogFilter, LogLevel, LogStore
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.5"
+PROTO_VERSION = "1.6"
 
 
 def _ts(dt: datetime) -> object:
@@ -118,7 +118,7 @@ class ApiService(WorkbenchApiMixin):
     def _to_pb_binding(self, b: Binding) -> pb.Binding:
         out = pb.Binding(domain=b.domain, binding=b.binding,
                          interval_sec=b.interval_sec, window_sec=b.window_sec,
-                         enabled=b.enabled)
+                         enabled=b.enabled, data_origin=b.data_origin)
         for role, gid in b.roles.items():
             out.roles[role] = gid
         for k, v in b.params.items():
@@ -151,6 +151,7 @@ class ApiService(WorkbenchApiMixin):
             self._bindings.put(Binding(
                 domain=b.domain, binding=b.binding, roles=dict(b.roles),
                 params=dict(b.params),
+                data_origin=b.data_origin,
                 interval_sec=b.interval_sec or 60.0,
                 window_sec=b.window_sec or 60.0,
                 enabled=b.enabled), allow_no_roles=no_point_inputs)

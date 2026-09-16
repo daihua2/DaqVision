@@ -415,3 +415,80 @@ class TestSerial(TrainerBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDataOrigin(TrainerBase):
+    """工件上的来源性质：**按参与训练的样本取最严**（契约 1.6 / AICloud `C-36 §4.2.2`）。"""
+
+    def _train(self, bindings, origins, labels=None):
+        ds = self.wb.put_dataset(domain="vib", name="A")
+        anns = []
+        for i, bd in enumerate(bindings):
+            if self.bindings.get("vib", bd) is None:
+                self.bindings.put(Binding("vib", bd, {"x_vel": 100 + i},
+                                          data_origin=origins.get(bd, "")))
+            anns.append(self.wb.put_annotation(
+                domain="vib", binding=bd, label=(labels or ["正常"] * len(bindings))[i],
+                t_from=T0 + timedelta(hours=i), t_to=T0 + timedelta(hours=i, minutes=5)))
+        self.wb.add_samples(ds, anns, origins)
+        job = self.run_one(self.tr.submit(domain="vib", dataset_id=ds))
+        self.assertEqual(job.status, JOB_READY, job.message)
+        art = {a.id: a for a in self.wb.list_artifacts(domain="vib").items}[job.artifact_id]
+        return art
+
+    def test_全现场训出来的工件记现场(self):
+        art = self._train(["d1", "d2"], {"d1": "field", "d2": "field"})
+        self.assertEqual(art.data_origin, "field")
+
+    def test_混进一段仿真就记仿真(self):
+        art = self._train(["d1", "sim1"], {"d1": "field", "sim1": "simulated"})
+        self.assertEqual(art.data_origin, "simulated")
+        # ★混了多少要能看见：压成一个词之后，比例只剩训练数据说明这一处。
+        self.assertIn("不一致", art.training_data)
+        self.assertIn("仿真 1 条", art.training_data)
+
+    def test_谁都没声明就是未声明而不是现场(self):
+        art = self._train(["d1", "d2"], {})
+        self.assertEqual(art.data_origin, "")
+
+    def test_现场混未声明退回未声明(self):
+        art = self._train(["d1", "d2"], {"d1": "field"})
+        self.assertEqual(art.data_origin, "")
+
+    def test_训完改绑定不反写已有工件(self):
+        # ★真机接入后把绑定改成 field —— 当初用仿真数据训出来的那个工件必须岿然不动。
+        art = self._train(["sim1"], {"sim1": "simulated"})
+        self.assertEqual(art.data_origin, "simulated")
+        b = self.bindings.get("vib", "sim1")
+        self.bindings.put(Binding("vib", b.binding, b.roles, data_origin="field"))
+        again = {a.id: a for a in self.wb.list_artifacts(domain="vib").items}[art.id]
+        self.assertEqual(again.data_origin, "simulated", "改绑定把历史工件洗成现场了")
+
+    def test_快照缺失时按绑定兜底但只朝严的方向(self):
+        # 1.6 之前入集的样本没有快照（这里用不传 origins 造出来）。
+        ds = self.wb.put_dataset(domain="vib", name="老集")
+        self.bindings.put(Binding("vib", "sim1", {"x_vel": 100}, data_origin="simulated"))
+        a = self.wb.put_annotation(domain="vib", binding="sim1", label="正常",
+                                   t_from=T0, t_to=T0 + timedelta(minutes=5))
+        self.wb.add_samples(ds, [a])            # ← 没给 origins，快照为空
+        self.assertEqual(self.wb.list_samples(ds).items[0].data_origin, "")
+        job = self.run_one(self.tr.submit(domain="vib", dataset_id=ds))
+        art = {x.id: x for x in self.wb.list_artifacts(domain="vib").items}[job.artifact_id]
+        self.assertEqual(art.data_origin, "simulated", "绑定说仿真，兜底该抬成仿真")
+
+    def test_快照缺失而绑定说现场时仍是未声明(self):
+        # ★兜底**绝不可能**产出一个假的现场 —— 这条红了，整条兜底就不能要。
+        ds = self.wb.put_dataset(domain="vib", name="老集2")
+        self.bindings.put(Binding("vib", "d1", {"x_vel": 100}, data_origin="field"))
+        a = self.wb.put_annotation(domain="vib", binding="d1", label="正常",
+                                   t_from=T0, t_to=T0 + timedelta(minutes=5))
+        self.wb.add_samples(ds, [a])
+        job = self.run_one(self.tr.submit(domain="vib", dataset_id=ds))
+        art = {x.id: x for x in self.wb.list_artifacts(domain="vib").items}[job.artifact_id]
+        self.assertEqual(art.data_origin, "", "快照缺失时兜出了现场")
+
+    def test_取不到数的样本不参与取最严(self):
+        # 那条仿真样本取不到数、没进模型 ⇒ 它影响不了这个工件能不能说现场的话。
+        self.fetcher.empty = {"sim1"}
+        art = self._train(["d1", "sim1"], {"d1": "field", "sim1": "simulated"})
+        self.assertEqual(art.data_origin, "field")

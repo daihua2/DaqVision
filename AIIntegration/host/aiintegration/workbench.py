@@ -52,7 +52,9 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
+
+from . import dataorigin
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,9 @@ CREATE TABLE IF NOT EXISTS samples (
     t_from_us     INTEGER NOT NULL,
     t_to_us       INTEGER NOT NULL,
     label         TEXT    NOT NULL,      -- ★入集那一刻的快照，见模块头 §3
+    -- ★同样是**入集那一刻的快照**：来源性质（仿真/现场）取自绑定（契约 1.6）。
+    --   日后真机接入、绑定改成 field，**不反写**当初用仿真数据训出来的那批样本。
+    data_origin   TEXT    NOT NULL DEFAULT '',
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     UNIQUE(dataset_id, annotation_id)
 );
@@ -135,7 +140,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
     origin        TEXT    NOT NULL DEFAULT 'trained',   -- trained | imported
     source        TEXT    NOT NULL DEFAULT '',
     training_data TEXT    NOT NULL DEFAULT '',
-    license       TEXT    NOT NULL DEFAULT ''
+    license       TEXT    NOT NULL DEFAULT '',
+    -- 训练数据的来源性质（契约 1.6）：训练产出按样本快照**取最严**，外部导入按声明。
+    -- ★空 = 未声明，**不是现场**。老库由 _migrate 补列。
+    data_origin   TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_art_scope ON artifacts(domain, kind, binding);
 CREATE INDEX IF NOT EXISTS ix_art_sha ON artifacts(domain, kind, sha256);
@@ -240,6 +248,8 @@ class Sample:
     t_to: datetime
     label: str
     created_at: str = ""
+    data_origin: str = ""
+    """来源性质（仿真/现场）—— **入集那一刻从绑定取的快照**，见 `dataorigin` 模块头。"""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -266,6 +276,8 @@ class Artifact:
     source: str = ""
     training_data: str = ""
     license: str = ""
+    data_origin: str = ""
+    """训练数据的来源性质（`simulated` / `field` / 空=未声明）。见 `dataorigin` 模块头。"""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -353,7 +365,7 @@ class Workbench:
         self._conn.commit()
 
     def _migrate(self) -> None:
-        """老库补列（契约 1.5 的工件来历四列）。
+        """老库补列（契约 1.5 的工件来历四列、1.6 的来源性质两列）。
 
         ★`CREATE TABLE IF NOT EXISTS` 对已存在的表**一个字都不改** —— 新列不会自己长出来，
           读的时候才炸（`no such column`），而且是在现场。AISERVER 上已有一份 1.4 时代的库。
@@ -363,7 +375,11 @@ class Workbench:
         for col, ddl in (("origin", "TEXT NOT NULL DEFAULT 'trained'"),
                          ("source", "TEXT NOT NULL DEFAULT ''"),
                          ("training_data", "TEXT NOT NULL DEFAULT ''"),
-                         ("license", "TEXT NOT NULL DEFAULT ''")):
+                         ("license", "TEXT NOT NULL DEFAULT ''"),
+                         # 1.6：★补成空（未声明），**绝不回填 field** —— 空 ≠ 现场。
+                         #   也不按绑定"现在"的取值回填历史：那个方向会把当初用仿真数据
+                         #   训的工件洗成现场（见 dataorigin 模块头）。
+                         ("data_origin", "TEXT NOT NULL DEFAULT ''")):
             if col not in have:
                 self._conn.execute(f"ALTER TABLE artifacts ADD COLUMN {col} {ddl}")
                 added.append(col)
@@ -373,6 +389,13 @@ class Workbench:
                 "UPDATE artifacts SET training_data = '训练集 id=' || dataset_id || '（1.5 之前产出，未记录详情）' "
                 "WHERE origin = 'trained' AND training_data = '' AND dataset_id IS NOT NULL")
             logger.info("工件表已补列 %s（老库升级）", added)
+        have_s = {r["name"] for r in self._conn.execute("PRAGMA table_info(samples)")}
+        if "data_origin" not in have_s:
+            # ★同上：补成空。1.6 之前入集的样本没有快照，训练时由 `dataorigin.effective`
+            #   按绑定当前值**只朝严的方向**兜底（绑定说 simulated 才抬，说 field 仍是未声明）。
+            self._conn.execute(
+                "ALTER TABLE samples ADD COLUMN data_origin TEXT NOT NULL DEFAULT ''")
+            logger.info("样本表已补列 data_origin（老库升级；老样本无快照，一律未声明）")
 
     def close(self) -> None:
         with self._lock:
@@ -522,6 +545,17 @@ class Workbench:
                 raise WorkbenchError(f"域 {domain} 下已经有叫 {name!r} 的训练集") from exc
         return new_id
 
+    def dataset_domain(self, dataset_id: int) -> str:
+        """训练集属于哪个域。空串 = 没这个训练集。
+
+        给调用方定位绑定用（样本行只存 `binding` 字符串，而绑定的主键是 **(域, 绑定)**——
+        两个域用了同一个对象名时，只按 binding 找会取到别人的那条）。
+        """
+        with self._lock:
+            row = self._conn.execute("SELECT domain FROM datasets WHERE id=?",
+                                     (dataset_id,)).fetchone()
+        return "" if row is None else row["domain"]
+
     def list_datasets(self, domain: str = "") -> list[Dataset]:
         sql = ("SELECT d.*, (SELECT COUNT(*) FROM samples s WHERE s.dataset_id=d.id) n"
                " FROM datasets d")
@@ -556,8 +590,9 @@ class Workbench:
                     (src["domain"], new_name, src["note"]))
                 new_id = int(cur.lastrowid)
                 self._conn.execute(
-                    "INSERT INTO samples(dataset_id,annotation_id,binding,t_from_us,t_to_us,label)"
-                    " SELECT ?,annotation_id,binding,t_from_us,t_to_us,label"
+                    "INSERT INTO samples(dataset_id,annotation_id,binding,t_from_us,t_to_us,"
+                    "label,data_origin)"
+                    " SELECT ?,annotation_id,binding,t_from_us,t_to_us,label,data_origin"
                     " FROM samples WHERE dataset_id=?", (new_id, dataset_id))
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
@@ -567,11 +602,27 @@ class Workbench:
         return new_id
 
     # ── 样本 ──────────────────────────────────────────────────────────────
-    def add_samples(self, dataset_id: int, annotation_ids: Sequence[int]) -> int:
-        """把标注**拷进**训练集。已经在里面的跳过（幂等），返回新增条数。"""
+    def add_samples(self, dataset_id: int, annotation_ids: Sequence[int],
+                    origins: Mapping[str, str] | None = None) -> int:
+        """把标注**拷进**训练集。已经在里面的跳过（幂等），返回新增条数。
+
+        `origins`：绑定 → 来源性质（仿真/现场），由知道绑定的那层给（本层不连绑定库）。
+        ★**入集这一刻打快照**，与 `label` 同一条规矩：这条记录说的是"训练时用的是什么"，
+          不该被后来改绑定的动作改写。`INSERT OR IGNORE` 顺带保证了**已在集内的样本
+          不会被重跑一次"加入"改掉快照**。
+        """
         if not annotation_ids:
             return 0
         marks = ",".join("?" * len(annotation_ids))
+        # 绑定 → 取值，展开成 CASE：一条 INSERT 里带上快照，不分两步（分两步就得
+        # 区分"哪几条是这次新加的"，而 IGNORE 掉的那些一改就破坏了快照语义）。
+        pairs = [(b, dataorigin.normalize(v)) for b, v in (origins or {}).items()]
+        case_sql = "''"
+        case_args: list = []
+        if pairs:
+            case_sql = ("CASE binding " + " ".join("WHEN ? THEN ?" for _ in pairs)
+                        + " ELSE '' END")
+            case_args = [x for pair in pairs for x in pair]
         with self._lock:
             if self._conn.execute("SELECT 1 FROM datasets WHERE id=?",
                                   (dataset_id,)).fetchone() is None:
@@ -580,10 +631,11 @@ class Workbench:
             # ★`INSERT OR IGNORE` 配 UNIQUE(dataset_id, annotation_id) 做幂等：
             #   界面上重复点一次"加入"，不该多出一份重复样本（那会悄悄改变类别权重）。
             self._conn.execute(
-                f"INSERT OR IGNORE INTO samples(dataset_id,annotation_id,binding,t_from_us,t_to_us,label)"
-                f" SELECT ?, id, binding, t_from_us, t_to_us, label"
+                f"INSERT OR IGNORE INTO samples(dataset_id,annotation_id,binding,t_from_us,"
+                f"t_to_us,label,data_origin)"
+                f" SELECT ?, id, binding, t_from_us, t_to_us, label, {case_sql}"
                 f" FROM annotations WHERE id IN ({marks})",
-                (dataset_id, *annotation_ids))
+                (dataset_id, *case_args, *annotation_ids))
             self._touch_dataset(dataset_id)
             self._conn.commit()
             return self._count_samples(dataset_id) - before
@@ -633,8 +685,9 @@ class Workbench:
                 raise WorkbenchError(f"没有 id={to_dataset} 这个训练集")
             before = self._count_samples(to_dataset)
             self._conn.execute(
-                f"INSERT OR IGNORE INTO samples(dataset_id,annotation_id,binding,t_from_us,t_to_us,label)"
-                f" SELECT ?, annotation_id, binding, t_from_us, t_to_us, label"
+                f"INSERT OR IGNORE INTO samples(dataset_id,annotation_id,binding,t_from_us,"
+                f"t_to_us,label,data_origin)"
+                f" SELECT ?, annotation_id, binding, t_from_us, t_to_us, label, data_origin"
                 f" FROM samples WHERE id IN ({marks})", (to_dataset, *sample_ids))
             self._touch_dataset(to_dataset)
             self._conn.commit()
@@ -735,7 +788,7 @@ class Workbench:
                      accuracy: float | None = None, path: str = "", size: int = 0,
                      sha256: str = "", meta_json: str = "{}",
                      origin: str = "trained", source: str = "", training_data: str = "",
-                     license: str = "") -> int:
+                     license: str = "", data_origin: str = "") -> int:
         if not domain or not name:
             raise WorkbenchError("工件必须有域与名字")
         if origin == "imported" and not (source.strip() and training_data.strip() and license.strip()):
@@ -744,11 +797,13 @@ class Workbench:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO artifacts(domain,kind,binding,name,algo,dataset_id,sample_count,"
-                "feature_count,accuracy,path,size,sha256,meta_json,origin,source,training_data,license)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "feature_count,accuracy,path,size,sha256,meta_json,origin,source,training_data,"
+                "license,data_origin)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (domain, kind, binding, name, algo, dataset_id, sample_count,
                  feature_count, accuracy, path, size, sha256, meta_json,
-                 origin, source, training_data, license))
+                 origin, source, training_data, license,
+                 dataorigin.normalize(data_origin)))
             self._conn.commit()
         return int(cur.lastrowid)
 
@@ -923,7 +978,8 @@ def _to_sample(r: sqlite3.Row) -> Sample:
     return Sample(id=int(r["id"]), dataset_id=int(r["dataset_id"]),
                   annotation_id=None if ann is None else int(ann),
                   binding=r["binding"], t_from=_dt(r["t_from_us"]), t_to=_dt(r["t_to_us"]),
-                  label=r["label"], created_at=r["created_at"])
+                  label=r["label"], created_at=r["created_at"],
+                  data_origin=r["data_origin"] or "")
 
 
 def _to_artifact(r: sqlite3.Row) -> Artifact:
@@ -936,7 +992,7 @@ def _to_artifact(r: sqlite3.Row) -> Artifact:
                     active=bool(r["active"]), path=r["path"], size=int(r["size"]),
                     sha256=r["sha256"], meta_json=r["meta_json"], created_at=r["created_at"],
                     origin=r["origin"], source=r["source"], training_data=r["training_data"],
-                    license=r["license"])
+                    license=r["license"], data_origin=r["data_origin"] or "")
 
 
 def _to_job(r: sqlite3.Row) -> TrainJob:

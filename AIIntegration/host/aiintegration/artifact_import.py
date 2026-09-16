@@ -148,7 +148,10 @@ class ArtifactImporter:
                 algo=f.get("algo", ""), path=rel, size=len(data), sha256=sha,
                 meta_json=json.dumps(meta, ensure_ascii=False),
                 origin="imported", source=f["source"],
-                training_data=f["training_data"], license=f["license"])
+                training_data=f["training_data"], license=f["license"],
+                # 来源性质（契约 1.6）：**可选**。外部模型的训练数据本就不在我方手里，
+                # 逼填只会逼出一个随手选的值；没填就是未声明，界面照第 1 条显示。
+                data_origin=f.get("data_origin", ""))
         except Exception:
             target.unlink(missing_ok=True)      # 记录没写成，别留一个没人认领的文件
             raise

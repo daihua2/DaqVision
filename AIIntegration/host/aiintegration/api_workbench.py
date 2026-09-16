@@ -160,7 +160,12 @@ class WorkbenchApiMixin:
 
     @_guard
     def AddSamples(self, request, context):
-        n = self._wb.add_samples(request.dataset_id, list(request.annotation_ids))
+        # ★来源性质在**入集这一刻**从绑定取一次快照（契约 1.6）：库层不连绑定表，
+        #   所以由这一层查好给它。日后改绑定不反写已入集的样本 —— 那正是快照的意义。
+        domain = self._wb.dataset_domain(request.dataset_id)
+        origins = {b.binding: b.data_origin
+                   for b in self._bindings.list(domain or None) if b.data_origin}
+        n = self._wb.add_samples(request.dataset_id, list(request.annotation_ids), origins)
         asked = len(request.annotation_ids)
         return pb.MutateRes(ok=True, id=n,
                             message="" if n == asked
@@ -200,7 +205,8 @@ class WorkbenchApiMixin:
                 active=a.active, path=a.path, size=a.size, sha256=a.sha256,
                 meta_json=a.meta_json, created_at=a.created_at,
                 origin=a.origin, source=a.source,
-                training_data=a.training_data, license=a.license)
+                training_data=a.training_data, license=a.license,
+                data_origin=a.data_origin)
         return res
 
     @_guard
