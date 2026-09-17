@@ -164,11 +164,11 @@ class TestBaselineLoop(unittest.TestCase):
         self.wb = Workbench(root / "wb.db")
         self.bindings = BindingStore(root / "b.db")
         loaded, failed = discover(DOMAINS_DIR)
-        mine = [(p, e) for p, e in failed if p.name == "vibration_lowfreq.py"]
+        mine = [(p, e) for p, e in failed if p.name == "vibration_baseline.py"]
         assert not mine, mine
         self.domains = {d.key: d for d in loaded}
-        self.dom = self.domains["vibration_lowfreq"]
-        self.bindings.put(Binding("vibration_lowfreq", "dev1",
+        self.dom = self.domains["vibration_baseline"]
+        self.bindings.put(Binding("vibration_baseline", "dev1",
                                   {"x_vel": 101, "z_vel": 103, "temp": 100},
                                   params=dict(FULL_PARAMS)))
         self.fetcher = FakeFetcher({"x_vel": 1.0, "z_vel": 0.5, "temp": 40.0})
@@ -183,13 +183,13 @@ class TestBaselineLoop(unittest.TestCase):
         self.bindings.close(); self.wb.close(); self._tmp.cleanup()
 
     def _train(self, n=6, label="正常", name="正常段"):
-        ds = self.wb.put_dataset(domain="vibration_lowfreq", name=name)
+        ds = self.wb.put_dataset(domain="vibration_baseline", name=name)
         anns = [self.wb.put_annotation(
-            domain="vibration_lowfreq", binding="dev1", label=label,
+            domain="vibration_baseline", binding="dev1", label=label,
             t_from=T0 + timedelta(hours=i), t_to=T0 + timedelta(hours=i, minutes=5))
             for i in range(n)]
         self.wb.add_samples(ds, anns)
-        jid = self.tr.submit(domain="vibration_lowfreq", dataset_id=ds,
+        jid = self.tr.submit(domain="vibration_baseline", dataset_id=ds,
                              binding="dev1", algo="基线")
         self.tr.start()
         deadline = time.monotonic() + 15
@@ -205,7 +205,7 @@ class TestBaselineLoop(unittest.TestCase):
         self.assertEqual(job.status, "ready", job.message)
 
         # ① 存成的是 baseline，不是 model —— 两者各占各的激活位
-        art = self.wb.list_artifacts(domain="vibration_lowfreq").items[0]
+        art = self.wb.list_artifacts(domain="vibration_baseline").items[0]
         self.assertEqual(art.kind, "baseline")
         self.assertIsNone(art.accuracy, "基线没有准确率这回事")
         self.assertIn("/baseline/", art.path)
@@ -213,19 +213,19 @@ class TestBaselineLoop(unittest.TestCase):
         # ② 落盘的确实是能解析的基线
         model = json.loads((self.artifacts_dir / art.path).read_bytes())
         self.assertEqual(model["frames"], 6)
-        self.assertAlmostEqual(model["channels"]["x_vel"]["mean"], 1.0, places=6)
+        self.assertAlmostEqual(model["channels"]["x_vel"]["median"], 1.0, places=6)
 
         # ③ 没启用之前，推理拿不到它 ⇒ 那四条落 MODEL_NOT_LOADED
-        b = self.bindings.get("vibration_lowfreq", "dev1")
+        b = self.bindings.get("vibration_baseline", "dev1")
         frame = self.fetcher.fetch(b, T0 + timedelta(days=1),
-                                   artifacts=self.cache.for_binding("vibration_lowfreq", "dev1"))
+                                   artifacts=self.cache.for_binding("vibration_baseline", "dev1"))
         out = {f.key: f for f in self.dom.instance.infer(frame)}
         self.assertIs(out["anomaly_score"].quality, Quality.MODEL_NOT_LOADED)
 
         # ④ 启用之后，下一拍就用上了
         self.wb.activate_artifact(art.id)
         frame2 = self.fetcher.fetch(b, T0 + timedelta(days=1),
-                                    artifacts=self.cache.for_binding("vibration_lowfreq", "dev1"))
+                                    artifacts=self.cache.for_binding("vibration_baseline", "dev1"))
         self.assertIn("baseline", frame2.artifacts)
         out2 = {f.key: f for f in self.dom.instance.infer(frame2)}
         self.assertIs(out2["anomaly_score"].quality, Quality.OK)
@@ -235,7 +235,7 @@ class TestBaselineLoop(unittest.TestCase):
         # ⑤ 值抬上去，z 分数与异常分跟着上去（基线真的在起作用）
         self.fetcher.values["x_vel"] = 3.0
         frame3 = self.fetcher.fetch(b, T0 + timedelta(days=1),
-                                    artifacts=self.cache.for_binding("vibration_lowfreq", "dev1"))
+                                    artifacts=self.cache.for_binding("vibration_baseline", "dev1"))
         out3 = {f.key: f for f in self.dom.instance.infer(frame3)}
         self.assertGreater(out3["vel_z_max"].value, out2["vel_z_max"].value)
         self.assertGreater(out3["anomaly_score"].value, out2["anomaly_score"].value)
@@ -244,7 +244,7 @@ class TestBaselineLoop(unittest.TestCase):
         """★训练时拿旧模型当输入，漂了也看不出来。"""
         job = self._train()
         self.assertEqual(job.status, "ready", job.message)
-        art = self.wb.list_artifacts(domain="vibration_lowfreq").items[0]
+        art = self.wb.list_artifacts(domain="vibration_baseline").items[0]
         self.wb.activate_artifact(art.id)
         # 再训一次：执行器组装数据集时**不带**工件
         seen = {}

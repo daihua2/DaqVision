@@ -137,11 +137,12 @@ class TestRealVisionDomainDeclaresDeps(unittest.TestCase):
             self.skipTest("仓布局变了，跳过")
         self.assertEqual(set(parse_requires(here)), {"cv2", "numpy", "onnxruntime"})
 
-    def test_vibration_lowfreq_has_no_third_party_dep(self):
-        here = Path(__file__).resolve().parents[2] / "domains" / "vibration_lowfreq.py"
-        if not here.is_file():
-            self.skipTest("仓布局变了，跳过")
-        self.assertEqual(parse_requires(here), ())
+    def test_振动两个模块零第三方依赖(self):
+        # ★不用 skipTest：文件不在就该红 —— 拆分时旧名字被删，skip 会让这条悄悄失效。
+        for name in ("vibration_iso.py", "vibration_baseline.py"):
+            here = Path(__file__).resolve().parents[2] / "domains" / name
+            self.assertTrue(here.is_file(), f"找不到 {name}")
+            self.assertEqual(parse_requires(here), (), name)
 
 
 if __name__ == "__main__":

@@ -145,7 +145,9 @@ worker 只吃数据出结论，交回骨架。容量无虑 —— 单 guid 快�
 
 | 域 | 文件 | 状态 |
 | --- | --- | --- |
-| **低频振动 `vibration_lowfreq`** | `domains/vibration_lowfreq.py` | ✅ **第 ① 层已落地**：ISO 10816-3 烈度判级 + 方向性倾向 |
+| ~~低频振动 `vibration_lowfreq`~~ | ~~`domains/vibration_lowfreq.py`~~ | ★**2026-09-17 已拆分**，见下两行 |
+| **经典算法振动诊断 `vibration_iso`** | `domains/vibration_iso.py` | ISO 20816-3:2022 烈度判级 + 方向性提示（原第 ① 层） |
+| **AI 模型自训振动诊断 `vibration_baseline`** | `domains/vibration_baseline.py` | 基线偏离，基线用中位数/四分位距（原第 ② 层） |
 | 高频振动 / 视觉 / VFD | — | 未开工 |
 
 ### 8.1 第一个域检验了"丢一个 `.py` 就多一个域"
@@ -326,7 +328,7 @@ AICloud `C-10 §6` / `C-11 §5` 给的判据：
 | σ 有下限 0.01 mm/s | 传感器分辨率决定 σ 不可能真是 0。不设下限的后果是天文数字的 z —— 比除零更坏，因为它看着像个结论 |
 | 基线**没有"准确率"** | `accuracy=None`，不拿 1.0 顶（界面会把它显示成"100%"） |
 
-基线本体是 JSON，**带格式版本**（`vibration_lowfreq/baseline@1`）：
+基线本体是 JSON，**带格式版本**（`vibration_lowfreq/baseline@1`；★拆分后为 `vibration_baseline/baseline@1`，统计量改为中位数与四分位距，老格式拒读）：
 将来改格式，老工件要能被认出来而不是被误读。格式不认就落坏码，不硬算。
 
 ### 11.2 ★骨架补的最后一格：推理时把「当前启用的工件」交给模块

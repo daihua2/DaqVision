@@ -11,7 +11,7 @@ AICloud 界面会把 `load_errors` 显出来（`C-17 §2.1`），现场看到的
 
     REQUIRES = ("cv2", "numpy", "onnxruntime")
 
-没有这一行 = 零第三方依赖（如 `vibration_lowfreq`）。安装时**绝不 import 域模块**
+没有这一行 = 零第三方依赖（如 `vibration_iso`）。安装时**绝不 import 域模块**
 —— import 了就当场炸在缺的那个包上，这正是要避免的 —— 而是用 `ast` 读那个常量，
 再拿**目标 venv** 查这些模块在不在；缺就不铺，并把原因打印出来。
 

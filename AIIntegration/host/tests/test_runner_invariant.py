@@ -121,18 +121,19 @@ class TestNoTrustedInput(unittest.TestCase):
 
 
 class TestRealDomainsAlreadyComply(unittest.TestCase):
-    def test_低频振动在无数据时本就守规(self):
+    def test_振动两个模块在无数据时本就守规(self):
         loaded, failed = discover(DOMAINS_DIR)
-        mine = [(p, e) for p, e in failed if p.name == "vibration_lowfreq.py"]
-        assert not mine, mine
-        vib = {d.key: d for d in loaded}["vibration_lowfreq"]
-        frame = Frame(domain="vibration_lowfreq", binding="dev1", t_start=T0 - timedelta(seconds=60),
-                      t_end=T0, channels={"x_vel": []},
-                      params={"iso_group": "2", "mount_type": "rigid", "vel_is_rms": "true",
-                              "axial_axis": "z"})
-        res = run_domain(vib, frame)
-        self.assertEqual(res.error, "", "现有域自己就落了坏质量，不该触发骨架修正")
-        self.assertFalse(any(f.quality.is_good() for f in res.findings))
+        for name in ("vibration_iso", "vibration_baseline"):
+            mine = [(p, e) for p, e in failed if p.name == f"{name}.py"]
+            assert not mine, mine
+            vib = {d.key: d for d in loaded}[name]
+            frame = Frame(domain=name, binding="dev1", t_start=T0 - timedelta(seconds=60),
+                          t_end=T0, channels={"x_vel": []},
+                          params={"iso_group": "2", "mount_type": "rigid", "vel_is_rms": "true",
+                                  "axial_axis": "z"})
+            res = run_domain(vib, frame)
+            self.assertEqual(res.error, "", f"{name} 自己就落了坏质量，不该触发骨架修正")
+            self.assertFalse(any(f.quality.is_good() for f in res.findings), name)
 
 
 if __name__ == "__main__":
