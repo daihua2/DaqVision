@@ -18,7 +18,7 @@ AIIntegration 内部：`host/aiintegration/`（骨架）、`domains/*.py`（算�
 ## 硬规矩（违反会出事，不是风格问题）
 
 1. **AISERVER 上原有四个 AI 项目（v4 / v5 / meter-helmet / VFD）一律不动**：不改、不停服、不共用它们的 venv。只读核查可以；它们的 `.env` 凭据**未经用户同意不读**。
-2. **只有骨架进程持身份、连 historystore**。worker / 域不持证书、不连 hs —— 多进程共用一个 guid 会互相踢流、互删快照（原因见 AIIntegration/README.md §6）。
+2. **写 historystore 的只有骨架进程**（推点定义、写值）。worker 可用同一张证书**只读直连** hs（只调 `QueryHistory` / `SubscribeVQTs` 等读口），域本身不连 hs。依据 historystore `H-244 §2`：「共用 guid 互相踢流、互删快照」只发生在写配置流 `PushEntityConfigs` 上，对只读连接不成立。★只读是我方自律、hs 不强制，worker 进程内不得链写接口。（2026-09-17 用户同意修改；原规矩与原因见 AIIntegration/README.md §6）
 3. **新增域 = 丢一个 `domains/*.py`，骨架不改**。骨架不枚举域；域不知道 hs / VQT / HTTP 的存在。分界判据见 [AIIntegration/doc/骨架与算法模块分界.md](AIIntegration/doc/骨架与算法模块分界.md)。
 4. **没有可信输入，不许出质量 OK 的结论**（`runner.py` 在骨架层强制）。
 5. **契约**（`proto/vision.proto`、`AIIntegration/proto/aiintegration.proto`）：字段编号只增不改不复用、废弃用 `reserved`、改就升 `proto_version` 并登记同目录 `CHANGELOG.md`。`aiintegration.proto` **改即投** `AISERVER:/home/Project/AIIntegration/proto/` **并发函**；不一致以本仓为准。
