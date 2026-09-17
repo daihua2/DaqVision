@@ -1,12 +1,14 @@
-"""经典算法振动诊断 —— ISO 20816-3 烈度判级 + 方向性提示。
+"""经典算法振动诊断 —— 按国标做振动烈度判级（工业机器 / 旋转动力泵）+ 方向性提示。
 
 > 2026-09-17 由 `vibration_lowfreq` 拆出（用户定）：原文件把「经典判据」与「自训基线」
-> 两种完全不同的算法合在一起。现在设备参数改在设备上填一次、界面也分设两个选项，
-> 合并的唯一理由（共用输入、参数不填两遍）不再成立。另一半见 `vibration_baseline.py`。
+> 两种完全不同的算法合在一起。另一半见 `vibration_baseline.py`。
+>
+> ★2026-09-18 判级依据改用**国标**（用户定，与 AICloud `C-43` 的「有国标按国标」一致）：
+> ISO 20816-3:2022 尚无对应国标，故
+> - 工业机器按 **GB/T 6075.3-2011**（等同采用 ISO 10816-3:2009）；
+> - 旋转动力泵按 **GB/T 6075.7-2015**（等同采用 ISO 10816-7:2009），本日新增。
 
-依据：
-- ISO 20816-3:2022 原文，核对记录见 `AIIntegration/doc/ISO20816-3机组分类与限值.md`；
-- 本模块的配置与取舍定案见 `AIIntegration/doc/诊断配置流程定案.md`「模块 1、2 的内容」。
+依据与定案：`AIIntegration/doc/诊断配置流程定案.md`「模块 1、2 的内容」「判级改用国标与泵」。
 
 ---
 
@@ -15,27 +17,36 @@
 | 结论 | 说明 |
 | --- | --- |
 | 速度最大值、最大值所在轴 | 窗口内全部已绑速度通道（含第二测点）的最大值 |
-| ISO 烈度区（文字 / 数值）、距下一档余量 | ISO 20816-3:2022 附录 A 表 A.1、A.2 |
+| 烈度区（文字 / 数值）、距下一档余量 | 工业机器按 GB/T 6075.3；泵按 GB/T 6075.7 |
 | 轴向/径向比、方向性提示 | ★**经验判据，只作提示，不是结论**（实测单测点判不对中方向 0.767，基线 0.607） |
 | 判据摘要 | 每一条"为什么没给"都写明 |
 
 **不需要训练、不需要历史状态、不需要第三方库** —— 保存即出结论。
 
-## 0.2 定案里的四条，落在代码的哪里
+## 0.2 走哪套判据：看设备上填的是「泵类别」还是「机器分组」
 
-1. **机组类别只有第 1、2 组**（ISO 20816-3:2022 删去了旧版的泵类第 3、4 组，泵归 ISO 10816-7）；
-   另有「不适用」—— 设备不在 ISO 20816-3 范围内时选它，**不出 ISO 分级**。
-2. **额定转速 < 600 r/min**：照常出分级，但判据摘要注明「低速设备，标准要求另看位移，本结果仅供参考」。
-   原文附录 A：低速机器评价频带为 2~1000 Hz，且应同时按速度与位移评价；
-   我方拿到的是传感器算好的有效值，频带由传感器决定，我方改不了。
+| 设备上 | 判据 | 需要 |
+| --- | --- | --- |
+| 泵类别 = 第Ⅰ类 / 第Ⅱ类 | GB/T 6075.7-2015 | 额定功率（按 200 kW 分档）；**不看支承方式、不限转速** |
+| 否则 | GB/T 6075.3-2011 | 机器分组（第 1 / 2 组）、支承方式 |
+
+两者都填成有效值是**自相矛盾**，不猜哪个对，落 `CONFIG_INCOMPLETE` 并说清。
+★这几项参数在声明上都不是必填（泵不需要机器分组、工业机器不需要泵类别），
+  **必填性按所走判据在推理时逐条检查**，缺哪个说哪个 —— 仍然没有任何缺省值。
+
+## 0.3 定案里的几条，落在代码的哪里
+
+1. **机器分组只有第 1、2 组**，另有「不适用」—— 设备不在标准范围内时选它，**不出烈度分级**。
+   适用范围（转速 15000 r/min、汽轮机/发电机 50 MW 等）由设备模型判定，本模块不另判。
+2. **工业机器额定转速 < 600 r/min**：照常出分级，但判据摘要注明「低速设备，标准要求另看位移，本结果仅供参考」。
 3. **方向性保留，显示为「提示」**。
 4. **报警防抖先不做**。
 
-## 0.3 纪律：缺什么落什么码，绝不猜缺省
+## 0.4 纪律：缺什么落什么码，绝不猜缺省
 
 参数没填、口径没确认、样本全是坏值 —— 每一种都对应一条特定的坏质量结论，
-而不是"给个看起来合理的数"。**猜错的 ISO 分级会把"该停机"说成"可长期运行"，而且从数值上看不出来。**
-逐条结论各自判质量：缺轴向只让方向性那两条落码，ISO 那几条照出。
+而不是"给个看起来合理的数"。**猜错的烈度分级会把"该停机"说成"可长期运行"，而且从数值上看不出来。**
+逐条结论各自判质量：缺轴向只让方向性那两条落码，烈度分级那几条照出。
 """
 
 from __future__ import annotations
@@ -47,21 +58,37 @@ from aiintegration.domains import Domain
 from aiintegration.quality import Quality
 from aiintegration.types import Declaration, Finding, Frame, InputSpec, OutputSpec, ParamSpec
 
-# ───────────────────────── ISO 20816-3:2022 附录 A 限值 ─────────────────────────
+# ─────────────────────────────── 限值表 ───────────────────────────────
 #
-# 速度有效值 mm/s。三个边界依次是 A/B、B/C、C/D（表 A.1 第 1 组、表 A.2 第 2 组）。
-#   A 新投运 │ B 可不受限长期运行 │ C 不宜长期连续运行 │ D 足以造成损坏
-#
-# ★这张表是**判据本身**，不是可调参数：动它等于改国标结论。
-_ISO_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
+# 速度有效值 mm/s。三个边界依次是 A/B、B/C、C/D。
+#   A 新投运 │ B 可长期运行 │ C 不宜长期连续运行 │ D 足以造成损坏
+# ★这两张表是**判据本身**，不是可调参数：动它等于改国标结论。
+
+#: GB/T 6075.3-2011（等同 ISO 10816-3:2009）工业机器，(机器分组, 支承方式) → 边界。
+#: 数值与 ISO 20816-3:2022 表 A.1、A.2 相同（2026-09-17 核对原文）。
+_MACHINE_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
     ("1", "rigid"):    (2.3, 4.5, 7.1),
     ("1", "flexible"): (3.5, 7.1, 11.0),
     ("2", "rigid"):    (1.4, 2.8, 4.5),
     ("2", "flexible"): (2.3, 4.5, 7.1),
 }
-_GROUP_NA = "na"
 
-#: 低速阈值（r/min）。ISO 20816-3:2022 附录 A：低于它评价频带改为 2~1000 Hz 且应另看位移。
+#: GB/T 6075.7-2015（等同 ISO 10816-7:2009）旋转动力泵，(泵类别, 功率档) → 边界。
+#: ★出处：AICloud `C-43 §4` 转引 Europump《Guidelines on Pump Vibration》（2013）对 ISO 10816-7 的摘录，
+#:   **标准原文尚未取得、未核对**（用户 2026-09-18 定：先按此实现）。取得原文后须逐值核对。
+_PUMP_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
+    ("1", "le200"): (2.5, 4.0, 6.6),
+    ("1", "gt200"): (3.5, 5.0, 7.6),
+    ("2", "le200"): (3.2, 5.1, 8.5),
+    ("2", "gt200"): (4.2, 6.1, 9.5),
+}
+PUMP_POWER_SPLIT_KW = 200.0
+
+_NA = "na"
+_MACHINE_STD = "GB/T 6075.3-2011"
+_PUMP_STD = "GB/T 6075.7-2015"
+
+#: 低速阈值（r/min）。工业机器低于它时，标准要求评价频带改为 2~1000 Hz 且应另看位移。
 LOW_SPEED_RPM = 600.0
 
 _AXES = ("x", "y", "z")
@@ -100,46 +127,60 @@ class VibrationIso(Domain):
             inputs=tuple(inputs),
             params=(
                 ParamSpec(
-                    key="iso_group", display="ISO 20816-3 机组类别", value_type="enum",
-                    choices=("1", "2", _GROUP_NA),
+                    key="iso_group", display="机器分组（GB/T 6075.3）", value_type="enum",
+                    choices=("1", "2", _NA),
                     choice_displays=(
-                        "第 1 组：大型机组，额定功率 >300 kW；电机轴中心高 H≥315 mm",
-                        "第 2 组：中型机组，额定功率 >15 kW 且 ≤300 kW；电机轴中心高 160≤H<315 mm",
-                        "不适用：设备不在 ISO 20816-3 范围内（如 ≤15 kW、回转动力泵、往复机械等）",
+                        "第 1 组：大型机器，额定功率 >300 kW；电动机轴中心高 H≥315 mm",
+                        "第 2 组：中型机器，额定功率 >15 kW 且 ≤300 kW；电动机轴中心高 160≤H<315 mm",
+                        "不适用：不在 GB/T 6075.3 范围内",
                     ),
-                    required=True, level="machine",
-                    description="决定 A/B/C/D 边界值。没有缺省：选错会把该停机说成可长期运行。"
-                                "选「不适用」则不出 ISO 分级"),
+                    required=False, level="machine",
+                    description="工业机器必填（泵不填）。决定 A/B/C/D 边界值，没有缺省：选错会把该停机说成可长期运行。"
+                                "选「不适用」则不出烈度分级"),
                 ParamSpec(
                     key="mount_type", display="支承方式", value_type="enum",
                     choices=("rigid", "flexible"), choice_displays=("刚性", "柔性"),
-                    required=True, level="machine",
-                    description="机器与支承系统在测量方向上的最低固有频率比转频高 25% 以上为刚性，否则柔性"),
+                    required=False, level="machine",
+                    description="工业机器必填（泵不看支承）。机器与支承系统在测量方向上的最低固有频率比转频高 25% 以上为刚性，否则柔性"),
+                ParamSpec(
+                    key="pump_category", display="泵类别（GB/T 6075.7）", value_type="enum",
+                    choices=("1", "2", _NA),
+                    choice_displays=(
+                        "第Ⅰ类：对可靠性、可用性或安全性要求高的泵",
+                        "第Ⅱ类：一般用途的泵",
+                        "不适用：不是泵，或不在 GB/T 6075.7 范围内",
+                    ),
+                    required=False, level="machine",
+                    description="旋转动力泵必填（工业机器不填）。选第Ⅰ/Ⅱ类即按泵判级"),
+                ParamSpec(
+                    key="rated_power_kw", display="额定功率", value_type="float", unit="kW",
+                    required=False, level="machine",
+                    description="泵必填：按 200 kW 分两档取限值"),
                 ParamSpec(
                     key="rated_speed_rpm", display="额定转速", value_type="float", unit="r/min",
                     required=False, level="machine",
-                    description="低于 600 r/min 时照常出分级，但判据摘要注明结果仅供参考（标准要求另看位移）"),
+                    description="工业机器低于 600 r/min 时照常出分级，但判据摘要注明结果仅供参考（标准要求另看位移）"),
                 ParamSpec(
                     key="vel_is_rms", display="速度口径确认为有效值", value_type="enum",
                     choices=("true", "false"),
                     choice_displays=("是，已确认为有效值", "否 / 未确认（峰值或手册未注明）"),
                     required=True, level="position",
-                    description="ISO 判级要求速度有效值。选「否」时不出 ISO 分级，只给数值"),
+                    description="烈度判级要求速度有效值。选「否」时不出烈度分级，只给数值"),
                 ParamSpec(
                     key="axial_axis", display="轴向是哪一轴", value_type="enum",
                     choices=("x", "y", "z"), choice_displays=("X 轴", "Y 轴", "Z 轴"),
                     required=True, level="position",
                     description="沿转轴方向的那一轴，两个测点按同一方向理解。没有缺省：猜错会把不对中说成不平衡。"
-                                "缺它只影响方向性两条，ISO 分级照出"),
+                                "缺它只影响方向性两条，烈度分级照出"),
             ),
             outputs=(
                 OutputSpec(key="vel_max", display="速度最大值", value_type="float", unit="mm/s",
                            description="窗口内全部已选速度通道的最大值"),
                 OutputSpec(key="dominant_axis", display="最大值所在轴", value_type="string",
                            description="x / y / z；第二测点记为 x2 / y2 / z2"),
-                OutputSpec(key="iso_zone", display="ISO 烈度区", value_type="string",
+                OutputSpec(key="iso_zone", display="烈度区", value_type="string",
                            description="A 新投运 / B 可长期运行 / C 不宜长期连续运行 / D 足以造成损坏"),
-                OutputSpec(key="iso_zone_code", display="ISO 烈度区(数值)", value_type="int",
+                OutputSpec(key="iso_zone_code", display="烈度区(数值)", value_type="int",
                            description="1=A 2=B 3=C 4=D，给趋势曲线与报警门限用"),
                 OutputSpec(key="iso_margin", display="距下一档余量", value_type="float", unit="mm/s",
                            description="离更差一档的边界还有多远；已在 D 区时为负"),
@@ -172,22 +213,8 @@ class VibrationIso(Domain):
             Finding(key="dominant_axis", value=dominant, quality=Quality.OK, t=t),
         ]
 
-        # ② ISO 分级
-        group = frame.params.get("iso_group", "").strip()
-        mount = frame.params.get("mount_type", "").strip()
-        is_rms = frame.params.get("vel_is_rms", "").strip().lower()
-        limits = _ISO_LIMITS.get((group, mount))
-        if group == _GROUP_NA:
-            # ★不适用 = 判据立不起来，正是 CONFIG_INCOMPLETE 的定义；不另立新码。
-            iso_bad = "机组类别为「不适用」：设备不在 ISO 20816-3 范围内，不给分级"
-        elif is_rms != "true":
-            iso_bad = (f"速度口径未确认为有效值（vel_is_rms={is_rms or '未填'}）"
-                       "—— 拿峰值套有效值判据会整档偏高，故不给分级")
-        elif limits is None:
-            iso_bad = (f"参数不全或取值非法：iso_group={group or '未填'} "
-                       f"mount_type={mount or '未填'}，查不到 ISO 边界")
-        else:
-            iso_bad = ""
+        # ② 烈度分级
+        limits, iso_bad, basis, is_pump = _grading(frame.params)
 
         if iso_bad:
             out += _bad_group(("iso_zone", "iso_zone_code", "iso_margin"), Quality.CONFIG_INCOMPLETE, t)
@@ -214,13 +241,14 @@ class VibrationIso(Domain):
         used = "/".join(f"{k}={peaks[k]:.3f}" for k in sorted(peaks))
         parts = [f"取窗口内最大值：{used}；最大在 {dominant} {vel_max:.3f} mm/s"]
         if iso_bad:
-            parts.append(f"ISO 分级未给：{iso_bad}")
+            parts.append(f"烈度分级未给：{iso_bad}")
         else:
             zone, _c, margin = _classify(vel_max, limits)  # type: ignore[arg-type]
             parts.append(
-                f"ISO 20816-3:2022（第 {group} 组 / {'刚性' if mount == 'rigid' else '柔性'}支承）判为 {zone} 区，"
+                f"{basis} 判为 {zone} 区，"
                 + (f"已超出 C/D 界 {-margin:.3f} mm/s" if margin < 0 else f"距下一档还有 {margin:.3f} mm/s"))
-            parts.append(_speed_note(frame.params.get("rated_speed_rpm", "")))
+            if not is_pump:                  # 低速规定出自 GB/T 6075.3；泵标准不限转速
+                parts.append(_speed_note(frame.params.get("rated_speed_rpm", "")))
         if dir_bad:
             parts.append(f"方向性提示未给：{dir_bad}")
         else:
@@ -284,6 +312,57 @@ def _as_float(value) -> float | None:
         v = float(value)
         return v if v == v and v not in (float("inf"), float("-inf")) else None
     return None
+
+
+def _num(raw: str) -> float | None:
+    try:
+        v = float((raw or "").strip())
+    except ValueError:
+        return None
+    return v if v == v and v not in (float("inf"), float("-inf")) else None
+
+
+def _grading(params: dict[str, str]
+             ) -> tuple[tuple[float, float, float] | None, str, str, bool]:
+    """选判据、查边界。返回 `(边界, 未给原因, 判据说明, 是否按泵)`；原因为空表示可以判。
+
+    ★不适用 / 缺参数 / 自相矛盾，都属于「判据立不起来」—— 正是 CONFIG_INCOMPLETE 的定义，不另立新码。
+    """
+    group = params.get("iso_group", "").strip()
+    mount = params.get("mount_type", "").strip()
+    pump = params.get("pump_category", "").strip()
+    is_rms = params.get("vel_is_rms", "").strip().lower()
+
+    is_pump = pump in ("1", "2")
+    if is_pump and group in ("1", "2"):
+        return None, (f"参数自相矛盾：既填了泵类别（第 {pump} 类）又填了机器分组（第 {group} 组），"
+                      "不猜哪个对"), "", True
+    if is_rms != "true":
+        return None, (f"速度口径未确认为有效值（vel_is_rms={is_rms or '未填'}）"
+                      "—— 拿峰值套有效值判据会整档偏高，故不给分级"), "", is_pump
+
+    if is_pump:
+        power = _num(params.get("rated_power_kw", ""))
+        if power is None or power <= 0:
+            raw = params.get("rated_power_kw", "").strip()
+            return None, (f"泵按 {_PUMP_STD} 判级需要额定功率（rated_power_kw={raw or '未填'}），"
+                          "无法确定功率档"), "", True
+        band = "le200" if power <= PUMP_POWER_SPLIT_KW else "gt200"
+        roman = "Ⅰ" if pump == "1" else "Ⅱ"
+        basis = (f"{_PUMP_STD}（第{roman}类 / 额定 {power:g} kW，"
+                 f"{'≤' if band == 'le200' else '>'}200 kW 档）")
+        return _PUMP_LIMITS[(pump, band)], "", basis, True
+
+    if group == _NA:
+        return None, f"机器分组为「不适用」：设备不在 {_MACHINE_STD} 范围内，不给分级", "", False
+    if pump == _NA and not group:
+        return None, "机器分组未填（泵类别为「不适用」，按工业机器判需要机器分组）", "", False
+    limits = _MACHINE_LIMITS.get((group, mount))
+    if limits is None:
+        return None, (f"参数不全或取值非法：iso_group={group or '未填'} "
+                      f"mount_type={mount or '未填'}，查不到 {_MACHINE_STD} 边界"), "", False
+    basis = f"{_MACHINE_STD}（第 {group} 组 / {'刚性' if mount == 'rigid' else '柔性'}支承）"
+    return limits, "", basis, False
 
 
 def _classify(vel: float, limits: tuple[float, float, float]) -> tuple[str, int, float]:
