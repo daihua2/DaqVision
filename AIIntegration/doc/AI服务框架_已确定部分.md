@@ -52,7 +52,7 @@
 
 | 方式 | 模块 | 依据 |
 | --- | --- | --- |
-| **甲 直接拿** | **4 伺服**、**6 压装**、**5 VFD** | 入口分别是 `predict_rows(rows)` / `predict_rows(rows, model)` / `ModelBundle.predict(rows)`，**零业务耦合**（不 import 其 app/db/services），模型工件齐全 |
+| **甲 直接拿** | **4 伺服**（★仅深度路，见下）、**6 压装**、**5 VFD** | 入口分别是 `predict_rows(rows)` / `predict_rows(rows, model)` / `ModelBundle.predict(rows)`，模型工件齐全 |
 | **乙 拿模型、推理层重写** | **7 安全帽**、**8/9/10 表计与 OCR** | 入口是 FastAPI 端点；指针表/数字表还靠 `subprocess` 调另一个子项目 |
 | **丙 只能拿思路** | **3 波形** | 代码在，但现场无输入 |
 
@@ -60,8 +60,20 @@
 `yolo11n_safety_512_fp32.onnx`，推理层用 onnxruntime+numpy+cv2 重写（**不拖 torch/ultralytics**），
 并有 `research/vision-onnx-parity/` 做过一致性验证。模块 5/8/9/10 可照此路子。
 
-【未验证】**只读了代码，没跑过**。"能用"是就耦合度与工件完整性说的；
-模型能不能真加载、跑出来对不对，**没验**。
+★**2026-09-17 已实测伺服那条，结论要订正**：
+
+| 判据 | 结果 |
+| --- | --- |
+| 能 import，不拖 app/db/services | ✅ **深度路成立**（`servo_diagnosis.infer`） |
+| 能加载工件、喂数据出结果 | ✅ 首次 **13.2 s**（含模型加载），之后 **46 ms/次** |
+| ★**树模型路** | ❌ **失败**：`servo_diagnosis.tree_infer` → `ModuleNotFoundError: No module named 'services'` |
+
+⇒ ★**「零业务耦合」只对深度路成立**。`tree_infer.py` 耦合了原项目的 `services` 包，要拆耦合才能用。
+而 `原四项目调查 §6` 记过「两条推理路并存，运行时按 `model` 参数选」 ⇒
+★**拿一个模块 ≠ 拿到它的全部能力**：伺服能直接拿的是 CNN-LSTM 那条，决策树 / SVM 那条要额外工作。
+
+【未验证】**压装与 VFD 仍只读了代码、没跑过**。鉴于伺服已在树模型路上翻车，
+★**不可由伺服的结果外推**，两个都要各自实测。
 
 ## 4 算法清单【实测】
 
