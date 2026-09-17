@@ -35,13 +35,13 @@ class D(Domain):
     version = "2.0.0"
     def declare(self):
         return Declaration(
-            inputs=(InputSpec(role="x_acc", unit="g"),
+            inputs=(InputSpec(role="x_acc", unit="g", display="X 轴加速度"),
                     InputSpec(role="temp", unit="℃", required=False)),
             outputs=(OutputSpec(key="health_score", display="健康分",
                                 value_type="float", unit="分"),),
             params=(ParamSpec(key="iso_group", display="机组类别", value_type="enum",
                               choices=("1", "2"), choice_displays=("大型", "中型"),
-                              description="决定边界值"),
+                              description="决定边界值", level="machine"),
                     ParamSpec(key="note", display="备注", value_type="string",
                               required=False),),
         )
@@ -88,7 +88,7 @@ class TestInfoAndDomains(ApiTestBase):
     def test_GetInfo_带身份与契约版本(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
         self.assertEqual(r.guid, "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(r.proto_version, "1.7")
+        self.assertEqual(r.proto_version, "1.8")
         self.assertEqual(r.domain_count, 1)
 
     def test_装载失败不藏(self):
@@ -241,6 +241,17 @@ class TestBindingParamsOverWire(unittest.TestCase):
         self.assertEqual(list(specs["iso_group"].choice_displays), ["大型", "中型"])
         self.assertTrue(specs["iso_group"].required)
         self.assertFalse(specs["note"].required)
+
+    def test_域清单带参数归属与输入显示名(self):
+        """契约 1.8。★漏搬任何一个，前端就只能退回显示 `x_acc`、把设备参数塞进每条诊断里重复填。"""
+        r = self.call("ListDomains", pb.DomainsRequest(), pb.DomainsReply)
+        d = next(x for x in r.domains if x.key == "vib")
+        specs = {p.key: p for p in d.params}
+        self.assertEqual(specs["iso_group"].level, "machine")
+        self.assertEqual(specs["note"].level, "", "未声明就是空，不替它猜")
+        inputs = {i.role: i for i in d.inputs}
+        self.assertEqual(inputs["x_acc"].display, "X 轴加速度")
+        self.assertEqual(inputs["temp"].display, "", "未提供就是空，由前端回退显示角色名")
 
     def test_台账原样往返(self):
         b = pb.Binding(domain="vib", binding="dev1", enabled=True)

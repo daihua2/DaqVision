@@ -26,7 +26,7 @@ from .logstore import LogFilter, LogLevel, LogStore
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.7"
+PROTO_VERSION = "1.8"
 
 
 def _ts(dt: datetime) -> object:
@@ -100,7 +100,7 @@ class ApiService(WorkbenchApiMixin):
             for i in d.declaration.inputs:
                 info.inputs.add(role=i.role, unit=i.unit,
                                 required=i.required, description=i.description,
-                                kind=i.kind)
+                                kind=i.kind, display=i.display)
             for o in d.declaration.outputs:
                 info.outputs.add(key=o.key, display=o.display, value_type=o.value_type,
                                  unit=o.unit, description=o.description)
@@ -109,7 +109,7 @@ class ApiService(WorkbenchApiMixin):
                 spec = info.params.add(
                     key=pm.key, display=pm.display, value_type=pm.value_type,
                     default=pm.default, required=pm.required,
-                    unit=pm.unit, description=pm.description)
+                    unit=pm.unit, description=pm.description, level=pm.level)
                 spec.choices.extend(pm.choices)
                 spec.choice_displays.extend(pm.choice_displays)
         return reply

@@ -228,6 +228,9 @@ class InputSpec:
       给图片域起一个轮询线程，每拍拿空帧推理、落一串"没数据"。所以显式声明。
     """
 
+    display: str = ""
+    """给人看的名字，如「X 轴速度」。选采集点的表单显示它；空则前端回退显示 `role`（契约 1.8）。"""
+
     _KINDS = ("point", "image")
 
     def __post_init__(self) -> None:
@@ -286,13 +289,21 @@ class ParamSpec:
     unit: str = ""
     description: str = ""
 
+    level: str = ""
+    """参数归属（契约 1.8）：`machine` = 设备固有属性，在设备上填一次、各诊断共用；
+    `position` = 随这条诊断填。空 = 未声明。★骨架只搬运，**合并由界面在下发前做**，模块只看合并后的 `params`。"""
+
     _ALLOWED = ("float", "int", "bool", "string", "enum")
+    _LEVELS = ("", "machine", "position")
 
     def __post_init__(self) -> None:
         if self.value_type not in ParamSpec._ALLOWED:
             raise ValueError(
                 f"ParamSpec({self.key}).value_type 只能是 {ParamSpec._ALLOWED}，"
                 f"收到 {self.value_type!r}")
+        if self.level not in ParamSpec._LEVELS:
+            raise ValueError(
+                f"ParamSpec({self.key}).level 只能是 {ParamSpec._LEVELS}，收到 {self.level!r}")
         if self.value_type == "enum" and not self.choices:
             raise ValueError(f"ParamSpec({self.key}) 是 enum 却没有 choices")
         if self.value_type != "enum" and self.choices:

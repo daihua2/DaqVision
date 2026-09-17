@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from aiintegration.quality import COLLAPSED_TO_BAD, Quality, STATUS_OK, STATUS_QUALITY_BAD
 from aiintegration.types import (
-    Declaration, Finding, Frame, InputSpec, OutputSpec, Sample,
+    Declaration, Finding, Frame, InputSpec, OutputSpec, ParamSpec, Sample,
 )
 
 UTC = timezone.utc
@@ -133,6 +133,19 @@ class TestDeclaration(unittest.TestCase):
     def test_值类型闭集(self):
         with self.assertRaises(ValueError):
             OutputSpec(key="a", display="A", value_type="双精度")
+
+    def test_参数归属只认三种取值(self):
+        """契约 1.8：`machine` / `position` / 空。写错成 `device` 之类要当场拒，
+        否则界面按层级分处渲染时，这个参数会掉到哪一处都不是。"""
+        for ok in ("", "machine", "position"):
+            ParamSpec(key="k", display="K", value_type="string", level=ok)
+        for bad in ("device", "Machine", "诊断"):
+            with self.assertRaises(ValueError, msg=bad):
+                ParamSpec(key="k", display="K", value_type="string", level=bad)
+
+    def test_输入项显示名缺省为空由前端回退显示角色名(self):
+        self.assertEqual(InputSpec(role="x_vel").display, "")
+        self.assertEqual(InputSpec(role="x_vel", display="X 轴速度").display, "X 轴速度")
 
 
 class TestFrame(unittest.TestCase):
