@@ -33,6 +33,9 @@ from .quality import Quality
 # 在下游会被当成合法值画出来。
 Value = float | int | bool | str | None
 
+#: 结构名与字段名的字符集 —— 实时库要求是标识符（描述要能导出成 protobuf descriptor）。
+_IDENT_RE = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
 
 def _require_utc(t: datetime, what: str) -> datetime:
     """时刻必须带时区。
@@ -159,6 +162,122 @@ class ArtifactBlob:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class NumBuf:
+    """数值缓冲：**裸字节 + 布局**（结构值里放大数组的那一档）。
+
+    ★骨架**不把它转成 numpy** —— 本模块不 import 任何第三方库（见模块头），
+      而且转了反而多一次拷贝。域自己 `np.frombuffer(buf.data, dtype=…)` 即可零拷贝。
+    """
+
+    data: bytes
+    dtype: str
+    """`f32` / `f64` / `i8` / `u8` / `i16` / `u16` / `i32` / `u32` / `i64` / `u64`。"""
+
+    shape: tuple[int, ...] = ()
+    """每维长度；`-1` = 该维可变（按实际字节数反推）。空 = 一维可变。"""
+
+    big_endian: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, (bytes, bytearray)):
+            raise TypeError(f"NumBuf.data 必须是字节，收到 {type(self.data).__name__}")
+        if not self.dtype:
+            raise ValueError("NumBuf.dtype 必填 —— 没有它，这堆字节按什么解全靠猜")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class StructSample:
+    """一条**结构值**样本：一次压装 / 一帧波形 = 一个值。
+
+    ★与 `Sample` 分开而不是把 `Sample.value` 撑大：`Value` 是标量的白名单，
+      撑大它会让"结论值"也跟着能放结构，而结论点只写标量（特征量另写回标量点）。
+    """
+
+    t: datetime
+    quality: Quality
+
+    fields: dict[str, Any] = dataclasses.field(default_factory=dict)
+    """按**字段名**索引。标量字段直接是值；数值缓冲字段是 `NumBuf`。"""
+
+    struct_name: str = ""
+    struct_version: int = 0
+    """★这个值是按**哪一版**结构写的。旧值永远按写入时的版本解 ——
+    拿最新版去解老值是静默错读（实时库契约的硬约束）。"""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "t", _require_utc(self.t, "StructSample.t"))
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class StructFieldSpec:
+    """域自述的一个结构字段。★**中立类型**，不是实时库的 proto —— 域不知道 hs 存在。"""
+
+    name: str
+    """标识符 `[A-Za-z_][A-Za-z0-9_]*`，≤64。★中文放 `display`。"""
+
+    type: str
+    """`int32` / `int64` / `float` / `double` / `bool` / `string` / `bytes` / `timestamp` / `numbuf`。"""
+
+    display: str = ""
+    unit: str = ""
+    description: str = ""
+    repeated: bool = False
+
+    dtype: str = ""
+    """`type="numbuf"` 时必填：缓冲里每个数的类型（`f32` 等）。"""
+
+    shape: tuple[int, ...] = ()
+    """`type="numbuf"` 可选：每维长度，`-1` = 可变。"""
+
+    big_endian: bool = False
+
+    _TYPES = ("int32", "int64", "uint32", "uint64", "float", "double",
+              "bool", "string", "bytes", "timestamp", "numbuf")
+
+    def __post_init__(self) -> None:
+        if not _IDENT_RE.match(self.name or ""):
+            raise ValueError(
+                f"StructFieldSpec.name 必须是标识符（中文放 display），收到 {self.name!r}")
+        if self.type not in StructFieldSpec._TYPES:
+            raise ValueError(
+                f"StructFieldSpec({self.name}).type 只能是 {StructFieldSpec._TYPES}，"
+                f"收到 {self.type!r}")
+        if self.type == "numbuf":
+            if not self.dtype:
+                raise ValueError(f"StructFieldSpec({self.name}) 是 numbuf 却没给 dtype")
+            if self.repeated:
+                raise ValueError(
+                    f"StructFieldSpec({self.name}) numbuf 不能 repeated —— "
+                    "要多段缓冲请用 shape 多一维")
+        elif self.dtype:
+            raise ValueError(f"StructFieldSpec({self.name}) 不是 numbuf 却给了 dtype")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class StructSpec:
+    """域自述"我要的结构长什么样"。骨架据此去实时库注册，并把值解回 `StructSample`。
+
+    ★**名字全库唯一且不区分大小写**（与别的采集程序共用一个命名空间）⇒ 定案 `S1`
+      要求带 `AI_` 前缀。★**按用途一份、全网共用**（定案 `S2`）：设备差异用可变长
+      `numbuf` 与"字段可不填"吸收，不为每台设备建一个结构。
+    """
+
+    name: str
+    fields: tuple[StructFieldSpec, ...]
+    display: str = ""
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        if not _IDENT_RE.match(self.name or ""):
+            raise ValueError(f"StructSpec.name 必须是标识符，收到 {self.name!r}")
+        if not self.fields:
+            raise ValueError(f"StructSpec({self.name}) 一个字段都没有")
+        if len(self.fields) > 256:
+            raise ValueError(f"StructSpec({self.name}) 超过 256 个字段")
+        _reject_dup([f.name for f in self.fields], f"StructSpec({self.name}) 的字段名")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class Frame:
     """骨架交给模块的一帧输入。数据已经取好、对齐好，**带真实质量码与真实时刻**。
 
@@ -200,6 +319,14 @@ class Frame:
       —— 猜错的 ISO 分级会把"该停机"说成"可长期运行"，而且看不出来。
     """
 
+    structs: dict[str, Sequence["StructSample"]] = dataclasses.field(default_factory=dict)
+    """按 `InputSpec.role` 索引的**结构值**输入（一次压装 / 一帧波形各是一条）。
+
+    ★与 `channels`（标量采样）分开：结构值点虽然也是点，但一个值就是一整条曲线/一帧，
+      塞进 `Sequence[Sample]` 会逼着把 `Sample.value` 撑成"什么都能装"。
+      `kind="struct"` 的输入落在这里，`kind="point"` 的仍在 `channels`。
+    """
+
     state: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     """本条诊断**上一拍算完带回的跨帧状态**（目标编号、轨迹、停留时长、EWMA 累积…）。
 
@@ -233,6 +360,9 @@ class InputSpec:
     required: bool = True
     description: str = ""
 
+    struct: str = ""
+    """`kind="struct"` 时：这一路用哪个结构（对应 `Declaration.structs` 里的 `StructSpec.name`）。"""
+
     group: str = ""
     """★**成组可选**：同一 `group` 的角色语义是「全配或全不配」（契约 1.9）。
 
@@ -256,7 +386,8 @@ class InputSpec:
     display: str = ""
     """给人看的名字，如「X 轴速度」。选采集点的表单显示它；空则前端回退显示 `role`（契约 1.8）。"""
 
-    _KINDS = ("point", "image")
+    #: `struct`（1.9，结构值点）：一个值就是一整条曲线/一帧，落在 `Frame.structs`。
+    _KINDS = ("point", "image", "struct")
 
     def __post_init__(self) -> None:
         if self.kind not in InputSpec._KINDS:
@@ -427,6 +558,13 @@ class Declaration:
     params: tuple[ParamSpec, ...] = ()
     """台账参数自述。骨架原样回给 AICloud 渲染绑定表单 —— **不枚举、不解释**。"""
 
+    structs: tuple["StructSpec", ...] = ()
+    """本域要用的**结构值**形态自述（契约见 `doc/结构值点定案.md`）。
+
+    ★骨架据此去实时库注册结构、给点绑 `StructRef`、把值解回 `StructSample`；
+      **域自己不碰 hs**（硬规矩 3）。空 = 本域不用结构值。
+    """
+
     stateful: bool = False
     """本域要不要**跨帧状态**（`Frame.state` / `InferOut.state`）。
 
@@ -444,6 +582,15 @@ class Declaration:
         _reject_dup([p.key for p in self.params], "ParamSpec.key")
         if not self.outputs:
             raise ValueError("Declaration.outputs 为空 —— 不产出结论的域没有意义")
+        _reject_dup([st.name for st in self.structs], "StructSpec.name")
+        # 声明了 kind="struct" 的输入，就必须有对应的结构自述 —— 否则骨架不知道拿什么去注册，
+        # 更不知道拿什么描述去解值，而那会表现成"这个点永远没数据"。
+        declared = {st.name for st in self.structs}
+        for i in self.inputs:
+            if i.kind == "struct" and i.struct not in declared:
+                raise ValueError(
+                    f"InputSpec({i.role}) 是结构值输入但 struct={i.struct!r} 没有对应的 "
+                    f"StructSpec（已声明的：{sorted(declared)}）")
 
     def output_keys(self) -> frozenset[str]:
         return frozenset(o.key for o in self.outputs)

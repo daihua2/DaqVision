@@ -270,6 +270,35 @@ class HsClient:
             logger.warning("探能力位 %s 失败（按不支持处理）", name, exc_info=True)
             return False
 
+    # ── 结构注册表（非标量定稿 §2.1；能力位 struct-registry / struct-value）────
+    def put_struct(self, struct_def, allow_new_version: bool = False):
+        """注册结构 / 发新版本。★`allow_new_version` **缺省 False**，这是有意的。
+
+        带上它，"改错了一个字段"会**悄悄变成一个新版本**、版本号还会被刷成启动次数
+        （daqgate `D-242 §7.1` 点名要避免的正是这个）。⇒ 同名不同描述一律当场报错。
+        同名**相同**描述恒为幂等成功，所以每次启动无脑注册是安全的。
+        """
+        req = hs.PutStructReq(allowNewVersion=allow_new_version)
+        # ★契约里这个字段字面就叫 `def`（Python 关键字）⇒ 只能 getattr 取，没有 `def_` 别名。
+        getattr(req, "def").CopyFrom(struct_def)
+        return self._unary(self._write_channel(), "PutStruct", req, hs.PutStructRes)
+
+    def get_struct(self, *, name: str = "", struct_id: int = 0, version: int = 0,
+                   with_descriptor: bool = False):
+        """取结构描述。`version=0` = 最新版。
+
+        ★`with_descriptor=True` 时另回 `FileDescriptorProto` —— 我方据它动态解码，
+          **不写死字段号**（字段号是 hs 分配的，写死等于假定它永远不变）。
+        """
+        req = hs.GetStructReq(version=version, withDescriptor=with_descriptor)
+        if name:
+            req.name = name
+        else:
+            req.id = struct_id
+        # 读口对所有连接开放；用读通道（worker 只读直连也走得通）。
+        ch = self._read_channel() if not self._cfg.can_write() else self._write_channel()
+        return self._unary(ch, "GetStruct", req, hs.GetStructRes)
+
     def lookup_global(self, local_ids: list[int]) -> list[int]:
         """localId → globalId。**0 = 尚未分配**（点刚建、还没推过 VQT）。
 
