@@ -41,6 +41,10 @@
 2. **工业机器额定转速 < 600 r/min**：照常出分级，但判据摘要注明「低速设备，标准要求另看位移，本结果仅供参考」。
 3. **方向性保留，显示为「提示」**。
 4. **报警防抖先不做**。
+5. **停机判定**（定案 1.6，2026-09-18）：填了「停机门槛」且速度最大值 < 门槛 ⇒ 停机。
+   停机时文字结论写「停机」（烈度区、方向性提示、运行状态），烈度区数值写 0；
+   **数值类结论（余量、轴向比）这一拍不写**，点上保留停机前最后一值及其时刻，界面凭「运行状态」置灰
+   （用户 2026-09-18 定：不落坏质量、不新增状态码）。不填门槛不判，运行状态写「未判」。
 
 ## 0.4 纪律：缺什么落什么码，绝不猜缺省
 
@@ -91,6 +95,9 @@ _PUMP_STD = "GB/T 6075.7-2015"
 #: 低速阈值（r/min）。工业机器低于它时，标准要求评价频带改为 2~1000 Hz 且应另看位移。
 LOW_SPEED_RPM = 600.0
 
+#: 运行状态的三个取值。
+RUNNING, STOPPED, UNJUDGED = "运行", "停机", "未判"
+
 _AXES = ("x", "y", "z")
 #: 测点后缀：第一测点无后缀，第二测点为 "2"（定案 2.1）。
 _POINTS = ("", "2")
@@ -109,7 +116,7 @@ class VibrationIso(Domain):
 
     key = "vibration_iso"
     display = "经典算法振动诊断"
-    version = "1.0.0"
+    version = "1.1.0"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -172,6 +179,7 @@ class VibrationIso(Domain):
                     required=True, level="position",
                     description="沿转轴方向的那一轴，两个测点按同一方向理解。没有缺省：猜错会把不对中说成不平衡。"
                                 "缺它只影响方向性两条，烈度分级照出"),
+                _stop_threshold_spec(),
             ),
             outputs=(
                 OutputSpec(key="vel_max", display="速度最大值", value_type="float", unit="mm/s",
@@ -179,15 +187,16 @@ class VibrationIso(Domain):
                 OutputSpec(key="dominant_axis", display="最大值所在轴", value_type="string",
                            description="x / y / z；第二测点记为 x2 / y2 / z2"),
                 OutputSpec(key="iso_zone", display="烈度区", value_type="string",
-                           description="A 新投运 / B 可长期运行 / C 不宜长期连续运行 / D 足以造成损坏"),
+                           description="A 新投运 / B 可长期运行 / C 不宜长期连续运行 / D 足以造成损坏；停机时为「停机」"),
                 OutputSpec(key="iso_zone_code", display="烈度区(数值)", value_type="int",
-                           description="1=A 2=B 3=C 4=D，给趋势曲线与报警门限用"),
+                           description="1=A 2=B 3=C 4=D，0=停机，给趋势曲线与报警门限用"),
                 OutputSpec(key="iso_margin", display="距下一档余量", value_type="float", unit="mm/s",
                            description="离更差一档的边界还有多远；已在 D 区时为负"),
                 OutputSpec(key="axial_ratio", display="轴向/径向比", value_type="float",
                            description="轴向 ÷ 径向两轴较大者，取最大值所在测点"),
                 OutputSpec(key="direction_hint", display="方向性提示", value_type="string",
-                           description="★提示，不是结论：无频谱数据，仅凭三轴比例判断倾向"),
+                           description="★提示，不是结论：无频谱数据，仅凭三轴比例判断倾向；停机时为「停机」"),
+                _run_state_spec(),
                 OutputSpec(key="evidence", display="判据摘要", value_type="string",
                            description="用了哪几路、判到哪一档、为什么没给"),
             ),
@@ -212,6 +221,17 @@ class VibrationIso(Domain):
             Finding(key="vel_max", value=round(vel_max, 4), quality=Quality.OK, t=t),
             Finding(key="dominant_axis", value=dominant, quality=Quality.OK, t=t),
         ]
+
+        # 运行状态。停机 ⇒ 不判烈度与方向；余量、轴向比这一拍不写（定案 1.6）。
+        state, state_q, state_note = run_state(frame.params, vel_max)
+        out.append(Finding(key="run_state", value=state, quality=state_q, t=t))
+        if state == STOPPED:
+            return out + [
+                Finding(key="iso_zone", value=STOPPED, quality=Quality.OK, t=t),
+                Finding(key="iso_zone_code", value=0, quality=Quality.OK, t=t),
+                Finding(key="direction_hint", value=STOPPED, quality=Quality.OK, t=t),
+                Finding(key="evidence", value=f"{state_note}；不判烈度与方向", quality=Quality.OK, t=t),
+            ]
 
         # ② 烈度分级
         limits, iso_bad, basis, is_pump = _grading(frame.params)
@@ -254,6 +274,7 @@ class VibrationIso(Domain):
         else:
             parts.append(f"方向性提示（测点{'2' if dir_point == '2' else '1'}）：{hint}")
         parts.append("★无频谱数据，方向性仅为提示而非结论")
+        parts.append(state_note)
         if bad:
             parts.append(f"降级：{'/'.join(bad)} 本窗口全是坏值，未参与判定")
         if empty:
@@ -302,6 +323,31 @@ def _peaks(frame: Frame) -> tuple[dict[str, float], dict[str, datetime], list[st
                 peaks[key] = best_v
                 times[key] = best_t
     return peaks, times, bad, empty
+
+
+def _stop_threshold_spec() -> ParamSpec:
+    return ParamSpec(
+        key="stop_threshold", display="停机门槛", value_type="float", unit="mm/s",
+        required=False, level="position",
+        description="速度最大值低于它即判停机：停机时不判烈度与方向。不填不判；没有缺省，按设备自己定")
+
+
+def _run_state_spec() -> OutputSpec:
+    return OutputSpec(key="run_state", display="运行状态", value_type="string",
+                      description="运行 / 停机 / 未判（未填停机门槛）。停机时数值类结论不更新，界面据此置灰")
+
+
+def run_state(params: dict[str, str], vel_max: float) -> tuple[str | None, Quality, str]:
+    """定案 1.6：返回 `(运行状态, 质量, 摘要)`。门槛非法落 CONFIG_INCOMPLETE，其余照常判。"""
+    raw = (params.get("stop_threshold") or "").strip()
+    if not raw:
+        return UNJUDGED, Quality.OK, ""
+    thr = _num(raw)
+    if thr is None or thr <= 0:
+        return None, Quality.CONFIG_INCOMPLETE, f"停机门槛 {raw!r} 不是正数，运行状态未判"
+    if vel_max < thr:
+        return STOPPED, Quality.OK, f"停机：速度最大值 {vel_max:.3f} < 停机门槛 {thr:g} mm/s"
+    return RUNNING, Quality.OK, ""
 
 
 def _as_float(value) -> float | None:

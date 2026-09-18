@@ -23,7 +23,7 @@ from aiintegration.domains import Domain, LoadedDomain
 from aiintegration.quality import Quality
 from aiintegration.trainer import Trainer
 from aiintegration.types import (
-    Declaration, Frame, InputSpec, OutputSpec, Sample, TrainedArtifact,
+    Declaration, Frame, InputSpec, OutputSpec, ProgressSink, Sample, TrainedArtifact,
 )
 from aiintegration.workbench import JOB_FAILED, JOB_READY, Workbench, WorkbenchError
 
@@ -326,6 +326,20 @@ class TestCancel(TrainerBase):
         self.run_one(jid)
         msg = self.tr.cancel(jid)
         self.assertIn("不适用", msg)
+
+    def test_已训完但执行器还没清当前任务时也说不适用(self):
+        """★竞态：执行器先写终态、后在 finally 清 `_current`。窗口里取消不许谎报"已请求取消"。
+
+        2026-09-18 在三环境全量跑里偶发红（新增用例改变时序撞上），这里把那个窗口构造出来钉住。
+        """
+        ds = self.make_dataset()
+        jid = self.tr.submit(domain="vib", dataset_id=ds)
+        job = self.run_one(jid)
+        self.assertEqual(job.status, JOB_READY)
+        self.tr._current = (jid, ProgressSink())      # 模拟"终态已写、_current 未清"
+        msg = self.tr.cancel(jid)
+        self.assertIn("不适用", msg)
+        self.assertFalse(self.tr._current[1].canceled, "已终态的任务不该被置取消标志")
 
     def test_正在跑的只说请求取消不谎报(self):
         """★关键：模块不看取消标志就只能跑完，回执必须如实。"""

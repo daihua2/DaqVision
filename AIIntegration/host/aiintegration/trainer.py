@@ -174,6 +174,12 @@ class Trainer:
         if job.status == JOB_PENDING:
             self._wb.update_job(job_id, status=JOB_CANCELED, message="排队中被取消")
             return "已取消（还没开始跑）"
+        # ★终态一律先判，**不看 `_current`**：任务的终态以库里的状态为准，
+        #   而执行器线程是先写终态、后在 finally 里清 `_current` 的。两者之间有个窗口，
+        #   在窗口里按 `_current` 判会把**已经训完的任务**回成"已请求取消"——谎报一次不会发生的取消。
+        #   （2026-09-18 由新增用例改变时序而暴露；此前只是没撞上。）
+        if job.status in (JOB_READY, JOB_FAILED, JOB_CANCELED):
+            return f"任务当前状态是 {job.status}，取消不适用"
         with self._lock:
             running = self._current is not None and self._current[0] == job_id
             if running:

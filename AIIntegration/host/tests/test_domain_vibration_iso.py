@@ -352,5 +352,72 @@ class TestSecondPoint(unittest.TestCase):
         self.assertIn("不平衡", out["direction_hint"].value)
 
 
+class TestStopState(unittest.TestCase):
+    """定案 1.6：停机门槛。停机时文字点写「停机」，数值点这一拍不写；不填不判。"""
+
+    def setUp(self):
+        self.d = _load()
+
+    def _infer(self, thr, **vals):
+        params = dict(FULL_PARAMS, stop_threshold=thr)
+        return _by_key(self.d.instance.infer(_frame({k: _samples(v) for k, v in vals.items()}, params)))
+
+    def test_低于门槛判停机_文字点写停机_数值点不写(self):
+        out = self._infer("0.3", x_vel=0.1, y_vel=0.2, z_vel=0.05)
+        self.assertEqual(out["run_state"].value, "停机")
+        self.assertEqual(out["iso_zone"].value, "停机")
+        self.assertEqual(out["iso_zone_code"].value, 0)
+        self.assertEqual(out["direction_hint"].value, "停机")
+        for k in ("run_state", "iso_zone", "iso_zone_code", "direction_hint", "vel_max", "evidence"):
+            self.assertIs(out[k].quality, Quality.OK, k)
+        self.assertNotIn("iso_margin", out)
+        self.assertNotIn("axial_ratio", out)
+        self.assertIn("停机", out["evidence"].value)
+
+    def test_停机时速度实测值照出(self):
+        out = self._infer("0.3", x_vel=0.1, y_vel=0.2)
+        self.assertEqual(out["vel_max"].value, 0.2)
+        self.assertEqual(out["dominant_axis"].value, "y")
+
+    def test_等于门槛算运行(self):
+        out = self._infer("0.3", x_vel=0.3, z_vel=0.1)
+        self.assertEqual(out["run_state"].value, "运行")
+        self.assertEqual(out["iso_zone"].value, "A")
+        self.assertIn("iso_margin", out)
+
+    def test_任一通道过门槛即运行(self):
+        out = self._infer("0.3", x_vel=0.1, y_vel=2.0, z_vel=0.1)
+        self.assertEqual(out["run_state"].value, "运行")
+        self.assertEqual(out["iso_zone"].value, "B")
+
+    def test_不填门槛不判且照常出全部结论(self):
+        out = self._infer("", x_vel=0.01, z_vel=0.01)
+        self.assertEqual(out["run_state"].value, "未判")
+        self.assertIs(out["run_state"].quality, Quality.OK)
+        self.assertEqual(set(out), {o.key for o in self.d.declaration.outputs})
+
+    def test_门槛非法只让运行状态落配置不全(self):
+        for bad in ("abc", "0", "-1", "nan", "inf"):
+            out = self._infer(bad, x_vel=0.01, z_vel=0.01)
+            self.assertIs(out["run_state"].quality, Quality.CONFIG_INCOMPLETE, bad)
+            self.assertIsNone(out["run_state"].value)
+            self.assertEqual(out["iso_zone"].value, "A", bad)
+
+    def test_门槛可选且没有缺省(self):
+        spec = {p.key: p for p in self.d.declaration.params}["stop_threshold"]
+        self.assertFalse(spec.required)
+        self.assertEqual(spec.default, "")
+        self.assertEqual(spec.level, "position")
+
+    def test_走骨架校验停机结论全部收下(self):
+        params = dict(FULL_PARAMS, stop_threshold="0.3")
+        res = run_domain(self.d, _frame({"x_vel": _samples(0.1)}, params))
+        self.assertTrue(res.ok)
+        self.assertEqual(res.error, "")
+        self.assertEqual({f.key for f in res.findings},
+                         {"vel_max", "dominant_axis", "run_state", "iso_zone", "iso_zone_code",
+                          "direction_hint", "evidence"})
+
+
 if __name__ == "__main__":
     unittest.main()

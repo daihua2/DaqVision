@@ -25,6 +25,10 @@
 2. **样本少于 5 帧不出基线**，训练当场失败并说清。
 3. **故障分类先不做**，等现场有带故障标签的数据。
 4. **零第三方依赖**。
+5. **停机判定**（定案 2.5，2026-09-18）：填了「停机门槛」且速度最大值 < 门槛 ⇒ 停机。
+   停机时只写「运行状态」与判据摘要，**偏离、比例漂移、温升、异常分这一拍不写**
+   （点上保留停机前最后一值，界面凭运行状态置灰）；**采基线时剔除停机帧**。
+   门槛与判法同模块 1（`vibration_iso.run_state`，两处须一致，由用例钉住）。
 
 ## 0.3 纪律
 
@@ -66,6 +70,9 @@ _Z_NOTABLE = 3.0
 
 DEFAULT_NORMAL_LABEL = "正常"
 
+#: 运行状态的三个取值（与模块 1 同）。
+RUNNING, STOPPED, UNJUDGED = "运行", "停机", "未判"
+
 
 def _vel_role(axis: str, point: str) -> str:
     return f"{axis}{point}_vel"
@@ -80,7 +87,7 @@ class VibrationBaseline(Domain):
 
     key = "vibration_baseline"
     display = "AI 模型自训振动诊断"
-    version = "1.0.0"
+    version = "1.1.0"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -112,6 +119,11 @@ class VibrationBaseline(Domain):
                     level="position",
                     description="采基线只用被标成这个标签的样本。允许有缺省：猜错会当场可见"
                                 "（一条样本都匹配不上，采基线直接失败并说清）"),
+                ParamSpec(
+                    key="stop_threshold", display="停机门槛", value_type="float", unit="mm/s",
+                    required=False, level="position",
+                    description="速度最大值低于它即判停机：停机时不出偏离与异常分，采基线时剔除停机帧。"
+                                "不填不判；没有缺省，按设备自己定"),
             ),
             outputs=(
                 OutputSpec(key="vel_z_max", display="速度偏离", value_type="float",
@@ -122,6 +134,8 @@ class VibrationBaseline(Domain):
                            description="相对基线的温度变化，取最大的测点"),
                 OutputSpec(key="anomaly_score", display="异常分", value_type="float",
                            description="0~100，由上面几项合成。★不是概率，是排序用的分数"),
+                OutputSpec(key="run_state", display="运行状态", value_type="string",
+                           description="运行 / 停机 / 未判（未填停机门槛）。停机时数值类结论不更新，界面据此置灰"),
                 OutputSpec(key="evidence", display="判据摘要", value_type="string",
                            description="基线采自哪段、哪一项偏离、为什么没给"),
             ),
@@ -132,19 +146,30 @@ class VibrationBaseline(Domain):
         """采一条基线：这台设备正常运行时各通道的中位数与四分位距，以及各测点的三轴比例。"""
         wanted = DEFAULT_NORMAL_LABEL
         axial = ""
+        params: dict[str, str] = {}
         for it in dataset.items:            # 参数在帧上，各帧同一条诊断，取第一个
-            wanted = it.frame.params.get("normal_label", "").strip() or DEFAULT_NORMAL_LABEL
-            axial = (it.frame.params.get("axial_axis", "") or "").strip().lower()
+            params = it.frame.params
+            wanted = params.get("normal_label", "").strip() or DEFAULT_NORMAL_LABEL
+            axial = (params.get("axial_axis", "") or "").strip().lower()
             break
 
-        normals = [it for it in dataset.items if it.label == wanted]
+        # 定案 2.5：停机帧不进基线 —— 否则基线把"停着"当成常态，开机后每拍都显得偏高。
+        _state, state_q, state_note = run_state(params, 0.0)
+        if state_q is not Quality.OK:
+            raise ValueError(f"{state_note} —— 判不了哪些帧是停机，不采基线")
+        labeled = [it for it in dataset.items if it.label == wanted]
+        normals = [it for it in labeled if not _frame_stopped(it.frame, params)]
+        stopped = len(labeled) - len(normals)
         if len(normals) < MIN_BASELINE_FRAMES:
             raise ValueError(
-                f"基线样本不足：需要至少 {MIN_BASELINE_FRAMES} 帧标为 {wanted!r} 的样本，"
+                f"基线样本不足：需要至少 {MIN_BASELINE_FRAMES} 帧标为 {wanted!r} 的运行样本，"
                 f"实际只有 {len(normals)} 帧（训练集共 {len(dataset)} 帧，"
-                f"标签分布 {dataset.label_counts()}）—— 样本太少算出来的离散度没有意义")
+                f"标签分布 {dataset.label_counts()}"
+                + (f"，其中 {stopped} 帧判为停机已剔除" if stopped else "")
+                + "）—— 样本太少算出来的离散度没有意义")
 
-        report.report(0.2, f"用 {len(normals)} 帧 {wanted!r} 样本采基线")
+        report.report(0.2, f"用 {len(normals)} 帧 {wanted!r} 样本采基线"
+                           + (f"（剔除停机帧 {stopped}）" if stopped else ""))
 
         channels: dict[str, dict[str, float]] = {}
         roles = [_vel_role(a, p) for p in _POINTS for a in _AXES] + [_temp_role(p) for p in _POINTS]
@@ -178,6 +203,7 @@ class VibrationBaseline(Domain):
             "format": BASELINE_FORMAT,
             "label": wanted,
             "frames": len(normals),
+            "stopped_excluded": stopped,
             "t_from": min(it.frame.t_start for it in normals).isoformat(),
             "t_to": max(it.frame.t_end for it in normals).isoformat(),
             "axial_axis": axial,
@@ -190,7 +216,7 @@ class VibrationBaseline(Domain):
             # ★基线没有"准确率"这回事 —— 给 None，别拿 1.0 顶（界面会显示成 100%）。
             accuracy=None, feature_count=len(channels),
             meta={"format": BASELINE_FORMAT, "normal_label": wanted,
-                  "frames": str(len(normals)),
+                  "frames": str(len(normals)), "stopped_excluded": str(stopped),
                   "t_from": model["t_from"], "t_to": model["t_to"]})
 
     # ── 推理 ──────────────────────────────────────────────────────────────
@@ -206,20 +232,32 @@ class VibrationBaseline(Domain):
         t = times[dominant]
         keys = ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score")
 
+        # 运行状态先于基线判：停机就不比，与有没有基线无关（定案 2.5）。
+        state, state_q, state_note = run_state(frame.params, peaks[dominant])
+        state_f = Finding(key="run_state", value=state, quality=state_q, t=t)
+        if state == STOPPED:
+            return [state_f, Finding(key="evidence", value=f"{state_note}；不出偏离与异常分",
+                                     quality=Quality.OK, t=t)]
+
         baseline = frame.artifacts.get("baseline")
         if baseline is None:
             return (_bad_group(keys, Quality.MODEL_NOT_LOADED, t)
-                    + [Finding(key="evidence", value="无可用基线（未采或未启用），偏离与异常分未给",
+                    + [state_f,
+                       Finding(key="evidence", value="无可用基线（未采或未启用），偏离与异常分未给",
                                quality=Quality.MODEL_NOT_LOADED, t=t)])
         try:
             model = _parse_baseline(baseline.blob)
         except Exception as exc:  # noqa: BLE001 —— 坏工件不许掀翻整拍推理
             return (_bad_group(keys, Quality.MODEL_NOT_LOADED, t)
-                    + [Finding(key="evidence",
+                    + [state_f,
+                       Finding(key="evidence",
                                value=f"基线工件读不懂（{type(exc).__name__}: {exc}），偏离与异常分未给",
                                quality=Quality.MODEL_NOT_LOADED, t=t)])
 
         out, note = _deviation(model, peaks, frame, t)
+        out.append(state_f)
+        if state_note:
+            note += f"；{state_note}"
         if bad:
             note += f"；降级：{'/'.join(bad)} 本窗口全是坏值，未参与"
         if empty:
@@ -261,6 +299,29 @@ def _peaks(frame: Frame) -> tuple[dict[str, float], dict[str, datetime], list[st
                 peaks[key] = best_v
                 times[key] = best_t
     return peaks, times, bad, empty
+
+
+def run_state(params: dict[str, str], vel_max: float) -> tuple[str | None, Quality, str]:
+    """定案 2.5（同模块 1 定案 1.6）：返回 `(运行状态, 质量, 摘要)`。门槛非法落 CONFIG_INCOMPLETE。"""
+    raw = (params.get("stop_threshold") or "").strip()
+    if not raw:
+        return UNJUDGED, Quality.OK, ""
+    try:
+        thr = float(raw)
+    except ValueError:
+        thr = float("nan")
+    if not (thr > 0 and thr != float("inf")):
+        return None, Quality.CONFIG_INCOMPLETE, f"停机门槛 {raw!r} 不是正数，运行状态未判"
+    if vel_max < thr:
+        return STOPPED, Quality.OK, f"停机：速度最大值 {vel_max:.3f} < 停机门槛 {thr:g} mm/s"
+    return RUNNING, Quality.OK, ""
+
+
+def _frame_stopped(frame: Frame, params: dict[str, str]) -> bool:
+    """采基线用：这一帧按停机门槛算不算停机。一路可信速度都没有的帧不算停机（交给后面按通道缺样本处理）。"""
+    peaks = [p for p in (_window_peak(frame, _vel_role(a, pt)) for pt in _POINTS for a in _AXES)
+             if p is not None]
+    return bool(peaks) and run_state(params, max(peaks))[0] == STOPPED
 
 
 def _as_float(value) -> float | None:

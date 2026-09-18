@@ -78,7 +78,9 @@ class TestDeclaration(unittest.TestCase):
 
     def test_参数归属与缺省(self):
         specs = {p.key: p for p in self.d.declaration.params}
-        self.assertEqual(set(specs), {"axial_axis", "normal_label"})
+        self.assertEqual(set(specs), {"axial_axis", "normal_label", "stop_threshold"})
+        self.assertFalse(specs["stop_threshold"].required)
+        self.assertEqual(specs["stop_threshold"].default, "")
         self.assertEqual(specs["axial_axis"].level, "position")
         self.assertTrue(specs["axial_axis"].required)
         self.assertEqual(specs["axial_axis"].default, "")
@@ -260,6 +262,88 @@ class TestSecondPoint(unittest.TestCase):
     def test_比例漂移取变化最大的测点(self):
         out = self._infer(x_vel=1.0, z_vel=0.5, x2_vel=2.0, z2_vel=2.0)
         self.assertAlmostEqual(out["ratio_drift"].value, 0.5, places=2)
+
+
+_RUN_ROWS = [{"x_vel": x, "z_vel": z} for x, z in (
+    (1.0, 0.5), (1.1, 0.52), (0.9, 0.48), (1.05, 0.51), (0.95, 0.49))]
+_STOP_ROWS = [{"x_vel": 0.05, "z_vel": 0.02}] * 3
+
+
+class TestStopState(unittest.TestCase):
+    """定案 2.5：停机时只写运行状态与摘要；采基线剔除停机帧。"""
+
+    def setUp(self):
+        self.d = _load().instance
+        self.art = _artifact(self.d.train(_dataset(_RUN_ROWS), ProgressSink()))
+
+    def _infer(self, thr, artifact=True, **vals):
+        f = _frame(_ch(**vals), dict(PARAMS, stop_threshold=thr))
+        if artifact:
+            f = dataclasses.replace(f, artifacts={"baseline": self.art})
+        return _by_key(self.d.infer(f))
+
+    def test_停机时只写运行状态与摘要(self):
+        out = self._infer("0.3", x_vel=0.05, z_vel=0.02)
+        self.assertEqual(set(out), {"run_state", "evidence"})
+        self.assertEqual(out["run_state"].value, "停机")
+        self.assertIs(out["run_state"].quality, Quality.OK)
+        self.assertIn("停机", out["evidence"].value)
+
+    def test_没有基线时停机也照判停机(self):
+        out = self._infer("0.3", artifact=False, x_vel=0.05)
+        self.assertEqual(set(out), {"run_state", "evidence"})
+
+    def test_运行时照常出偏离并带运行状态(self):
+        out = self._infer("0.3", x_vel=1.0, z_vel=0.5)
+        self.assertEqual(out["run_state"].value, "运行")
+        self.assertIs(out["vel_z_max"].quality, Quality.OK)
+
+    def test_不填门槛不判(self):
+        out = self._infer("", x_vel=0.05, z_vel=0.02)
+        self.assertEqual(out["run_state"].value, "未判")
+        self.assertEqual(set(out), {o.key for o in self.d.declare().outputs})
+
+    def test_采基线剔除停机帧(self):
+        params = dict(PARAMS, stop_threshold="0.3")
+        with_stop = self.d.train(_dataset(_RUN_ROWS + _STOP_ROWS, params=params), ProgressSink())
+        model = json.loads(with_stop.blob)
+        self.assertEqual(model["frames"], 5)
+        self.assertEqual(model["stopped_excluded"], 3)
+        self.assertEqual(with_stop.meta["stopped_excluded"], "3")
+        # 剔除后与只用运行帧采的基线逐通道相同。
+        self.assertEqual(model["channels"], json.loads(self.art.blob)["channels"])
+
+    def test_不填门槛时停机帧照旧进基线(self):
+        model = json.loads(self.d.train(_dataset(_RUN_ROWS + _STOP_ROWS), ProgressSink()).blob)
+        self.assertEqual(model["frames"], 8)
+        self.assertEqual(model["stopped_excluded"], 0)
+
+    def test_剔除后不足5帧失败并说清剔了几帧(self):
+        params = dict(PARAMS, stop_threshold="0.3")
+        with self.assertRaises(ValueError) as cm:
+            self.d.train(_dataset(_RUN_ROWS[:3] + _STOP_ROWS, params=params), ProgressSink())
+        self.assertIn("3 帧判为停机已剔除", str(cm.exception))
+
+    def test_门槛非法时不采基线(self):
+        with self.assertRaises(ValueError) as cm:
+            self.d.train(_dataset(_RUN_ROWS, params=dict(PARAMS, stop_threshold="abc")),
+                         ProgressSink())
+        self.assertIn("停机门槛", str(cm.exception))
+
+    def test_与模块1判法一致(self):
+        """两个模块各有一份 run_state（域互不 import），这里钉住两份判法逐条相同。"""
+        # 装载器按文件路径 exec，模块不一定在 sys.modules 里 —— 从类方法的全局名字空间取。
+        iso = type(_load_iso().instance).infer.__globals__["run_state"]
+        mine = type(self.d).infer.__globals__["run_state"]
+        for thr in ("", "0.3", "0.30", "abc", "0", "-1", "nan", "inf", " 1e-1 "):
+            for v in (0.0, 0.1, 0.2999, 0.3, 0.31, 5.0):
+                self.assertEqual(iso({"stop_threshold": thr}, v)[:2],
+                                 mine({"stop_threshold": thr}, v)[:2], (thr, v))
+
+
+def _load_iso():
+    loaded, _failed = discover(DOMAINS_DIR)
+    return {d.key: d for d in loaded}["vibration_iso"]
 
 
 if __name__ == "__main__":
