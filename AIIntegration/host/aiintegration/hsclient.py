@@ -241,6 +241,35 @@ class HsClient:
         ch = self._write_channel() if self._cfg.can_write() else self._read_channel()
         return self._unary(ch, "Ping", hs.PingReq(), hs.PingRes)
 
+    def features(self) -> frozenset[str]:
+        """对端**行为能力位**全集（`PingRes.features`，historystore `H-247 §5` 起放上 `Ping`）。
+
+        ★**缺失 = 未知/不支持，不是否定** —— 这是 hs 契约反复强调的一条：
+          老引擎不认识这个字段，proto3 静默丢 ⇒ 回空集合。空集合要当作
+          "这台引擎没有这些能力"来走降级路径，**不能当作"探不到所以就当有"**。
+
+        ★为什么非探不可（`H-246 §2.4`）：老引擎不认识 `StructValue`，会把它
+          **存成"无值"且回成功** —— 静默丢数据，写入侧一点异常都看不到。
+          能力位是这一类的唯一防线。
+        """
+        try:
+            return frozenset(self.ping().features or ())
+        except Exception:                       # 探不到交给调用方的退避，不在这里吞成"没有"
+            raise
+
+    def has_feature(self, name: str) -> bool:
+        """对端是否具备某个能力位。探不到（连不上）**一律回 False**，按"不支持"走。
+
+        ★这里与 `features()` 的区别是有意的：`features()` 让调用方分得清
+          "连不上"与"连上了但没有这一位"；`has_feature` 是给"要不要启用某条路"用的，
+          那条路上**两者的处置相同 —— 都不启用**，所以在这里收口，省得每个调用点都写一遍。
+        """
+        try:
+            return name in self.features()
+        except Exception:                       # noqa: BLE001
+            logger.warning("探能力位 %s 失败（按不支持处理）", name, exc_info=True)
+            return False
+
     def lookup_global(self, local_ids: list[int]) -> list[int]:
         """localId → globalId。**0 = 尚未分配**（点刚建、还没推过 VQT）。
 

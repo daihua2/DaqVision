@@ -1,9 +1,10 @@
 """hs 客户端的回归 —— 全部是**离线**用例（只验消息构造，不连网）。
 
-钉的三件：
+钉的四件：
   · 快照**必须全量、且不含 IDENTITY**；
   · VQT 的 V/Q/T 三者都来自 Finding，一个都不在客户端现编（尤其 T 不许填 now()）；
-  · 坏结论走**坏值锚点**（NullValue + 质量码），而不是"不发"。
+  · 坏结论走**坏值锚点**（NullValue + 质量码），而不是"不发"；
+  · 能力位**缺失 = 不支持**，且"探不到"与"没有这一位"在 `has_feature` 上处置相同。
 """
 
 import unittest
@@ -113,3 +114,47 @@ class TestBuildVQT(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFeatures(unittest.TestCase):
+    """能力位探测 —— `PingRes.features`（`H-247 §5` 起放上 `Ping`）。
+
+    ★为什么非有这一条不可（`H-246 §2.4`）：老引擎不认识 `StructValue`，
+      会把它**存成"无值"且回成功** —— 静默丢数据，写入侧一点异常都看不到。
+      能力位是这一类的唯一防线，所以"探不到"绝不能被当成"那就当它有"。
+    """
+
+    def client(self, features=None, boom=False):
+        from aiintegration.hsclient import HsClient, HsConfig
+        c = HsClient(HsConfig(read_addr="127.0.0.1:1", write_addr=""))
+
+        def fake_ping():
+            if boom:
+                raise RuntimeError("连不上")
+            return hs.PingRes(features=list(features or ()))
+
+        c.ping = fake_ping
+        return c
+
+    def test_读得到能力位(self):
+        c = self.client(["struct-value", "media"])
+        self.assertEqual(c.features(), frozenset({"struct-value", "media"}))
+        self.assertTrue(c.has_feature("struct-value"))
+
+    def test_老引擎回空集合而不是报错(self):
+        """proto3 未知字段静默丢 ⇒ 老引擎这一格就是空的。"""
+        c = self.client([])
+        self.assertEqual(c.features(), frozenset())
+        self.assertFalse(c.has_feature("struct-value"),
+                         "缺失被当成了'有' —— 那正是静默丢数据的入口")
+
+    def test_探不到时has_feature按不支持处理(self):
+        c = self.client(boom=True)
+        with self.assertLogs("aiintegration.hsclient", level="WARNING"):
+            self.assertFalse(c.has_feature("struct-value"))
+
+    def test_探不到时features把异常交给调用方(self):
+        """★与 has_feature 有意不同：调用方要分得清"连不上"与"连上了但没这一位"。"""
+        c = self.client(boom=True)
+        with self.assertRaises(RuntimeError):
+            c.features()

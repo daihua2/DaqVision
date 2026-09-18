@@ -46,6 +46,13 @@ message PingRes{
 	// 先前那条规矩只写在文档里，消费方没有办法知道"该重推了"。
 	// 空 = 老引擎（proto3 未知字段静默丢）⇒ 按「缺失即不支持」处置，退回定期重推，**别按空值猜**。
 	string instanceId = 3;
+	// 本引擎的**行为能力位**全集(= `historystored --capabilities` 的 "features")。
+	// ★为什么必须上线(daqgate D-242 §5.2):此前能力位只能靠 `exec historystored --capabilities` 读,
+	//   而那**只有主控做得到** —— 从网关不托管引擎进程,只有一条 gRPC 连接,探不到任何能力位。
+	//   而「写结构值前先探能力位」是静默丢数据的唯一防线(老引擎把 StructValue 当未知字段存成
+	//   "无值"却照回成功),从网关上那条防线等于不存在。
+	// ★与 listenAddrs 同一条理由:Ping 通说明对端活着,**回空即老引擎**,没有"空值两义"的歧义。
+	repeated string features = 4;
 }
 message	ClusterToken
 {
@@ -346,6 +353,11 @@ message	RecordPoint
 				DateTime			= 19;
 		daq.VARVALARRAY
 				Array				= 20;
+		// 结构值(非标量定稿 §2.5)。落盘形态与 VQT.StructVal 逐字一致:结构 id + 版本 + 编码后的字节,
+		// hs 不解析 Data。★版本必须跟着值走 —— 旧值永远按**写入时**的版本解读,拿最新版描述去解老值
+		// 会把旧类型的字节当新类型读出一个"看起来正常"的数,而那种错读是静默的。
+		daq.StructValue
+				StructVal			= 21;
 	}
 }
 message HistoryRecord
@@ -433,6 +445,13 @@ message	HisDataQueryReq
 {
 	HisDataReq	hisReq						= 1;
 	repeated	HisDataPointReq	pointsReq	= 2;
+	// ★"我认识结构值"的声明(非标量定稿 §4.4)。**不带 = 不支持**,老客户端天然不带 ⇒ 结构值样本对它改回
+	// NullValue + QualityValueTypeUnsupportedBad(-1035):"值在,但你这个版本表达不了"。点照常出现。
+	// 为什么不直接给:老客户端把 StructVal 当未知字段 ⇒ 值为"未设置" ⇒ 与"没数据"在线上一模一样,
+	// 界面上是一片安静的空白;给个明确坏码,它就是一个看得见、能追问的异常。
+	// 裸 bool 而不是 optional:缺省 false 恰好落在"不支持"这一侧 —— 安全方向就是缺省方向
+	// (与 StoredPointsReq.withValues 相反,那一格的缺省必须落在"照旧",所以用了 optional)。
+	bool	supportsStructValue	= 3;
 }
 
 message	DeleteTagReq
@@ -548,6 +567,13 @@ message StoredPointsReq
 	// 老客户端（不设此字段）会被判成"不要值" → 主控 UI 的实时值静默消失。缺省必须落在"保持现状"
 	// 那一侧 —— 与 features 契约同一条原则：缺失 = 未知/照旧，不是否定。
 	optional bool	withValues	= 2;
+	// ★"我认识结构值"的声明(非标量定稿 §4.4)。**不带 = 不支持**,老客户端天然不带 ⇒ 结构值样本对它改回
+	// NullValue + QualityValueTypeUnsupportedBad(-1035):"值在,但你这个版本表达不了"。点照常出现。
+	// 为什么不直接给:老客户端把 StructVal 当未知字段 ⇒ 值为"未设置" ⇒ 与"没数据"在线上一模一样,
+	// 界面上是一片安静的空白;给个明确坏码,它就是一个看得见、能追问的异常。
+	// 裸 bool 而不是 optional:缺省 false 恰好落在"不支持"这一侧 —— 安全方向就是缺省方向
+	// (与 StoredPointsReq.withValues 相反,那一格的缺省必须落在"照旧",所以用了 optional)。
+	bool	supportsStructValue	= 3;
 }
 message StoredPoint
 {
@@ -556,13 +582,25 @@ message StoredPoint
 	string		Des			= 3;	// 采集点备注（Paras "Des"）
 	string		Unit		= 4;	// 工程单位（Paras "Unit"）
 	bool		persist		= 5;	// 是否落盘
-	int32		frozenSec	= 6;	// 冻结时间（秒）
+	// 冻结时间（秒）。语义是**最长保持时间上限**，不是"每 N 秒必发一条"：
+	// 0 = 不设时间上限（见下方 compErr 的三档表 —— 与 compErr 合起来才定得下落库行为）。
+	int32		frozenSec	= 6;
 	// 压缩误差 E：**工程量的绝对偏差**（与该点的量纲同单位），= 旋转门(SDT)保证的最大重建误差。
 	// ★它**不是**"相对容限"、也不按量程缩放（`de = E/2` 恒定，实现在 swinging_door.cpp：
 	//   "Constant per run, NOT scaled by the value range"）。本注释 1.9.340 订正 ——
 	//   此前写作"旋转门相对容限"，AISERVER r110 §3 据此把 0.5 当"半个量程"去试，
 	//   而该点实值在 780~835 摆动 ⇒ 0.5 的死区滤不掉任何点，差点判成"改了没生效"。
-	//   0 = 不做 SDT 过滤（每采必存，另受 frozenSec 心跳约束）。
+	// ★compErr 与 frozenSec 合起来是**三档**，不是"compErr=0 一档"（本注释 1.9.446 订正 ——
+	//   此前写作"0 = 不做 SDT 过滤（每采必存，另受 frozenSec 心跳约束）"，把下面前两档并成了一句，
+	//   而这两档对消费方的差别恰恰是**取到的样本数不一样**；AIIntegration AI-43 §2.2 据此
+	//   要求书面确认"每采必存"的准确含义，本次一并钉死。实现见 history_recorder.h 的同一张表）：
+	//     compErr == 0 且 frozenSec == 0 ⇒ **每采必存，逐字原样**。不做 SDT、**也不做等值去重**，
+	//                                      且**绝不产生 QualityPending(5004)**（这一档压根不建过滤器）。
+	//                                      波形/高频原始点要的就是这一档 —— 两个都要为 0，只写 compErr=0 不够。
+	//     compErr == 0 且 frozenSec > 0  ⇒ 与上一笔**已存样本等值的样本被丢弃**，但最长 frozenSec
+	//                                      必有一条打结。等值样本在打结前挂在待定里 ⇒ **会出现 5004**。
+	//     compErr > 0                    ⇒ 旋转门(SDT)压缩，绝对偏差 E = compErr；frozenSec > 0 时
+	//                                      另加最长保持上限。门未关的那一笔标 5004（会被订正，幅度 ≤ E）。
 	double		compErr		= 7;
 	daq.VQT		VQT			= 8;	// 当前缓存值（值/质量/时间戳）；无缓存值时不设。StoredPointsReq.withValues=false 时不填
 
@@ -724,6 +762,13 @@ message StoredPointsRes
 message VQTSubscribeReq
 {
 	repeated int32	ids		= 1;	// 要订的点；空 = 不订任何点（立即空快照后静默保持，不报错）
+	// ★"我认识结构值"的声明(非标量定稿 §4.4)。**不带 = 不支持**,老客户端天然不带 ⇒ 结构值样本对它改回
+	// NullValue + QualityValueTypeUnsupportedBad(-1035):"值在,但你这个版本表达不了"。点照常出现。
+	// 为什么不直接给:老客户端把 StructVal 当未知字段 ⇒ 值为"未设置" ⇒ 与"没数据"在线上一模一样,
+	// 界面上是一片安静的空白;给个明确坏码,它就是一个看得见、能追问的异常。
+	// 裸 bool 而不是 optional:缺省 false 恰好落在"不支持"这一侧 —— 安全方向就是缺省方向
+	// (与 StoredPointsReq.withValues 相反,那一格的缺省必须落在"照旧",所以用了 optional)。
+	bool	supportsStructValue	= 2;
 }
 
 // 多网关共库:从网关清盘/水位丢后 reconcile 反查本 guid 的 localId 高水位(见多网关契约定稿)。
@@ -1445,6 +1490,248 @@ message	InitializeHistoryStoreRes	{
 	daq.Status	result	= 4;
 }
 
+// ============================================================================
+// ---- 结构注册表(非标量定稿 docs/nonscalar-storage-final-design.md §2.1)----
+//
+// 结构值 = 前端定义结构、hs 保管结构描述、值按描述编码、**hs 对外不解析值**。
+// 本段只描述「结构长什么样」;值本身走 daq.VQT 的 StructValue(daqgate 契约,见 H-245 §2)。
+//
+// ★四条规矩(定稿 #4 #15 #16 #6),消费方照此写断言:
+//   · **全库共享命名空间**:结构名全库唯一(不区分大小写),所有连接可读;
+//   · **版本不可变**:同一 (id, version) 的描述永远不变;旧版本永久保留;值里带版本号,
+//     旧值永远按写入时的版本解 —— 不要拿最新版去解老值;
+//   · **创建者所有**:任何连接可新建;发新版本、删除只限创建者 guid 或全量连接;
+//     ★但「与最新版完全相同的描述」重复注册对**任何连接**都是成功的幂等调用(见 PutStruct);
+//   · **扁平**:字段只能是下面的基础类型、基础类型数组、数值缓冲;以后加嵌套属纯增量。
+// ============================================================================
+
+enum StructFieldType
+{
+	SFT_UNSPEC		= 0;
+	SFT_BOOL		= 1;
+	SFT_INT32		= 2;
+	SFT_INT64		= 3;
+	SFT_UINT32		= 4;
+	SFT_UINT64		= 5;
+	SFT_FLOAT		= 6;
+	SFT_DOUBLE		= 7;
+	SFT_STRING		= 8;
+	SFT_BYTES		= 9;
+	SFT_TIMESTAMP	= 10;	// google.protobuf.Timestamp
+	// 数值缓冲:编码为 protobuf bytes,内部是裸数值字节,布局由 dtype/shape/bigEndian 描述。
+	// 大数组放这里:Python 端可 np.frombuffer 零拷贝,不必逐元素解 packed repeated。
+	SFT_NUMBUF		= 11;
+}
+
+// 数值缓冲的元素类型。
+enum NumBufDType
+{
+	NBD_UNSPEC	= 0;
+	NBD_I8		= 1;
+	NBD_U8		= 2;
+	NBD_I16		= 3;
+	NBD_U16		= 4;
+	NBD_I32		= 5;
+	NBD_U32		= 6;
+	NBD_I64		= 7;
+	NBD_U64		= 8;
+	NBD_F32		= 9;
+	NBD_F64		= 10;
+}
+
+message StructField
+{
+	// 字段名:标识符 [A-Za-z_][A-Za-z0-9_]*,≤64 字符,结构内唯一(区分大小写)。
+	// ★必须是标识符,因为描述要能导出成 protobuf descriptor;中文名请放 displayName。
+	string			name			= 1;
+	StructFieldType	type			= 2;
+	// 仅标量类型可 repeated(含 string/bytes/timestamp);SFT_NUMBUF 不可 repeated ——
+	// 要"多段缓冲"请用 shape 多一维。
+	bool			repeated		= 3;
+	NumBufDType		dtype			= 4;	// SFT_NUMBUF 必填;其它类型必须为 NBD_UNSPEC
+	repeated int64	shape			= 5;	// SFT_NUMBUF 可选;每维 >0 或 -1(该维可变);空 = 一维可变
+	bool			bigEndian		= 6;	// SFT_NUMBUF;缺省小端
+	string			displayName		= 7;	// 属性:显示名(可中文)
+	string			description		= 8;	// 属性:说明
+	string			unit			= 9;	// 属性:单位
+	map<string, string>
+					attrs			= 10;	// 属性:自由键值表。★hs **不规定**任何键的语义(定稿 #21)
+	// ★输出字段:hs 分配的 protobuf 字段号,写入时忽略。
+	// 分配规则:同一结构内「字段名 + 类型签名」相同 ⇒ 沿用原号;类型签名变了(类型/repeated/dtype)⇒ 视作
+	// 删旧加新、分配新号;号**永不复用**。于是同名字段在各版本间号不变,消费方拿任一版描述都不会把
+	// 旧类型的字节按新类型解 —— 那种错读是静默的。
+	int32			number			= 11;
+}
+
+message StructDef
+{
+	int32			id				= 1;	// 输出:全库唯一、永不复用
+	string			name			= 2;	// 标识符规则同 StructField.name;全库唯一(不区分大小写)
+	int32			version			= 3;	// 输出:从 1 起
+	repeated StructField
+					fields			= 4;	// 至少 1 个,至多 256 个
+	string			displayName		= 5;
+	string			description		= 6;
+	map<string, string>
+					attrs			= 7;
+	string			ownerGuid		= 8;	// 输出:创建者 guid(小写);回环/无证书创建 = 空(= 仅全量连接可改)
+	string			publisherGuid	= 9;	// 输出:发布**本版本**的 guid
+	int64			createdMs		= 10;	// 输出:本版本发布时刻(unix ms,hs 本机钟)
+}
+
+// 注册 / 发布新版本,**幂等**:
+//   · 结构名不存在        ⇒ 建结构、发布 v1,调用方成为创建者;created=true
+//   · 与最新版描述完全相同 ⇒ 原样返回最新版(不出新版本、不校验权限);created=false newVersion=false
+//     —— 采集程序每次启动都自动注册,不能因此刷出版本或因不是创建者而失败
+//   · 与最新版不同        ⇒ 仅创建者 / 全量连接可发布新版本;newVersion=true;否则 PERMISSION_DENIED
+// 比较时忽略所有输出字段(id/version/number/owner/publisher/createdMs)。
+// 描述不合法 ⇒ INVALID_ARGUMENT,消息里写明哪个字段、哪条规则。
+message PutStructReq
+{
+	StructDef	def				= 1;
+	// ★「发新版本」必须是**有意**的(daqgate D-242 §7.1)。采集程序每次启动都无脑注册一遍自己内置的
+	// 结构;若同名不同描述就自动发新版本,"改错了一个字段"会悄悄变成新版本、版本号还会被刷成启动次数。
+	// ⇒ 不带本位:同名**不同描述** ⇒ **拒绝并报错**(FAILED_PRECONDITION),不改任何东西;
+	//   带本位且是创建者/全量连接 ⇒ 发新版本。
+	// 同名**相同描述**恒为幂等成功,与本位无关 —— 驱动可以放心无脑注册。
+	bool		allowNewVersion	= 2;
+}
+message PutStructRes
+{
+	daq.Status	result		= 1;
+	StructDef	def			= 2;	// 生效的那一版(含 hs 分配的输出字段)
+	bool		created		= 3;
+	bool		newVersion	= 4;
+}
+
+message GetStructReq
+{
+	oneof key
+	{
+		int32	id		= 1;
+		string	name	= 2;
+	}
+	int32	version				= 3;	// 0 = 最新版
+	// true ⇒ 另回该版本的 protobuf FileDescriptorProto(序列化字节),可直接喂动态解码库。
+	// message 全名 = "hs.structs.<name>_v<version>";依赖 google/protobuf/timestamp.proto(若用到)。
+	bool	withDescriptor		= 4;
+}
+message GetStructRes
+{
+	daq.Status	result			= 1;	// 结构或版本不存在 ⇒ NOT_FOUND
+	StructDef	def				= 2;
+	bytes		fileDescriptor	= 3;
+}
+
+message ListStructsReq
+{
+	bool	allVersions		= 1;	// false = 每个结构只回最新版
+}
+message ListStructsRes
+{
+	daq.Status			result	= 1;
+	repeated StructDef	defs	= 2;
+}
+
+// 删除结构(全部版本)。仅创建者 / 全量连接;**被引用过的结构不许删**(有点绑定过它或写入过它的值)。
+// 结构 id 永不复用;删除后名字可被重新注册(得到新 id)。
+message DeleteStructReq
+{
+	int32	id		= 1;
+}
+message DeleteStructRes
+{
+	daq.Status	result	= 1;
+}
+
+// ============================================================================
+// 媒体(图片/视频)—— 非标量定稿 §3。能力位 `media`。
+//
+// 与标量的分界线只有一句:**媒体是"文件",不是"样本"**。所以它不走 VQT、不进块缓存、
+// 不进 WAL,生命期按点设的保留天数整组过期。但它仍然是「值-质量-时间戳」三元组:
+// 每个对象都带 startTime 与 quality —— ★"这段录像那会儿相机是坏的"必须表达得出来。
+// ============================================================================
+
+// 一个媒体对象的元数据(清单/定位用;不含字节)。
+message MediaObjectInfo
+{
+	int32				tagId			= 1;
+	google.protobuf.Timestamp	startTime	= 2;	// 对象起始的**数据时刻**,不是落盘时刻
+	int64				durationMicros	= 3;	// 0 = 瞬时(图片);>0 = 跨一段时间(录像段)
+	int64				totalBytes		= 4;	// 本对象的载荷总字节
+	string				codec			= 5;	// "image/jpeg" / "video/h264" …
+	daq.Status			quality			= 6;	// ★Q 完整保留,与标量同等
+	// 媒体类型档(与 daqgate 点表的 Acc 对应:图片 VT_BLOB_OBJECT(70)、视频 VT_STREAM(66))。
+	int32				kind			= 7;
+}
+
+// 写入:客户端流。★**第一条必须只带 meta、不带字节**,其后每条只带 chunk。
+// 中途断开 ⇒ 半截对象被回滚,任何读口都看不见它(不是"存了一半")。
+message PutMediaReq
+{
+	// 仅第一条带。retentionDays<=0 = 用缺省(定稿 M4"不设取默认")。
+	MediaObjectInfo	meta			= 1;
+	int32			retentionDays	= 2;
+	// 其后每条带一块载荷。顺序即字节顺序,hs 不重排。
+	bytes			chunk			= 3;
+}
+message PutMediaRes
+{
+	daq.Status	result	= 1;
+	int64		bytesStored	= 2;
+}
+
+// 清单。endTime 不设 = 查到最新(与 HisDataReq 同一条约定:判 has_,不判 0)。
+message ListMediaReq
+{
+	int32				tagId		= 1;
+	google.protobuf.Timestamp	begTime	= 2;
+	google.protobuf.Timestamp	endTime	= 3;
+	int32				limit		= 4;	// 0 = 不限
+}
+message ListMediaRes
+{
+	daq.Status					result	= 1;
+	repeated MediaObjectInfo	objects	= 2;	// 按起始时刻升序
+}
+
+// 按时刻定位覆盖段。
+message LocateMediaReq
+{
+	int32				tagId	= 1;
+	google.protobuf.Timestamp	time	= 2;
+}
+message LocateMediaRes
+{
+	daq.Status		result	= 1;
+	// ★found=false 不是错误:那一刻**确实没有**录像/图片(段间空档)。
+	// 用它与"点不存在""查询失败"分开 —— 三者在调用方那里是三种处置。
+	bool			found	= 2;
+	MediaObjectInfo	object	= 3;
+}
+
+// 流式读。byteOffset/length 给字节范围(length<=0 = 读到结尾);两者都不给 = 整对象。
+message GetMediaReq
+{
+	int32				tagId		= 1;
+	google.protobuf.Timestamp	startTime	= 2;	// 对象身份 = (tagId, startTime)
+	int64				byteOffset	= 3;
+	int64				length		= 4;
+}
+message MediaChunk
+{
+	// 仅第一条带(让读方在拿到字节之前就知道总长与格式)。
+	MediaObjectInfo	meta	= 1;
+	bytes			chunk	= 2;
+	daq.Status		result	= 3;	// 仅出错时带;正常流不带
+}
+
+// 媒体订阅(定稿 M15)。tagIds 空 = 订本连接看得见的**全部**媒体点。
+message SubscribeMediaReq
+{
+	repeated int32	tagIds	= 1;
+}
+
 service HistoryStoreGRPCService {
 	rpc	Ping(PingReq)											returns (PingRes);
 	rpc	MaxLocalId(MaxLocalIdReq)								returns (MaxLocalIdRes);
@@ -1479,4 +1766,26 @@ service HistoryStoreGRPCService {
 	rpc	CtrlDownChannel(stream CtrlDownAck)						returns (stream CtrlDownCmd);
 	// 主控侧:发一条命令,同步等结果。全量口(受限连接不得发起)。
 	rpc	CtrlDown(CtrlDownRelayReq)								returns (CtrlDownRelayRes);
+	// ---- 结构注册表(非标量定稿 §2.1)。能力位 `struct-registry`。读口对所有连接开放;
+	//      写口按「创建者所有」判权限(PutStruct 的幂等相同注册除外)。
+	rpc	PutStruct(PutStructReq)								returns (PutStructRes);
+	rpc	GetStruct(GetStructReq)								returns (GetStructRes);
+	rpc	ListStructs(ListStructsReq)							returns (ListStructsRes);
+	rpc	DeleteStruct(DeleteStructReq)							returns (DeleteStructRes);
+	// ---- 媒体接口(非标量定稿 §3)。能力位 `media`。
+	//      媒体点**永远没有 VQT**:图片/视频走这一组 rpc,不走 PostVQT、不进块缓存、不进 WAL。
+	//      ★写入是**客户端流**:一路 4K 视频段十几 MB,攒在内存里 × 并发路数就是几百 MB,
+	//        故边收边写;末块提交后才回 ack,半截对象在任何读口上都不可见。
+	rpc	PutMedia(stream PutMediaReq)						returns (PutMediaRes);
+	// 清单:只列元数据,不搬字节。给"这段时间有哪些图/哪些录像段"这类问题。
+	rpc	ListMedia(ListMediaReq)								returns (ListMediaRes);
+	// 按时刻定位:回**真正覆盖**该时刻的那个对象。★段与段之间的空档回 notFound,
+	//   不回"最近的一段" —— 否则"这一刻有没有录像"会被答成"有"。
+	rpc	LocateMedia(LocateMediaReq)							returns (LocateMediaRes);
+	// 流式读:整对象或字节范围。服务端流,一块一块给,读方不必一次装下整个对象。
+	rpc	GetMedia(GetMediaReq)								returns (stream MediaChunk);
+	// 媒体订阅(定稿 M15):**只推元数据,不推字节**。新对象**提交后**才推 ——
+	// 半截对象在读口上不可见,推给订阅方等于让它去读一个看不见的东西。
+	// 实时录像的"按段完成推"走的就是这一条(段写完即提交即推)。
+	rpc	SubscribeMedia(SubscribeMediaReq)					returns (stream MediaObjectInfo);
 }
