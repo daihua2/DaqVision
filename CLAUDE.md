@@ -32,8 +32,8 @@ AIIntegration 内部：`host/aiintegration/`（骨架）、`domains/*.py`（算�
 在 **WSL** 里跑，stdlib `unittest`，零测试依赖。用脚本，**从 PowerShell 调**（已在 `.claude/settings.json` 免确认；Git Bash 会把 `/mnt/c/...` 改写成 Windows 路径，调不到）：
 
 ```powershell
-wsl bash /mnt/c/Project/DaqVision/AIIntegration/host/run-tests.sh          # 三环境串行
-wsl bash /mnt/c/Project/DaqVision/AIIntegration/host/run-tests.sh py310    # 只跑一个：312 | py310 | vision
+wsl bash /mnt/d/Project/daqvision/AIIntegration/host/run-tests.sh          # 三环境串行
+wsl bash /mnt/d/Project/daqvision/AIIntegration/host/run-tests.sh py310    # 只跑一个：312 | py310 | vision
 ```
 
 三个环境：`/usr/bin/python3`（3.12，跳过视觉用例）、`~/aii-py310`（3.10，AISERVER 现场版本）、`~/aii-vision`（3.10 + onnxruntime，含视觉用例）。
