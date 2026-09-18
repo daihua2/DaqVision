@@ -1330,3 +1330,59 @@ class Tracker(Domain):
   `test_ListDomains把六处新格都带出来` 最早断言的是"新格都是缺省值"，
   而测试用的那个域**本来就没声明新格** ⇒ 把 `api.py` 里传 `group` / `has_default` 的那几行
   删掉，用例照样全绿。改成**让测试域真的声明新格**再断言，重跑三发全红。
+
+---
+
+## 27. 部署记录：现场投到 1.9 + 模块 1/2 拆分迁移（2026-09-18，用户授权）
+
+### 27.1 起因：契约投了、**实现没投**
+
+AICloud `C-46` 查出现场那台仍自述 `1.7`。核实属实，且**比对方查到的更落后** ——
+现场 `domains/` 里是**拆分前**的 `vibration_lowfreq.py`。
+根因见 §26 与 `AI-53`：我方那条硬规矩「改即投」**原文只管契约**，而联调用的是跑着的那台。
+
+### 27.2 投放前自查（三件，都查出了要改变做法的事实）
+
+| 查 | 结果 | 据此改了什么 |
+| --- | --- | --- |
+| 现场 venv 有什么 | **只有 `grpcio` + `protobuf`**，没有 `numpy`/`onnxruntime` | ⇒ **伺服与 VFD 这次不投**。铺上去只会 `load_errors` 常驻两条红的；且那两类现场既无输入也无权重，投了也出不了结论 |
+| 现场有哪些绑定 | 1 条 `vibration_lowfreq/khb-f1-g1-v1`，`data_origin=simulated`；3 个基线工件；12 个结论点 | ⇒ 拆分会让它指向不存在的域 ⇒ **必须迁移**（`U6` 早已定） |
+| 旧绑定的参数在新域下还合法吗 | ★**拿它的真实参数在本机干跑了两个新域**：`vibration_iso` 出烈度区 B 全 OK；`vibration_baseline` 落 `model_not_loaded` | ⇒ 迁移后的表现**投之前就知道**，不是投上去才发现 |
+
+★第三条是这次自查里最值钱的一步：它把"装上去才会炸"变成"投之前就看得见"。
+
+### 27.3 做了什么
+
+1. 备份 `host/`、`domains/`、`bindings.db`、`workbench.db`；
+2. 投 `host/aiintegration/` + **两个零依赖振动域**，**删掉 `vibration_lowfreq.py`**
+   （留着的话现场会同时出现合体域与拆出来的两个域）；
+3. 重启，确认两域装载、`load_errors` 为空；
+4. **迁移绑定**：走服务自己的 gRPC 口（不直接开库 —— 库有"服务进程是唯一写者"的前提），
+   **先建两条新的、核对无误，再删旧的**；中途任何一步不对就停、旧绑定原样留着。
+
+### 27.4 投后实测
+
+```
+service_version = 0.1.0+src20260918T135850Z   ← §26 那个构建标识生效
+proto_version   = 1.9        domain_count = 2        load_errors = 无
+quality_codes   = 8 条（no_input / model_not_loaded / config_incomplete 的 is_fault 均 false）
+iso_zone_code.choices = ['0','1','2','3','4']
+stop_threshold: has_default=false  min='0'  blank_meaning='not_evaluated'
+```
+
+新建 15 个结论点，快照 `accepted` 正常，无写值失败。
+★**旧的 12 个 `AI.vibration_lowfreq.*` 点原样保留** —— 删绑定不删点，那是历史。
+
+### 27.5 两处预期内的现象（已在 `AI-55` 告知 AICloud）
+
+- `vibration_baseline` 落 `model_not_loaded`：三个基线工件挂在**旧域名**下，新域看不到。
+  `U6` 本就写着"迁移时重采基线"。⇒ 界面应按 `is_fault=false` 呈现为**「待采基线」**，不是故障；
+- 两域 `run_state` 都是「未判」：`stop_threshold` 没填，而它**没有缺省、不填即不判**。
+
+### 27.6 仍未做
+
+| 事 | 卡在哪 |
+| --- | --- |
+| 伺服 / VFD 两个域上现场 | 要先在现场装 `numpy` + `onnxruntime`；且那两类**现在装了也出不了结论**（无输入、无权重）|
+| `vibration_baseline` 重采基线 | 要人选一段正常运行时间。**不是我方能替用户定的** |
+| 旧的 12 个 `vibration_lowfreq` 点怎么处置 | 有意留着。要不要清理另说，我方不顺手做 |
