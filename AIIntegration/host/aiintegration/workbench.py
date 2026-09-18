@@ -47,6 +47,7 @@ AICloud `C-10 §6` / `C-11 §5` 给的判据：
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import sqlite3
 import threading
@@ -55,6 +56,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import dataorigin
+from .types import MAX_STATE_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +194,16 @@ CREATE TABLE IF NOT EXISTS reports (
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS ix_report_seg ON reports(segment_id);
+
+CREATE TABLE IF NOT EXISTS domain_state (
+    domain      TEXT    NOT NULL,
+    binding     TEXT    NOT NULL,
+    state_json  TEXT    NOT NULL,
+    since       TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    writes      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (domain, binding)
+);
 """
 
 
@@ -345,6 +357,19 @@ def _page_args(offset: int, limit: int) -> tuple[int, int]:
 
 
 # ─────────────────────────────── 存储 ───────────────────────────────
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class DomainState:
+    """一条诊断的跨帧状态。★`since` 是它的要害：**这份状态从哪一刻起攒的**。"""
+
+    domain: str
+    binding: str
+    state: dict
+    since: str
+    updated_at: str
+    writes: int
+    """写了多少拍。给自检/界面看"这条状态到底在不在动"。"""
+
 
 class Workbench:
     """工作台状态的唯一入口。线程安全（一把锁 + 单连接，与 `PointMap` 同规矩）。"""
@@ -962,6 +987,97 @@ class Workbench:
                 "SELECT * FROM reports WHERE segment_id=? ORDER BY id DESC",
                 (segment_id,)).fetchall()
         return [_to_report(r) for r in rows]
+
+    # ── 跨帧状态 ──────────────────────────────────────────────────────────
+    #
+    # ★这一格与上面几张表**性质不同**：标注/训练集/工件是**资产**（人看得见、要能重采，
+    #   见 README §9.3），跨帧状态是**运行状态** —— 没人会去"查看"它，它只是让下一拍
+    #   接着上一拍算。所以它不进 `artifacts`，也不进 `stats()` 的资产计数。
+    #
+    # ★但它仍然要**落库**而不是搁在进程内存里：搁内存 = 进程一重启就从头攒，
+    #   而界面上看不出"这条趋势是从什么时候开始的"（README §11.3 否掉「让模块自己攒」
+    #   的正是这一条）。于是多一列 `since`：这份状态是从哪一刻起攒的，答得出来。
+
+    def get_domain_state(self, domain: str, binding: str) -> "DomainState | None":
+        """读一条跨帧状态。没有就是 `None`（第一拍）。
+
+        ★**存坏了也返回 `None`**（并记错），不抛：一条状态读不出来不该让这条诊断
+          从此再也跑不了一拍。丢状态是退化成"从头攒"，停止诊断是彻底没结论。
+        """
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT * FROM domain_state WHERE domain=? AND binding=?",
+                (domain, binding)).fetchone()
+        if r is None:
+            return None
+        try:
+            state = json.loads(r["state_json"])
+        except ValueError as exc:
+            logger.error("%s/%s 的跨帧状态解不出来（已当作没有，将从头攒）：%s",
+                         domain, binding, exc)
+            return None
+        if not isinstance(state, dict):
+            logger.error("%s/%s 的跨帧状态不是 JSON 对象而是 %s（已当作没有）",
+                         domain, binding, type(state).__name__)
+            return None
+        return DomainState(domain=domain, binding=binding, state=state,
+                           since=r["since"], updated_at=r["updated_at"],
+                           writes=int(r["writes"]))
+
+    def put_domain_state(self, domain: str, binding: str, state: Mapping[str, Any]) -> int:
+        """写一条跨帧状态，返回序列化后的字节数。
+
+        ★`since` **只在第一次写时定下，之后原样留着** —— 它要回答"这份状态从哪一刻起攒的"，
+          每次覆盖都刷新就等于永远回答"刚刚"，那一格也就白留了。
+          要重新计时只有一条路：`clear_domain_state()`（删掉整条，下次再写就是新的 `since`）。
+
+        不合规一律**抛 `WorkbenchError`**，由调用方决定怎么办（骨架的做法是保留旧状态并记错）。
+        """
+        if not domain or not binding:
+            raise WorkbenchError("跨帧状态必须说清是哪个域的哪个对象")
+        if not isinstance(state, dict):
+            raise WorkbenchError(
+                f"跨帧状态必须是 JSON 对象（dict），收到 {type(state).__name__}")
+        bad = [k for k in state if not isinstance(k, str)]
+        if bad:
+            raise WorkbenchError(f"跨帧状态的键必须都是字符串，这些不是：{bad!r}")
+        try:
+            # ★`allow_nan=False`：NaN/Infinity **不是合法 JSON**，Python 却默认写成裸的
+            #   `NaN`，别的读者（前端、jq、别的语言）一概解不出来 —— 与 Finding 里挡
+            #   NaN 是同一条理由，只不过这里是写出去的那一端。
+            blob = json.dumps(state, ensure_ascii=False, allow_nan=False, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise WorkbenchError(f"跨帧状态存不成 JSON：{exc}") from exc
+        size = len(blob.encode("utf-8"))
+        if size > MAX_STATE_BYTES:
+            raise WorkbenchError(
+                f"跨帧状态 {size} 字节，超过上限 {MAX_STATE_BYTES} 字节 —— "
+                "这份状态每拍写一次库，越攒越大会拖慢每一拍；请只留必要的摘要，别把整条轨迹堆在里面")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            # ON CONFLICT 只更新值与计数，**不动 since**。
+            self._conn.execute(
+                "INSERT INTO domain_state(domain,binding,state_json,since,updated_at,writes)"
+                " VALUES(?,?,?,?,?,1)"
+                " ON CONFLICT(domain,binding) DO UPDATE SET"
+                "   state_json=excluded.state_json, updated_at=excluded.updated_at,"
+                "   writes=domain_state.writes+1",
+                (domain, binding, blob, now, now))
+            self._conn.commit()
+        return size
+
+    def clear_domain_state(self, domain: str, binding: str) -> bool:
+        """删掉一条跨帧状态。返回是否真删掉了。
+
+        ★删绑定时**必须**调它。`BindingStore.delete` 有意不删结论点（那是历史，见它的文档），
+          但状态不是历史，是"算到哪儿了"：留着的话，日后重建**同名**绑定会**悄悄接上
+          上一条早已作废的轨迹** —— 界面上是一条从没断过的趋势，而中间那段根本没在算。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM domain_state WHERE domain=? AND binding=?", (domain, binding))
+            self._conn.commit()
+        return cur.rowcount > 0
 
     # ── 自检用 ────────────────────────────────────────────────────────────
     def stats(self, domain: str = "") -> dict[str, int]:

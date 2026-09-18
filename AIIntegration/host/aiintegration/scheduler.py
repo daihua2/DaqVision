@@ -86,7 +86,7 @@ class Scheduler:
 
     def __init__(self, *, client: HsClient, fetcher: Fetcher,
                  domains: dict[str, LoadedDomain], bindings: BindingStore,
-                 points: PointMap, artifacts=None) -> None:
+                 points: PointMap, artifacts=None, states=None) -> None:
         self._client = client
         self._fetcher = fetcher
         self._domains = domains
@@ -95,6 +95,10 @@ class Scheduler:
         # 当前启用工件的提供者（`ActiveArtifacts`）。没接 = 模块永远拿不到工件，
         # 于是靠模型/基线的那些结论一律落 MODEL_NOT_LOADED —— 那是**如实**的降级，不是缺陷。
         self._artifacts = artifacts
+        # 跨帧状态的存放处（`Workbench`）。没接 = 声明了 stateful 的域每拍都拿到空状态，
+        # 于是永远从头攒 —— 那是**降级**，不是缺陷，但它该被看见，所以装载时吵一句。
+        self._states = states
+        self._warned_stateless: set[str] = set()
         self._stop = threading.Event()
         self._threads: dict[tuple[str, str], threading.Thread] = {}
         self._last_tick: dict[tuple[str, str], datetime] = {}
@@ -141,6 +145,22 @@ class Scheduler:
         self._last_snapshot_mono = time.monotonic()
         return len(rows)
 
+    def _warn_stateless_once(self) -> None:
+        """声明了 `stateful` 的域，却没接状态存放处 —— 吵一句，每个域只吵一次。
+
+        ★为什么非吵不可：没接的表现是**每拍都拿到空状态**，于是跟踪永远编不出同一个目标、
+          趋势永远从头攒。而这些结论**看上去完全正常**（有值、质量 OK），
+          没人会想到去查"状态到底存没存" —— 与"写路径未就绪"要每次启动都吵是同一条。
+        """
+        if self._states is not None:
+            return
+        for key, dom in self._domains.items():
+            if getattr(dom.declaration, "stateful", False) and key not in self._warned_stateless:
+                self._warned_stateless.add(key)
+                logger.warning(
+                    "域 %s 声明了 stateful（要跨帧状态），但调度没接工作台库 —— "
+                    "**它每拍都会拿到空状态**（跟踪接不上、趋势从头攒），结论却看着正常。", key)
+
     # ── 一拍 ──────────────────────────────────────────────────────────────
     def run_once(self, b: Binding, tick: datetime) -> list[Finding]:
         """处理一个绑定的一拍。返回本拍回流的结论（供自检/测试）。"""
@@ -159,7 +179,7 @@ class Scheduler:
         # ★推理路径**带上当前启用的工件**；训练路径不带（拿旧模型当输入 = 模型喂自己）。
         arts = self._artifacts.for_binding(b.domain, b.binding) if self._artifacts else {}
         frame = self._fetcher.fetch(b, tick, artifacts=arts)   # hs 不可用会抛，调用方按退避处置
-        result = run_domain(loaded, frame)
+        result = run_domain(loaded, frame, states=self._states)
 
         items: list[tuple[int, Finding]] = []
         for f in result.findings:
@@ -312,6 +332,7 @@ class Scheduler:
             if self._stop.is_set():
                 return 0
             self.ensure_points()
+            self._warn_stateless_once()
             for b in self._bindings.list(only_enabled=True):
                 key = (b.domain, b.binding)
                 dom = self._domains.get(b.domain)

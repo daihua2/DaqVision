@@ -25,7 +25,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .quality import Quality
 
@@ -200,6 +200,19 @@ class Frame:
       —— 猜错的 ISO 分级会把"该停机"说成"可长期运行"，而且看不出来。
     """
 
+    state: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    """本条诊断**上一拍算完带回的跨帧状态**（目标编号、轨迹、停留时长、EWMA 累积…）。
+
+    ★为什么这一格由骨架搬运，而不是让模块自己在实例里攒（`README §11.3` 的裁定）：
+      模块自己攒的东西**进程一重启就归零**，而界面上看不出"这条趋势是从什么时候开始攒的"——
+      那种数字看起来最像专业结论，也最容易被当真。骨架存进工作台库并记下 `since`，
+      重启后接着算，界面也答得出"从哪天起"。
+
+    ★**只有 `Declaration.stateful=True` 的域拿得到**；其余域这里恒为空字典。
+      模块**读它、不改它**（改了也不算数）：要更新状态就返回 `InferOut(findings, state=…)`。
+      本身没状态可言的第一拍，这里是**空字典**，不是 `None` —— 模块不必判空。
+    """
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "t_start", _require_utc(self.t_start, "Frame.t_start"))
         object.__setattr__(self, "t_end", _require_utc(self.t_end, "Frame.t_end"))
@@ -326,6 +339,17 @@ class Declaration:
     params: tuple[ParamSpec, ...] = ()
     """台账参数自述。骨架原样回给 AICloud 渲染绑定表单 —— **不枚举、不解释**。"""
 
+    stateful: bool = False
+    """本域要不要**跨帧状态**（`Frame.state` / `InferOut.state`）。
+
+    ★**默认不要**，而且要**显式声明**才给。理由是这一格有代价：状态每拍写一次工作台库，
+      还会跨重启一直留着。域不声明就恒为空字典、一个字也不存 —— 既有的域一行不改、
+      行为一字不变（硬规矩 3：新增能力不许让老域跟着动）。
+
+    典型要它的：视频目标跟踪（目标编号、轨迹、停留计时，见视频草案 §2.4 与定案 V8）、
+    `ewma_trend` 这类要看很多天走向的（`README §11.3`）。
+    """
+
     def __post_init__(self) -> None:
         _reject_dup([i.role for i in self.inputs], "InputSpec.role")
         _reject_dup([o.key for o in self.outputs], "OutputSpec.key")
@@ -345,6 +369,50 @@ def _reject_dup(values: list[str], what: str) -> None:
         if v in seen:
             raise ValueError(f"{what} 重复: {v!r}")
         seen.add(v)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class InferOut:
+    """`infer()` 的**带状态**返回形态：结论 + 这一拍算完的新状态。
+
+    ★只有声明了 `Declaration.stateful=True` 的域需要用它；
+      别的域照旧 `return [Finding(...), ...]`，**签名没变**。
+
+    ```python
+    def infer(self, frame):
+        seen = dict(frame.state)              # 读上一拍带回来的
+        seen["count"] = seen.get("count", 0) + 1
+        return InferOut([Finding(...)], state=seen)
+    ```
+    """
+
+    findings: list[Finding]
+
+    state: dict | None = None
+    """新状态。**两种"空"意思不同，别混**：
+
+      · `None`（缺省）＝ **这一拍不动状态**，上一拍那份原样留着；
+      · `{}` ＝ **明确清空**（重新开始攒）。
+
+    ★必须是 **JSON 对象**（键是 str，值是 JSON 认得的类型），且序列化后不超过
+      `MAX_STATE_BYTES`。不合规**不落库、保留旧状态**并大声记错 ——
+      悄悄丢掉状态会让"趋势从哪天起"这类结论无声地退回从头攒。
+    """
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.findings, (list, tuple)):
+            raise TypeError(
+                f"InferOut.findings 必须是 Finding 列表，收到 {type(self.findings).__name__}")
+        if self.state is not None and not isinstance(self.state, dict):
+            raise TypeError(
+                f"InferOut.state 必须是 dict 或 None，收到 {type(self.state).__name__}"
+                "（None = 不动，{} = 清空，两者不同）")
+
+
+#: 跨帧状态序列化后的字节上限。★有上限不是洁癖：这份状态**每拍写一次**工作台库，
+#  视频跟踪那类很容易把整条轨迹越攒越长，撑大库、拖慢每一拍，而且没人会发现 ——
+#  超限**拒收并记错**，让它当场暴露，而不是慢慢变慢。
+MAX_STATE_BYTES = 256 * 1024
 
 
 # ═════════════════════ 训练面（2026-09-11）═════════════════════

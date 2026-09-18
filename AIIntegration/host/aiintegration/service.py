@@ -57,6 +57,43 @@ def _setup_logging(store: LogStore) -> None:
     root.addHandler(LogStoreHandler(store))
 
 
+def rediagnose_segment(seg, *, domains, bindings, fetcher, artifacts):
+    """对一个归档片段再判别一次（`C-11 §3.4`）。返回 `([(Finding, 显示名)], 备注)`。
+
+    ★**不写回实时库**：回溯判别问的是"当时若用现在的模型会怎样"，
+      写回去就把历史改写成了从没发生过的样子。
+
+    ★**也不许动线上那份跨帧状态**（同一条理由的另一半）：拿几个月前的片段推一遍，
+      就把"算到哪儿了"覆盖成那时候的，而线上这条诊断还在跑 —— 往后每一拍都接在
+      错的地方，且从数值上看不出来。
+
+      这件事**不靠"记得别传"**：本函数**根本没有 states 这个参数**，
+      也拿不到工作台库 —— 想传也传不进来。此前它是 `Service.run()` 里的一个闭包，
+      闭包里 `workbench` 是现成的，只隔着一句注释；而那条路要真 hs 才走得到，
+      单测够不着 ⇒ 变异验证里"把 states 传进去"一条用例都不红。
+      提到模块级、砍掉那个入口，这条保证才是结构上的，不是口头的。
+    """
+    loaded_dom = domains.get(seg.domain)
+    if loaded_dom is None:
+        raise RuntimeError(f"域 {seg.domain} 未装载，无法回溯判别")
+    b = bindings.get(seg.domain, seg.binding)
+    if b is None:
+        raise RuntimeError(
+            f"{seg.domain}/{seg.binding} 没有绑定 —— 不知道该取哪些点，无法回溯判别")
+    frame = fetcher.fetch(b, seg.t_to,
+                          artifacts=artifacts.for_binding(seg.domain, seg.binding))
+    # 片段的窗口就是片段本身的时间范围，不是绑定上配的那个 window_sec。
+    frame = Frame(domain=frame.domain, binding=frame.binding,
+                  t_start=seg.t_from, t_end=seg.t_to,
+                  channels=frame.channels, params=frame.params,
+                  artifacts=frame.artifacts)
+    res = run_domain(loaded_dom, frame)
+    names = {o.key: o.display for o in loaded_dom.declaration.outputs}
+    note = ("用当前配置与模型重跑；**未写回实时库**"
+            if res.ok else f"模块没跑完（{res.error}），下面是坏值锚点；未写回实时库")
+    return [(f, names.get(f.key, f.key)) for f in res.findings], note
+
+
 class Service:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -124,7 +161,8 @@ class Service:
         # 当前启用工件的提供者：推理时交给模块（模块不碰存储）。
         active_arts = ActiveArtifacts(workbench, cfg.data_dir / "artifacts")
         sched = Scheduler(client=client, fetcher=Fetcher(client), domains=domains,
-                          bindings=bindings, points=points, artifacts=active_arts)
+                          bindings=bindings, points=points, artifacts=active_arts,
+                          states=workbench)
         # 训练执行器：串行一条，排队顺序 = 建任务顺序（见 trainer 模块头 §2）。
         # ★没有写路径也照起 —— 训练只读实时库、只写本地工件，与结论回流无关。
         trainer = Trainer(workbench=workbench, bindings=bindings, domains=domains,
@@ -146,30 +184,8 @@ class Service:
 
         # ⑤ 对外两口
         def rediagnose(seg):
-            """对一个归档片段再判别一次（`C-11 §3.4`）。
-
-            ★**不写回实时库**：回溯判别问的是"当时若用现在的模型会怎样"，
-              写回去就把历史改写成了从没发生过的样子。
-            """
-            loaded_dom = domains.get(seg.domain)
-            if loaded_dom is None:
-                raise RuntimeError(f"域 {seg.domain} 未装载，无法回溯判别")
-            b = bindings.get(seg.domain, seg.binding)
-            if b is None:
-                raise RuntimeError(
-                    f"{seg.domain}/{seg.binding} 没有绑定 —— 不知道该取哪些点，无法回溯判别")
-            frame = Fetcher(client).fetch(
-                b, seg.t_to, artifacts=active_arts.for_binding(seg.domain, seg.binding))
-            # 片段的窗口就是片段本身的时间范围，不是绑定上配的那个 window_sec。
-            frame = Frame(domain=frame.domain, binding=frame.binding,
-                          t_start=seg.t_from, t_end=seg.t_to,
-                          channels=frame.channels, params=frame.params,
-                          artifacts=frame.artifacts)
-            res = run_domain(loaded_dom, frame)
-            names = {o.key: o.display for o in loaded_dom.declaration.outputs}
-            note = ("用当前配置与模型重跑；**未写回实时库**"
-                    if res.ok else f"模块没跑完（{res.error}），下面是坏值锚点；未写回实时库")
-            return [(f, names.get(f.key, f.key)) for f in res.findings], note
+            return rediagnose_segment(seg, domains=domains, bindings=bindings,
+                                      fetcher=Fetcher(client), artifacts=active_arts)
 
         svc = api.ApiService(guid=guid, version=VERSION, logstore=self.logstore,
                              domains=domains, bindings=bindings, load_errors=load_errors,
@@ -187,7 +203,8 @@ class Service:
 
         # 事件驱动入口（图片类输入）：来一张算一次，与按节拍取测点的调度并列。
         events = EventRunner(domains=domains, bindings=bindings, points=points,
-                             artifacts=active_arts, client=client, can_write=can_write)
+                             artifacts=active_arts, client=client, can_write=can_write,
+                             states=workbench)
         http = httpapi.make_server(
             cfg.http_listen, guid=guid, version=VERSION, domains=list(domains),
             artifacts_dir=cfg.data_dir / "artifacts",

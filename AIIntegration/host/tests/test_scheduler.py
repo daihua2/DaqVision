@@ -20,7 +20,7 @@ from aiintegration.quality import Quality
 from aiintegration.runner import anchor_all, run_domain
 from aiintegration.scheduler import Scheduler, aligned_tick
 from aiintegration.types import (
-    Declaration, Finding, Frame, InputSpec, OutputSpec,
+    Declaration, Finding, Frame, InputSpec, OutputSpec, Sample,
 )
 
 UTC = timezone.utc
@@ -227,6 +227,73 @@ class TestScheduler(unittest.TestCase):
         s.run_once(self.bindings.get("vib", "dev1"), T0)
         self.assertEqual(arts.asked, [("vib", "dev1")])
         self.assertEqual(fetcher.last_artifacts, {"baseline": "占位工件"})
+
+    def test_推理路径把跨帧状态接上并把新状态存回去(self):
+        """★与上一条同理：不钉这一条，"状态到底有没有接上"在调度这一段没人看。
+
+        （上一条的注释里那句"把 arts 改成恒空，一条用例都没红"，
+        对 states 是一模一样的风险 —— 调度忘了传，每拍都拿空状态，
+        结论却一切正常，跟踪接不上、趋势从头攒，现场看不出来。）
+        """
+        import tempfile as _tf
+        from aiintegration.types import InferOut
+        from aiintegration.workbench import Workbench
+
+        decl = Declaration(inputs=DECL.inputs, outputs=DECL.outputs, stateful=True)
+
+        class _Stateful(Domain):
+            key = "vib"
+            display = "振动"
+            version = "1.0.0"
+
+            def declare(self):
+                return decl
+
+            def infer(self, frame):
+                n = int(frame.state.get("count", 0)) + 1
+                return InferOut(
+                    [Finding(key="health_score", value=float(n), quality=Quality.OK,
+                             t=frame.t_end)],
+                    state={"count": n})
+
+        class _WithData(_FakeFetcher):
+            """★必须给真样本：空帧会撞上"没有可信输入不许出 OK 结论"那条硬规则，
+               于是结论被清值、状态也不许攒 —— 那是另一条用例的事，别在这里混着测。"""
+
+            def fetch(self, b, end_time, artifacts=None):
+                f = super().fetch(b, end_time, artifacts=artifacts)
+                return Frame(domain=f.domain, binding=f.binding, t_start=f.t_start,
+                             t_end=f.t_end,
+                             channels={"x_acc": [Sample(t=f.t_end, value=1.0,
+                                                        quality=Quality.OK)]})
+
+        dom = LoadedDomain(_Stateful(), decl, frozenset({"infer"}), Path("mem.py"))
+        with _tf.TemporaryDirectory() as tmp:
+            wb = Workbench(Path(tmp) / "wb.db")
+            try:
+                s = Scheduler(client=self.client, fetcher=_WithData(),
+                              domains={"vib": dom}, bindings=self.bindings,
+                              points=self.points, states=wb)
+                s.ensure_points()
+                b = self.bindings.get("vib", "dev1")
+                s.run_once(b, T0)
+                s.run_once(b, T0 + timedelta(seconds=60))
+                vals = [f.value for _, f in self.client.posted]
+                self.assertEqual(vals, [1.0, 2.0], "第二拍没接上第一拍的状态")
+                self.assertEqual(wb.get_domain_state("vib", "dev1").state["count"], 2)
+            finally:
+                wb.close()
+
+    def test_没接状态存放处时吵一句(self):
+        """降级要可见：没接的表现是每拍拿空状态，而结论看着完全正常。"""
+        decl = Declaration(inputs=DECL.inputs, outputs=DECL.outputs, stateful=True)
+        dom = LoadedDomain(_Dom("ok"), decl, frozenset({"infer"}), Path("mem.py"))
+        s = Scheduler(client=self.client, fetcher=_FakeFetcher(), domains={"vib": dom},
+                      bindings=self.bindings, points=self.points)
+        with self.assertLogs("aiintegration.scheduler", level="WARNING") as log:
+            s.sync()
+        self.assertIn("stateful", chr(10).join(log.output))
+        s.stop()
 
     def test_没接工件提供者时照常跑(self):
         # 只是模块拿不到工件（那些结论会落 MODEL_NOT_LOADED）——**如实降级，不是缺陷**。

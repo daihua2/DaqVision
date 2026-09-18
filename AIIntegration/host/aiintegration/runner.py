@@ -17,9 +17,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+import dataclasses as _dc
+
 from .domains import LoadedDomain
 from .quality import Quality
-from .types import Finding, Frame
+from .types import Finding, Frame, InferOut
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,14 @@ class RunResult:
     """模块本身是否正常跑完（`False` = 抛了异常，`findings` 是骨架代落的锚点）。"""
 
     error: str = ""
+
+    state_error: str = ""
+    """跨帧状态**没能存下去**的原因（空 = 没这回事）。
+
+    ★与 `ok` 分开：模块本身跑完了（`ok=True`），是骨架**拒绝**落它给的状态
+      （不是 JSON 对象 / 存不成 JSON / 超上限）。把它并进 `error` 会让调用方
+      把一次正常推理当成失败，而结论其实是好的、该照写。
+    """
 
 
 def anchor_all(loaded: LoadedDomain, frame: Frame, quality: Quality) -> list[Finding]:
@@ -45,18 +55,49 @@ def anchor_all(loaded: LoadedDomain, frame: Frame, quality: Quality) -> list[Fin
     ]
 
 
-def run_domain(loaded: LoadedDomain, frame: Frame) -> RunResult:
-    """跑一次 `infer`，并校验它的产出。"""
+def run_domain(loaded: LoadedDomain, frame: Frame, states=None) -> RunResult:
+    """跑一次 `infer`，并校验它的产出。
+
+    `states`：跨帧状态的存放处（`Workbench`）。**给了才有状态**：
+      骨架在这里把上一拍的状态读出来塞进帧，算完再把模块带回的新状态存回去。
+
+    ★**回溯判别那条路故意不传** —— 它问的是"当时若用现在的模型会怎样"，
+      既不写回实时库，也**不许动线上那份状态**：拿历史片段去推一遍就把
+      "算到哪儿了"覆盖成几个月前，而线上这条诊断还在跑。与"不写回实时库"同一条理由。
+    """
+    stateful = bool(getattr(loaded.declaration, "stateful", False))
+    if stateful and states is not None:
+        # 读不出来当作没有（`get_domain_state` 自己记错）—— 退化成从头攒，
+        # 而不是让这条诊断从此一拍都跑不了。
+        rec = states.get_domain_state(loaded.key, frame.binding)
+        frame = _dc.replace(frame, state=rec.state if rec is not None else {})
+    elif frame.state:
+        # ★没声明 stateful 却拿到了状态：只可能是调用方塞的。清掉 ——
+        #   否则"声明了才给"这条就成了一句空话，而域作者会依赖上一个没声明的偶然。
+        frame = _dc.replace(frame, state={})
+
     try:
         raw = loaded.instance.infer(frame)
     except Exception as exc:  # noqa: BLE001 —— 模块的异常绝不许掀翻骨架
         logger.exception("域 %s 推理抛异常（绑定 %s）：%s", loaded.key, frame.binding, exc)
+        # ★状态**原样不动**：这一拍什么都没算出来，凭什么改"算到哪儿了"。
         return RunResult(anchor_all(loaded, frame, Quality.COMPUTE_ERROR), False, repr(exc))
+
+    new_state = None
+    if isinstance(raw, InferOut):
+        new_state = raw.state
+        raw = raw.findings
+        if new_state is not None and not stateful:
+            # 没声明就不给存。这不是小气：状态每拍写库、跨重启留着，
+            # 声明是它与骨架之间唯一的约定，默许等于让代价悄悄长出来。
+            logger.error("域 %s 返回了跨帧状态，但它没有声明 stateful=True —— 已丢弃",
+                         loaded.key)
+            new_state = None
 
     if raw is None:
         raw = []
     if not isinstance(raw, (list, tuple)):
-        logger.error("域 %s 的 infer() 返回了 %s，应为 Finding 列表",
+        logger.error("域 %s 的 infer() 返回了 %s，应为 Finding 列表或 InferOut",
                      loaded.key, type(raw).__name__)
         return RunResult(anchor_all(loaded, frame, Quality.COMPUTE_ERROR), False,
                          f"infer() 返回类型错误: {type(raw).__name__}")
@@ -105,7 +146,24 @@ def run_domain(loaded: LoadedDomain, frame: Frame) -> RunResult:
             kept = [Finding(key=f.key, value=None, quality=bad_q, t=f.t)
                     if f.quality.is_good() else f for f in kept]
 
-    return RunResult(kept, True, violation)
+    state_error = ""
+    if new_state is not None and stateful and states is not None:
+        if violation:
+            # ★刚刚才判定这个域**从没有数据里编出了结论**，就不让它把这一拍攒进状态。
+            #   状态是会跨重启一直留着的：让一次已证实的缺陷沉淀进去，往后每一拍
+            #   都带着它，而且再也看不出是哪一拍坏的。结论照常写（已改成坏质量），
+            #   只是"算到哪儿了"停在上一拍。
+            state_error = "本帧没有可信输入却出了 OK 结论，跨帧状态未更新（保留上一拍那份）"
+            logger.error("域 %s 绑定 %s：%s", loaded.key, frame.binding, state_error)
+        else:
+            try:
+                states.put_domain_state(loaded.key, frame.binding, new_state)
+            except Exception as exc:  # noqa: BLE001 —— 存不下状态不该毁掉这一拍的结论
+                state_error = str(exc)
+                logger.error("域 %s 绑定 %s 的跨帧状态没存下（保留上一拍那份）：%s",
+                             loaded.key, frame.binding, exc)
+
+    return RunResult(kept, True, violation, state_error)
 
 
 def _has_trusted_input(frame: Frame) -> bool:

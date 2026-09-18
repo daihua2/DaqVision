@@ -164,6 +164,17 @@ class ApiService(WorkbenchApiMixin):
         ok = self._bindings.delete(request.domain, request.binding)
         # ★只停算，不删结论点。
         if ok:
+            # ★但**跨帧状态要删**。点是历史（算过的东西，用户唯一能回看的），
+            #   状态是"算到哪儿了" —— 留着的话，日后重建同名绑定会悄悄接上
+            #   一条早已作废的轨迹，界面上看成一条从没断过的趋势。
+            if self._wb is not None:
+                try:
+                    if self._wb.clear_domain_state(request.domain, request.binding):
+                        logger.info("绑定 %s/%s 删除，连带清掉它的跨帧状态",
+                                    request.domain, request.binding)
+                except Exception:  # noqa: BLE001 —— 清不掉状态不该让删绑定整个失败
+                    logger.exception("清 %s/%s 的跨帧状态失败（绑定已删）",
+                                     request.domain, request.binding)
             self._notify_changed()
         return pb.DeleteBindingReply(ok=ok, message="" if ok else "没有这条绑定")
 

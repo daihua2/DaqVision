@@ -21,6 +21,7 @@ from aiintegration.apiproto import aiintegration_pb2 as pb
 from aiintegration.bindings import Binding, BindingStore
 from aiintegration.domains import discover
 from aiintegration.logstore import LogLevel, LogStore
+from aiintegration.workbench import Workbench
 
 UTC = timezone.utc
 T0 = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
@@ -274,6 +275,54 @@ class TestBindingParamsOverWire(unittest.TestCase):
         got = self.call("ListBindings", pb.ListBindingsRequest(domain="vib"),
                         pb.ListBindingsReply)
         self.assertEqual(dict(got.bindings[0].params), {})
+
+
+class TestDeleteBindingClearsState(unittest.TestCase):
+    """删绑定**不删结论点**（那是历史），但**要清跨帧状态**（那是"算到哪儿了"）。
+
+    留着的后果是静默的：日后重建同名绑定会悄悄接上一条早已作废的轨迹，
+    界面上看成一条从没断过的趋势，而中间那段根本没在算。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.bindings = BindingStore(root / "b.db")
+        self.wb = Workbench(root / "wb.db")
+        self.svc = ApiService(
+            guid="11111111-2222-3333-4444-555555555555", version="0.1.0",
+            logstore=LogStore(capacity=10), domains={}, bindings=self.bindings,
+            workbench=self.wb)
+        self.bindings.put(Binding(domain="vib", binding="dev1", roles={"x_acc": 101},
+                                  interval_sec=60, window_sec=60, enabled=True))
+
+    def tearDown(self):
+        self.wb.close(); self.bindings.close(); self._tmp.cleanup()
+
+    def test_删绑定连带清掉跨帧状态(self):
+        self.wb.put_domain_state("vib", "dev1", {"count": 9})
+        r = self.svc.DeleteBinding(
+            pb.DeleteBindingRequest(domain="vib", binding="dev1"), None)
+        self.assertTrue(r.ok)
+        self.assertIsNone(self.wb.get_domain_state("vib", "dev1"),
+                          "绑定删了，状态还留着 —— 重建同名绑定会接上作废的轨迹")
+
+    def test_没删掉绑定就不动状态(self):
+        self.wb.put_domain_state("vib", "dev1", {"count": 9})
+        r = self.svc.DeleteBinding(
+            pb.DeleteBindingRequest(domain="vib", binding="不存在"), None)
+        self.assertFalse(r.ok)
+        self.assertIsNotNone(self.wb.get_domain_state("vib", "dev1"))
+
+    def test_清状态失败不让删绑定整个失败(self):
+        """绑定已经删掉了，再报失败会让调用方以为没删成，去重试一次同样的删除。"""
+        self.wb.put_domain_state("vib", "dev1", {"count": 9})
+        self.wb.close()          # 连接关了 ⇒ clear_domain_state 会抛
+        with self.assertLogs("aiintegration.api", level="ERROR"):
+            r = self.svc.DeleteBinding(
+                pb.DeleteBindingRequest(domain="vib", binding="dev1"), None)
+        self.assertTrue(r.ok)
+        self.assertIsNone(self.bindings.get("vib", "dev1"))
 
 
 if __name__ == "__main__":

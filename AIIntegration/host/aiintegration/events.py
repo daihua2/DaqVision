@@ -76,11 +76,15 @@ def image_roles(loaded: LoadedDomain) -> list[str]:
 class EventRunner:
     def __init__(self, *, domains: dict[str, LoadedDomain], bindings: BindingStore,
                  points: PointMap, artifacts=None, client=None, can_write: bool = False,
+                 states=None,
                  max_concurrent: int = 1) -> None:
         self._domains = domains
         self._bindings = bindings
         self._points = points
         self._artifacts = artifacts
+        # 与调度那条路同一份：事件驱动的帧也要能接上上一拍的状态
+        # （视频跟踪正是走这条路 —— 来一帧算一次，目标编号必须跨帧连得上）。
+        self._states = states
         self._client = client
         self._can_write = can_write
         self._sem = threading.BoundedSemaphore(max(1, int(max_concurrent)))
@@ -127,7 +131,7 @@ class EventRunner:
             frame = Frame(domain=domain, binding=binding, t_start=blob.t, t_end=blob.t,
                           channels={}, blobs={role: blob}, params=dict(b.params),
                           artifacts=arts)
-            run = run_domain(loaded, frame)
+            run = run_domain(loaded, frame, states=self._states)
         finally:
             self._sem.release()
 
