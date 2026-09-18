@@ -22,11 +22,12 @@ from .apiproto import aiintegration_pb2 as pb
 from .bindings import Binding, BindingStore
 from .domains import LoadedDomain
 from .logstore import LogFilter, LogLevel, LogStore
+from .quality import Quality
 
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.8"
+PROTO_VERSION = "1.9"
 
 
 def _ts(dt: datetime) -> object:
@@ -86,6 +87,11 @@ class ApiService(WorkbenchApiMixin):
         # ★装载失败**不藏**：静默跳过会变成"某个域莫名其妙不见了"，那是最难查的一类。
         for f, why in self._load_errors:
             reply.load_errors.add(file=f, reason=why)
+        # 质量码字典（1.9，AICloud C-45 §3.6）。★骨架级全局表，不随域变 ——
+        #   每个域回一遍只会重复八份一样的表，还给了它们各自改口径的机会。
+        for q in Quality:
+            reply.quality_codes.add(code=q.value, display=q.display(),
+                                    is_fault=q.is_fault(), hint=q.hint())
         return reply
 
     def ListDomains(self, request, context):
@@ -100,16 +106,23 @@ class ApiService(WorkbenchApiMixin):
             for i in d.declaration.inputs:
                 info.inputs.add(role=i.role, unit=i.unit,
                                 required=i.required, description=i.description,
-                                kind=i.kind, display=i.display)
+                                kind=i.kind, display=i.display,
+                                group=i.group, group_display=i.group_display)
             for o in d.declaration.outputs:
-                info.outputs.add(key=o.key, display=o.display, value_type=o.value_type,
-                                 unit=o.unit, description=o.description)
+                ospec = info.outputs.add(
+                    key=o.key, display=o.display, value_type=o.value_type,
+                    unit=o.unit, description=o.description,
+                    stop_behavior=o.stop_behavior)
+                ospec.choices.extend(o.choices)
+                ospec.choice_displays.extend(o.choice_displays)
             # 台账参数自述 —— 贵方**按这张表渲染绑定表单**，不按域名写死字段。
             for pm in d.declaration.params:
                 spec = info.params.add(
                     key=pm.key, display=pm.display, value_type=pm.value_type,
                     default=pm.default, required=pm.required,
-                    unit=pm.unit, description=pm.description, level=pm.level)
+                    unit=pm.unit, description=pm.description, level=pm.level,
+                    has_default=pm.has_default, blank_meaning=pm.blank_meaning,
+                    min=pm.min, max=pm.max, step=pm.step)
                 spec.choices.extend(pm.choices)
                 spec.choice_displays.extend(pm.choice_displays)
         return reply

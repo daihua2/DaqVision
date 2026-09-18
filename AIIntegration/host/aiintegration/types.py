@@ -233,6 +233,18 @@ class InputSpec:
     required: bool = True
     description: str = ""
 
+    group: str = ""
+    """★**成组可选**：同一 `group` 的角色语义是「全配或全不配」（契约 1.9）。
+
+    由来（AICloud `C-45 §3.1`）：振动的「第二测点 X/Y/Z 速度 + 温度」四个角色各自
+    `required=False`，界面只看 `required` **无从知道它们是一组** ——
+    用户配了 X 漏了 Z 不会被拦，骨架拿到的是半组输入。
+    空 = 不分组（各自独立可选）。
+    """
+
+    group_display: str = ""
+    """该组给人看的名字，如 `"第二测点"`。空 = 界面自行处理。"""
+
     kind: str = "point"
     """输入的**形态**：`point`（测点，绑到 globalId、骨架按节拍取）/ `image`（图片，由上传触发）。
 
@@ -251,6 +263,12 @@ class InputSpec:
             raise ValueError(f"InputSpec({self.role}).kind 只能是 {InputSpec._KINDS}，收到 {self.kind!r}")
 
 
+#: `OutputSpec.stop_behavior` 的三档（契约 1.9）。★不是封闭枚举，将来可加。
+STOP_WRITTEN = "written"
+STOP_LITERAL = "literal_stopped"
+STOP_NOT_WRITTEN = "not_written"
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class OutputSpec:
     """模块声明它产出什么结论。骨架据此在实时库里声明结论点。"""
@@ -263,7 +281,34 @@ class OutputSpec:
     unit: str = ""
     description: str = ""
 
+    stop_behavior: str = STOP_WRITTEN
+    """★★**设备停机时这一条怎么写**（契约 1.9）。
+
+    · `written`         照常写实测值（停机与否都算得出，如速度最大值）
+    · `literal_stopped` 写一个表示「停机」的取值（文字点写「停机」、数值点写 `choices` 里那一档）
+    · `not_written`     ★**这一拍不写**，点上保留停机前最后一值及其时刻
+                        ⇒ 界面须据此置灰，并标注"停机前数值，时刻 T"
+
+    ★为什么非有这一格不可（AICloud `C-45 §3.4` 点破的，我方认）：
+      我方 `AI-49` 要求界面"凭 `run_state` 置灰停机时的数值结论"，
+      `AI-51 §3` 又立规矩"不要按域名写死" —— 而 `OutputSpec` 里没有这个信息，
+      前端只能把那张点名单抄进去，**两封函自相矛盾**。
+      更要命的是后果：我方哪天给某个模块加一个数值结论点，
+      前端那张单子不会自己长出来 ⇒ **界面把停机前的旧值当成当前值显示，且不报错**。
+    """
+
+    choices: tuple[str, ...] = ()
+    """结论点的**取值域自述**（契约 1.9）。空 = 连续量或取值域不封闭。
+
+    由来：`iso_zone_code` 从 {1,2,3,4} 变成 {0,1,2,3,4}（0=停机）——
+    取值域若只写在函里，每次变化都要发一次函 + 改一次前端。
+    """
+
+    choice_displays: tuple[str, ...] = ()
+    """与 `choices` **同序对应**的显示名；空则直接显示取值。"""
+
     _ALLOWED = ("float", "int", "bool", "string")
+    _STOP = (STOP_WRITTEN, STOP_LITERAL, STOP_NOT_WRITTEN)
 
     def __post_init__(self) -> None:
         if self.value_type not in OutputSpec._ALLOWED:
@@ -271,6 +316,20 @@ class OutputSpec:
                 f"OutputSpec({self.key}).value_type 只能是 {OutputSpec._ALLOWED}，"
                 f"收到 {self.value_type!r}"
             )
+        if self.stop_behavior not in OutputSpec._STOP:
+            raise ValueError(
+                f"OutputSpec({self.key}).stop_behavior 只能是 {OutputSpec._STOP}，"
+                f"收到 {self.stop_behavior!r}")
+        if self.choice_displays and len(self.choice_displays) != len(self.choices):
+            raise ValueError(
+                f"OutputSpec({self.key}).choice_displays 与 choices 长度不一致 "
+                f"({len(self.choice_displays)} vs {len(self.choices)}) —— "
+                "同序对应，错位会让界面显示成别的取值")
+        if self.stop_behavior == STOP_LITERAL and not self.choices:
+            # 写「停机」那一档，取值域里必须有它，否则界面不知道该认哪个值为停机。
+            raise ValueError(
+                f"OutputSpec({self.key}).stop_behavior={STOP_LITERAL} 却没有 choices —— "
+                "界面无从知道哪个取值代表停机")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -306,6 +365,31 @@ class ParamSpec:
     """参数归属（契约 1.8）：`machine` = 设备固有属性，在设备上填一次、各诊断共用；
     `position` = 随这条诊断填。空 = 未声明。★骨架只搬运，**合并由界面在下发前做**，模块只看合并后的 `params`。"""
 
+    has_default: bool = False
+    """★这个参数**有没有缺省**（契约 1.9）。
+
+    由来（AICloud `C-45 §3.2`）：`default` 用空串表达"无缺省"，与"缺省就是空串"
+    撞在一起，界面分不开。`has_default=False` ⇒ **必须由人填，界面不要替它预置任何值**。
+    `stop_threshold` 就是这一类：替它填一个"看起来合理"的数会**静默停止诊断**。
+    """
+
+    blank_meaning: str = ""
+    """★**留空会发生什么** —— 域知道、界面不知道的事（契约 1.9）。
+
+    空 = 未声明。已用取值 `not_evaluated`（留空则该判据不评）。
+    ★不是封闭枚举；界面不认识就回退显示 `description`。
+    """
+
+    min: str = ""
+    """取值下限（按 `value_type` 解释；空 = 不限）。★给界面**当场拦截**用 ——
+    没有它，用户填了非法值要到采基线/推理时才失败，中间那段看着像配好了。"""
+
+    max: str = ""
+    """取值上限（空 = 不限）。"""
+
+    step: str = ""
+    """步长建议（空 = 不限）。界面可用它渲染数字输入框的增减粒度。"""
+
     _ALLOWED = ("float", "int", "bool", "string", "enum")
     _LEVELS = ("", "machine", "position")
 
@@ -325,6 +409,10 @@ class ParamSpec:
             raise ValueError(
                 f"ParamSpec({self.key}).choice_displays 与 choices 长度不一致 "
                 f"({len(self.choice_displays)} vs {len(self.choices)}) —— 同序对应，错位会让界面显示成别的选项")
+        if self.default and not self.has_default:
+            raise ValueError(
+                f"ParamSpec({self.key}) 给了 default={self.default!r} 却 has_default=False —— "
+                "两者自相矛盾，界面会据 has_default 判定「必须由人填」而把缺省丢掉")
         if self.default and self.choices and self.default not in self.choices:
             raise ValueError(
                 f"ParamSpec({self.key}).default={self.default!r} 不在 choices {self.choices} 里")

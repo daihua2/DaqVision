@@ -173,7 +173,8 @@ class HelmetDetection(Domain):
             params=(
                 ParamSpec(
                     key="conf_threshold", display="置信度阈值", value_type="float",
-                    default=str(DEFAULT_CONF), required=False,
+                    default=str(DEFAULT_CONF), has_default=True, required=False,
+                    min="0", max="1",
                     description=(
                         "低于它的框不算。缺省 0.55，与现网 helmet_service 一致。"
                         "★这一项允许有缺省：每次结论的判据摘要里都写明实际用的阈值，改了看得见。"

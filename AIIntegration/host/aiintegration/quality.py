@@ -92,9 +92,30 @@ class Quality(enum.Enum):
     def is_good(self) -> bool:
         return self is Quality.OK
 
+    def is_fault(self) -> bool:
+        """这个码**算不算设备故障**。★界面据此决定渲不渲染成告警色。
+
+        ★这一格是 AICloud `C-45 §3.6` 要来的，理由成立：`NO_INPUT`（没取到数）与
+          `MODEL_NOT_LOADED`（没启用模型/基线）**不是设备坏了** —— 混成"异常"会让
+          现场去查设备，而实际要查的是采集链路或工件页，方向正好反了。
+
+        ★判据是"**该去查设备吗**"，不是"好不好"：
+          `INPUT_BAD` 算故障（数据不可信，多半传感器/链路有问题），
+          `CONFIG_INCOMPLETE` **不算**（没人填台账，去补配置），
+          `COMPUTE_ERROR` 算（我方的模块出错了，要有人看）。
+        """
+        return self in _FAULT_CODES
+
     def to_status_code(self) -> int:
         """映射到 `daq.StatusCode`。见模块头：对不上的一律折叠成 QualityBad，不挪用。"""
         return _TO_STATUS[self]
+
+    def display(self) -> str:
+        return _DISPLAY[self]
+
+    def hint(self) -> str:
+        """现场该查什么。空 = 不必查（`OK`）。"""
+        return _HINT[self]
 
     @staticmethod
     def from_status_code(code: int) -> "Quality":
@@ -139,3 +160,42 @@ _TO_STATUS: dict[Quality, int] = {
 COLLAPSED_TO_BAD = tuple(
     q for q, code in _TO_STATUS.items() if code == STATUS_QUALITY_BAD
 )
+
+
+# ═════════════════ 质量码字典（契约 1.9，给 GetInfo 用）═════════════════
+#
+# ★为什么放骨架而不是每个域各报一份（AICloud `C-45 §3.6`，我方定）：
+#   质量码是**骨架定义**的，不随域变 —— 每个域回一遍只会重复八份一样的表，
+#   还给了它们各自改口径的机会。前端取一次缓存即可。
+
+#: 哪些码**是设备故障**。判据见 `Quality.is_fault` 的文档。
+_FAULT_CODES = frozenset({
+    Quality.INPUT_BAD,
+    Quality.COMPUTE_ERROR,
+})
+
+_DISPLAY: dict[Quality, str] = {
+    Quality.OK: "正常",
+    Quality.INPUT_BAD: "输入坏值",
+    Quality.NO_INPUT: "无输入",
+    Quality.MODEL_NOT_LOADED: "未启用模型/基线",
+    Quality.CONFIG_INCOMPLETE: "配置不全",
+    Quality.INSUFFICIENT_SAMPLES: "样本不足",
+    Quality.LOW_CONFIDENCE: "置信度低",
+    Quality.COMPUTE_ERROR: "计算出错",
+}
+
+_HINT: dict[Quality, str] = {
+    Quality.OK: "",
+    Quality.INPUT_BAD: "采集链路 / 传感器",
+    Quality.NO_INPUT: "采集链路（该时段无数据或上游断流）",
+    Quality.MODEL_NOT_LOADED: "工件页启用模型，或先采基线",
+    Quality.CONFIG_INCOMPLETE: "配置界面：必填参数或采集点没配齐",
+    Quality.INSUFFICIENT_SAMPLES: "取数节拍与窗长",
+    Quality.LOW_CONFIDENCE: "结论仅供参考；样本或工况可能超出模型适用范围",
+    Quality.COMPUTE_ERROR: "我方模块出错，请提工单",
+}
+
+# 漏一个就当场炸，而不是等 GetInfo 少回一条（少回的那条前端会当成"这个码不存在"）。
+assert set(_DISPLAY) == set(Quality), "质量码字典漏了：%s" % (set(Quality) - set(_DISPLAY))
+assert set(_HINT) == set(Quality), "质量码字典漏了：%s" % (set(Quality) - set(_HINT))

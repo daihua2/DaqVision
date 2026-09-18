@@ -37,14 +37,22 @@ class D(Domain):
     def declare(self):
         return Declaration(
             inputs=(InputSpec(role="x_acc", unit="g", display="X 轴加速度"),
-                    InputSpec(role="temp", unit="℃", required=False)),
+                    InputSpec(role="temp", unit="℃", required=False,
+                              group="p2", group_display="第二测点")),
             outputs=(OutputSpec(key="health_score", display="健康分",
-                                value_type="float", unit="分"),),
+                                value_type="float", unit="分"),
+                     OutputSpec(key="zone", display="区", value_type="string",
+                                stop_behavior="literal_stopped",
+                                choices=("A", "停机"), choice_displays=("A 区", "停机")),
+                     OutputSpec(key="margin", display="余量", value_type="float",
+                                stop_behavior="not_written"),),
             params=(ParamSpec(key="iso_group", display="机组类别", value_type="enum",
                               choices=("1", "2"), choice_displays=("大型", "中型"),
                               description="决定边界值", level="machine"),
+                    ParamSpec(key="thr", display="门槛", value_type="float",
+                              required=False, blank_meaning="not_evaluated", min="0"),
                     ParamSpec(key="note", display="备注", value_type="string",
-                              required=False),),
+                              required=False, default="无", has_default=True),),
         )
     def infer(self, frame):
         return []
@@ -89,7 +97,7 @@ class TestInfoAndDomains(ApiTestBase):
     def test_GetInfo_带身份与契约版本(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
         self.assertEqual(r.guid, "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(r.proto_version, "1.8")
+        self.assertEqual(r.proto_version, "1.9")
         self.assertEqual(r.domain_count, 1)
 
     def test_装载失败不藏(self):
@@ -108,7 +116,7 @@ class TestInfoAndDomains(ApiTestBase):
         self.assertEqual(list(d.capabilities), ["infer"])
         self.assertEqual([i.role for i in d.inputs], ["x_acc", "temp"])
         self.assertFalse(d.inputs[1].required)
-        self.assertEqual([o.key for o in d.outputs], ["health_score"])
+        self.assertEqual([o.key for o in d.outputs], ["health_score", "zone", "margin"])
         self.assertEqual(d.outputs[0].value_type, "float")
 
 
@@ -236,7 +244,7 @@ class TestBindingParamsOverWire(unittest.TestCase):
         r = self.call("ListDomains", pb.DomainsRequest(), pb.DomainsReply)
         d = next(x for x in r.domains if x.key == "vib")
         specs = {p.key: p for p in d.params}
-        self.assertEqual(set(specs), {"iso_group", "note"},
+        self.assertEqual(set(specs), {"iso_group", "thr", "note"},
                          "自述漏一项，前端表单就少一格，而域会因此永远落坏码")
         self.assertEqual(list(specs["iso_group"].choices), ["1", "2"])
         self.assertEqual(list(specs["iso_group"].choice_displays), ["大型", "中型"])
@@ -275,6 +283,64 @@ class TestBindingParamsOverWire(unittest.TestCase):
         got = self.call("ListBindings", pb.ListBindingsRequest(domain="vib"),
                         pb.ListBindingsReply)
         self.assertEqual(dict(got.bindings[0].params), {})
+
+
+class TestContract19(ApiTestBase):
+    """契约 1.9 的六处新格（AICloud `C-45 §3` 点名，我方全接）。
+
+    ★这六处的共同点：**不加的话前端只能写死**，而写死的代价是
+      我方加一个参数/结论点/取值，界面不会自己长出来，且**不报错**。
+    """
+
+    def test_质量码字典随GetInfo回来且是全局表(self):
+        from aiintegration.quality import Quality
+        r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
+        got = {q.code: q for q in r.quality_codes}
+        self.assertEqual(set(got), {q.value for q in Quality},
+                         "质量码字典与枚举对不上 —— 少回的那条前端会当成'这个码不存在'")
+        for q in r.quality_codes:
+            self.assertTrue(q.display, f"{q.code} 没有显示名")
+
+    def test_没取到数与没模型不算设备故障(self):
+        """★这一条是 C-45 §3.6 要这张表的**理由本身**。"""
+        r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
+        got = {q.code: q for q in r.quality_codes}
+        self.assertFalse(got["no_input"].is_fault,
+                         "no_input 被标成故障 —— 现场会去查设备，而实际要查采集链路")
+        self.assertFalse(got["model_not_loaded"].is_fault,
+                         "model_not_loaded 被标成故障 —— 实际要去工件页")
+        self.assertFalse(got["config_incomplete"].is_fault, "没人填台账不是设备坏了")
+        self.assertTrue(got["input_bad"].is_fault)
+        self.assertTrue(got["compute_error"].is_fault)
+        self.assertTrue(got["no_input"].hint, "没写'现场该查什么'，这张表就只剩个中文名")
+
+    def test_ListDomains把六处新格都带出来(self):
+        """★这条**必须让测试域真的声明新格** —— 否则翻译层带不带都断言得过。
+
+        （这正是本轮变异验证逼出来的：最早那版断言的是"都是缺省值"，
+        把 `api.py` 里传 `group`/`has_default` 的那几行删掉，用例照样全绿。）
+        """
+        r = self.call("ListDomains", pb.DomainsRequest(), pb.DomainsReply)
+        d = {x.key: x for x in r.domains}["vib"]
+
+        ins = {i.role: i for i in d.inputs}
+        self.assertEqual(ins["temp"].group, "p2", "分组没带出来，界面就拦不住半组输入")
+        self.assertEqual(ins["temp"].group_display, "第二测点")
+        self.assertEqual(ins["x_acc"].group, "", "没分组的不该被卷进组里")
+
+        outs = {o.key: o for o in d.outputs}
+        self.assertEqual(outs["health_score"].stop_behavior, "written", "缺省该是 written")
+        self.assertEqual(outs["margin"].stop_behavior, "not_written")
+        self.assertEqual(outs["zone"].stop_behavior, "literal_stopped")
+        self.assertEqual(list(outs["zone"].choices), ["A", "停机"])
+        self.assertEqual(list(outs["zone"].choice_displays), ["A 区", "停机"])
+
+        ps = {x.key: x for x in d.params}
+        self.assertFalse(ps["thr"].has_default, "无缺省没带出来，界面会替它预置一个值")
+        self.assertEqual(ps["thr"].blank_meaning, "not_evaluated")
+        self.assertEqual(ps["thr"].min, "0", "下限没带出来，界面拦不住负数")
+        self.assertTrue(ps["note"].has_default)
+        self.assertEqual(ps["note"].default, "无")
 
 
 class TestDeleteBindingClearsState(unittest.TestCase):

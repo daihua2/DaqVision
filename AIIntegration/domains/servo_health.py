@@ -237,7 +237,7 @@ class ServoHealth(Domain):
                 ParamSpec(
                     key="model", display="模型", value_type="enum",
                     choices=MODEL_CHOICES, choice_displays=MODEL_DISPLAYS,
-                    default=DEFAULT_MODEL, required=False, level="position",
+                    default=DEFAULT_MODEL, has_default=True, required=False, level="position",
                     description="这条诊断打算用哪种模型（定案 4.2）。★它只表达意图，"
                                 "真正算的是这台设备当前启用的模型工件；两者对不上时本域不硬算，"
                                 "在判据摘要里说清"),

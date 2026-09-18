@@ -45,8 +45,8 @@ from datetime import datetime
 from aiintegration.domains import Domain
 from aiintegration.quality import Quality
 from aiintegration.types import (
-    Dataset, Declaration, Finding, Frame, InputSpec, OutputSpec, ParamSpec,
-    ProgressSink, TrainedArtifact,
+    STOP_NOT_WRITTEN, Dataset, Declaration, Finding, Frame, InputSpec, OutputSpec,
+    ParamSpec, ProgressSink, TrainedArtifact,
 )
 
 _AXES = ("x", "y", "z")
@@ -97,11 +97,16 @@ class VibrationBaseline(Domain):
                 first = point == "" and axis == "x"
                 inputs.append(InputSpec(
                     role=_vel_role(axis, point), unit="mm/s", required=first,
+                    # ★第二测点是一组：全配或全不配（契约 1.9，AICloud C-45 §3.1）。
+                    group=("point2" if point else ""),
+                    group_display=("第二测点" if point else ""),
                     display=f"{name} {axis.upper()} 轴速度",
                     description=("速度有效值。至少选测点 1 的 X 轴速度；第二测点不配即按单测点算"
                                  if first else "速度有效值，可不选")))
             inputs.append(InputSpec(
                 role=_temp_role(point), unit="℃", required=False,
+                group=("point2" if point else ""),
+                group_display=("第二测点" if point else ""),
                 display=f"{name} 温度",
                 description="有就算温升，没有就不给温升"))
         return Declaration(
@@ -115,27 +120,35 @@ class VibrationBaseline(Domain):
                                 "缺它只影响三轴比例漂移一条"),
                 ParamSpec(
                     key="normal_label", display="采基线时认哪个标签算正常",
-                    value_type="string", default=DEFAULT_NORMAL_LABEL, required=False,
+                    value_type="string", default=DEFAULT_NORMAL_LABEL, has_default=True,
+                    required=False,
                     level="position",
                     description="采基线只用被标成这个标签的样本。允许有缺省：猜错会当场可见"
                                 "（一条样本都匹配不上，采基线直接失败并说清）"),
                 ParamSpec(
                     key="stop_threshold", display="停机门槛", value_type="float", unit="mm/s",
                     required=False, level="position",
+                    # ★与模块 1 逐字一致（两份实现必须同判据）：无缺省、留空则不评、下限正数。
+                    blank_meaning="not_evaluated", min="0",
                     description="速度最大值低于它即判停机：停机时不出偏离与异常分，采基线时剔除停机帧。"
                                 "不填不判；没有缺省，按设备自己定"),
             ),
             outputs=(
                 OutputSpec(key="vel_z_max", display="速度偏离", value_type="float",
-                           description="各速度通道 (当前−基线中位数)/(四分位距/1.349) 的最大值。>3 视为显著偏离"),
+                           description="各速度通道 (当前−基线中位数)/(四分位距/1.349) 的最大值。>3 视为显著偏离",
+                           stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="ratio_drift", display="三轴比例漂移", value_type="float",
-                           description="轴向/径向比相对基线的变化量，取变化最大的测点"),
+                           description="轴向/径向比相对基线的变化量，取变化最大的测点",
+                           stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="temp_rise", display="温升", value_type="float", unit="℃",
-                           description="相对基线的温度变化，取最大的测点"),
+                           description="相对基线的温度变化，取最大的测点",
+                           stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="anomaly_score", display="异常分", value_type="float",
-                           description="0~100，由上面几项合成。★不是概率，是排序用的分数"),
+                           description="0~100，由上面几项合成。★不是概率，是排序用的分数",
+                           stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="run_state", display="运行状态", value_type="string",
-                           description="运行 / 停机 / 未判（未填停机门槛）。停机时数值类结论不更新，界面据此置灰"),
+                           description="运行 / 停机 / 未判（未填停机门槛）。停机时数值类结论不更新，界面据此置灰",
+                           choices=(RUNNING, STOPPED, UNJUDGED)),
                 OutputSpec(key="evidence", display="判据摘要", value_type="string",
                            description="基线采自哪段、哪一项偏离、为什么没给"),
             ),

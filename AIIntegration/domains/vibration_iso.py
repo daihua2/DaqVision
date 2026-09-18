@@ -60,7 +60,10 @@ from datetime import datetime
 # ★域模块 import 骨架一律用**绝对包名**：装载器按文件路径 exec，相对 import 会当场炸。
 from aiintegration.domains import Domain
 from aiintegration.quality import Quality
-from aiintegration.types import Declaration, Finding, Frame, InputSpec, OutputSpec, ParamSpec
+from aiintegration.types import (
+    STOP_LITERAL, STOP_NOT_WRITTEN, Declaration, Finding, Frame, InputSpec,
+    OutputSpec, ParamSpec,
+)
 
 # ─────────────────────────────── 限值表 ───────────────────────────────
 #
@@ -127,6 +130,11 @@ class VibrationIso(Domain):
                     role=_vel_role(axis, point), unit="mm/s",
                     # 至少要有测点 1 的 X 轴；其余都可选。
                     required=(point == "" and axis == "x"),
+                    # ★第二测点是**一组**：全配或全不配（契约 1.9）。
+                    #   只标 required=False 的话，界面拦不住"配了 X 漏了 Z"，
+                    #   我方拿到的是半组输入（AICloud C-45 §3.1）。
+                    group=("point2" if point else ""),
+                    group_display=("第二测点" if point else ""),
                     display=f"{name} {axis.upper()} 轴速度",
                     description=("速度有效值。至少选测点 1 的 X 轴速度；第二测点不配即按单测点判"
                                  if point == "" and axis == "x" else "速度有效值，可不选")))
@@ -187,15 +195,26 @@ class VibrationIso(Domain):
                 OutputSpec(key="dominant_axis", display="最大值所在轴", value_type="string",
                            description="x / y / z；第二测点记为 x2 / y2 / z2"),
                 OutputSpec(key="iso_zone", display="烈度区", value_type="string",
-                           description="A 新投运 / B 可长期运行 / C 不宜长期连续运行 / D 足以造成损坏；停机时为「停机」"),
+                           description="A 新投运 / B 可长期运行 / C 不宜长期连续运行 / D 足以造成损坏；停机时为「停机」",
+                           stop_behavior=STOP_LITERAL,
+                           choices=("A", "B", "C", "D", STOPPED),
+                           choice_displays=("A 新投运", "B 可长期运行", "C 不宜长期连续运行",
+                                            "D 足以造成损坏", STOPPED)),
                 OutputSpec(key="iso_zone_code", display="烈度区(数值)", value_type="int",
-                           description="1=A 2=B 3=C 4=D，0=停机，给趋势曲线与报警门限用"),
+                           description="1=A 2=B 3=C 4=D，0=停机，给趋势曲线与报警门限用",
+                           stop_behavior=STOP_LITERAL,
+                           choices=("0", "1", "2", "3", "4"),
+                           choice_displays=(STOPPED, "A", "B", "C", "D")),
                 OutputSpec(key="iso_margin", display="距下一档余量", value_type="float", unit="mm/s",
-                           description="离更差一档的边界还有多远；已在 D 区时为负"),
+                           description="离更差一档的边界还有多远；已在 D 区时为负",
+                           stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="axial_ratio", display="轴向/径向比", value_type="float",
-                           description="轴向 ÷ 径向两轴较大者，取最大值所在测点"),
+                           description="轴向 ÷ 径向两轴较大者，取最大值所在测点",
+                           stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="direction_hint", display="方向性提示", value_type="string",
-                           description="★提示，不是结论：无频谱数据，仅凭三轴比例判断倾向；停机时为「停机」"),
+                           description="★提示，不是结论：无频谱数据，仅凭三轴比例判断倾向；停机时为「停机」",
+                           stop_behavior=STOP_LITERAL,
+                           choices=(STOPPED,)),
                 _run_state_spec(),
                 OutputSpec(key="evidence", display="判据摘要", value_type="string",
                            description="用了哪几路、判到哪一档、为什么没给"),
@@ -329,12 +348,18 @@ def _stop_threshold_spec() -> ParamSpec:
     return ParamSpec(
         key="stop_threshold", display="停机门槛", value_type="float", unit="mm/s",
         required=False, level="position",
+        # ★has_default=False（缺省即是）：界面**不要替它预置任何值** ——
+        #   替它填一个"看起来合理"的数，会在某些设备上把运行判成停机 ⇒ 静默停止诊断。
+        #   min 让界面当场拦住非正数，而不是等到采基线才失败（AICloud C-45 §3.3）。
+        blank_meaning="not_evaluated", min="0",
         description="速度最大值低于它即判停机：停机时不判烈度与方向。不填不判；没有缺省，按设备自己定")
 
 
 def _run_state_spec() -> OutputSpec:
+    # ★停机与否它自己都要写（否则界面无从知道现在是不是停机）⇒ stop_behavior 用缺省 written。
     return OutputSpec(key="run_state", display="运行状态", value_type="string",
-                      description="运行 / 停机 / 未判（未填停机门槛）。停机时数值类结论不更新，界面据此置灰")
+                      description="运行 / 停机 / 未判（未填停机门槛）。停机时数值类结论不更新，界面据此置灰",
+                      choices=(RUNNING, STOPPED, UNJUDGED))
 
 
 def run_state(params: dict[str, str], vel_max: float) -> tuple[str | None, Quality, str]:
