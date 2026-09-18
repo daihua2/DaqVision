@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>四类诊断模块说明</title>
+<style>
+body{
+  max-width:860px; margin:0 auto; padding:32px 20px 64px;
+  font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:15px; line-height:1.8; color:#1a1a1a; background:#fff;
+}
+h1{font-size:28px; margin:0 0 8px; border-bottom:2px solid #1a1a1a; padding-bottom:12px}
+h2{font-size:20px; margin:44px 0 10px; border-bottom:1px solid #ddd; padding-bottom:6px}
+h3{font-size:16px; margin:24px 0 6px}
+p{margin:0 0 12px}
+.sub{color:#666; margin-bottom:4px}
+.meta{color:#888; font-size:13px; margin-bottom:8px}
+code{font-family:Consolas,Menlo,monospace; font-size:13px; background:#f4f5f7; padding:1px 4px; border-radius:2px}
+pre{background:#f4f5f7; padding:14px 16px; overflow-x:auto; font-family:Consolas,Menlo,monospace; font-size:13px; line-height:1.6; margin:0 0 14px}
+table{border-collapse:collapse; width:100%; margin:0 0 16px; font-size:14px}
+th,td{border:1px solid #ddd; padding:7px 10px; text-align:left; vertical-align:top}
+th{background:#f4f5f7; font-weight:600; white-space:nowrap}
+.tw{overflow-x:auto}
+ul,ol{margin:0 0 14px; padding-left:24px}
+li{margin-bottom:6px}
+.note{border-left:3px solid #999; padding-left:12px; margin:0 0 12px; color:#444}
+.note b{color:#1a1a1a}
+hr{border:none; border-top:1px solid #ddd; margin:40px 0 0}
+footer{color:#666; font-size:13px; margin-top:16px}
+</style>
+</head>
+<body>
+
+<h1>四类诊断模块说明</h1>
+<p class="sub">振动、伺服、压装、变频器 —— 模块编排、应用算法、算法接口、数据流转、界面配置。</p>
+<p class="meta">AIIntegration（纯后端服务）· 2026-09-18 · 给协作同事（AICloud / daqgate / historystore）</p>
+
+<h2>一、一页看懂</h2>
+<p>AIIntegration 部署在 AISERVER，把各类 AI 诊断统一接进 AICloud。三条规矩贯穿所有模块：</p>
+<ol>
+  <li><b>算法域不知道实时库存在</b> —— 不碰连接、不碰 id、不碰 VQT。它只回答"给你这段数据，结论是什么"。</li>
+  <li><b>结论必须同时给出值、质量码、时刻</b>（VQT 三元组），在类型层强制，"只填值"写不出来。</li>
+  <li><b>算不出来就落质量码，不许编一个数</b> —— 也不许什么都不发（下游会读成"这段没数据"，查错方向就反了）。</li>
+</ol>
+
+<h2>二、协作方须知六条</h2>
+<p>不知道就会做错的六件，建议整读；其余章节可按需查阅。</p>
+<div class="note"><b>1. 停机时数值类结论不写，界面须凭 <code>run_state</code> 置灰。</b><br>
+点上保留停机前最后一值。不置灰的话，界面会显示成"停机时数值一直不动"。</div>
+<div class="note"><b>2. <code>anomaly_score</code> 是 0~100 的排序用分数，不是概率。</b><br>请勿按百分比呈现。</div>
+<div class="note"><b>3. 振动判级已改依 GB/T 6075.3 / 6075.7。</b><br>
+两侧必须同一依据，否则同一台设备两边算出不同的烈度区。</div>
+<div class="note"><b>4. 压装输入形态已改：一次压装 = 一个结构值点。</b><br>
+不再是"三个标量点 + 边界标记点"。压装横轴是位移不是时间。</div>
+<div class="note"><b>5. 压装界面须注明「本模型不判：漏装、零件破裂」。</b><br>
+模型只出四类，不写清楚会被当成"这两种情况它判为正常"。</div>
+<div class="note"><b>6. 导入外部模型要自述通道顺序、采样率、类别顺序，缺一项拒收。</b><br>
+这几件运行期都不报错，只会给出一个看起来完全正常的错结论。VFD 另需自述归一化方式。</div>
+
+<h2>三、四类模块一览</h2>
+<p>两个振动模块在界面上是<b>两个独立选项</b>，同一台设备可以都配，各自选采集点。</p>
+<div class="tw">
+<table>
+<tr><th>界面选项</th><th>代码</th><th>输入</th><th>算法</th><th>训练</th><th>现状</th></tr>
+<tr><td>经典算法振动诊断</td><td><code>vibration_iso</code></td><td>三轴速度有效值 + 温度</td><td>国标判级（规则）</td><td>不要</td><td>现场在跑</td></tr>
+<tr><td>AI 模型自训振动诊断</td><td><code>vibration_baseline</code></td><td>同上</td><td>自身基线偏离</td><td>要采基线</td><td>现场在跑</td></tr>
+<tr><td>AI 伺服/机械臂运行监测</td><td><code>servo_health</code></td><td>驱动器 9 路遥测</td><td>CNN-LSTM（工件）</td><td>导入工件</td><td>代码就绪</td></tr>
+<tr><td>AI 变频器（VFD）运行监测</td><td><code>vfd_health</code></td><td>15 路电气量</td><td>TCN 三头（工件）</td><td>导入工件</td><td>代码就绪</td></tr>
+<tr><td>AI 压装机运行监测</td><td>未落码</td><td>位移 / 速度 / 力曲线</td><td>CNN-LSTM / SVM</td><td>导入工件</td><td>等结构值点</td></tr>
+</table>
+</div>
+
+<h2>四、逐个模块</h2>
+
+<h3>4.1 经典算法振动诊断（<code>vibration_iso</code>）</h3>
+<div class="tw">
+<table>
+<tr><th>算法</th><td>取窗口内三轴速度<b>最大值</b> → 按 GB/T 6075.3（一般机组）或 GB/T 6075.7（泵）查限值表 → 判烈度区 A/B/C/D；另出轴向/径向比与方向性提示。</td></tr>
+<tr><th>输入</th><td>测点 1 的 X/Y/Z 速度（X 必填）+ 温度；可选第二测点同样五路。</td></tr>
+<tr><th>参数</th><td>机器分组、支承方式、泵类别、额定功率、额定转速、速度口径确认、轴向是哪一轴、停机门槛。</td></tr>
+<tr><th>结论点</th><td><code>vel_max</code> 速度最大值、<code>dominant_axis</code> 最大值所在轴、<code>iso_zone</code> 烈度区、<code>iso_zone_code</code> 烈度区(数值)、<code>iso_margin</code> 距下一档余量、<code>axial_ratio</code> 轴向/径向比、<code>direction_hint</code> 方向性提示、<code>run_state</code> 运行状态、<code>evidence</code> 判据摘要</td></tr>
+<tr><th>依赖</th><td>零第三方依赖（纯 Python 标准库）</td></tr>
+</table>
+</div>
+<div class="note"><b>判级依据已于 2026-09-18 改依国标</b>（原为 ISO 20816-3）。AICloud 侧设备建模同步改依同一依据 —— 两侧必须同一依据。</div>
+
+<h3>4.2 AI 模型自训振动诊断（<code>vibration_baseline</code>）</h3>
+<div class="tw">
+<table>
+<tr><th>算法</th><td>先采一条<b>基线</b>（这台设备正常运行时各通道的中位数与四分位距），之后每拍算偏离：<code>(当前 − 中位数) / (四分位距 / 1.349)</code>。<br>用中位数而不是均值：基线只有十来帧时，一两个离群值就能把标准差撑大，让之后的真偏离显得不显著。</td></tr>
+<tr><th>输入 / 参数</th><td>同 4.1；参数另有「采基线时认哪个标签算正常」。</td></tr>
+<tr><th>结论点</th><td><code>vel_z_max</code> 速度偏离、<code>ratio_drift</code> 三轴比例漂移、<code>temp_rise</code> 温升、<code>anomaly_score</code> 异常分、<code>run_state</code> 运行状态、<code>evidence</code> 判据摘要</td></tr>
+<tr><th>依赖</th><td>零第三方依赖</td></tr>
+</table>
+</div>
+<div class="note"><code>anomaly_score</code> 是 <b>0~100 的排序用分数，不是概率</b>。<br>
+<b>没有基线就说没有基线</b>：整组落 <code>model_not_loaded</code>，不拿任何默认值顶。样本少于 5 帧不出基线，采基线当场失败并说清。</div>
+
+<h3>4.3 停机判定（模块 1、2 共有）</h3>
+<p>两个振动模块都有可选参数 <code>stop_threshold</code> 停机门槛（mm/s）：三轴速度最大值低于它 ⇒ 判停机。</p>
+<ul>
+  <li>停机时<b>不判烈度、不出异常分、采基线时剔除停机帧</b>；</li>
+  <li>新增结论点 <code>run_state</code>（运行 / 停机 / 未判）；<code>iso_zone_code</code> 停机时写 0；</li>
+  <li><b>停机时数值类结论这一拍不写</b>，点上保留停机前最后一值 ⇒ 界面须凭 <code>run_state</code> 置灰；</li>
+  <li><b>没有缺省</b>，不填即不判 —— 门槛取决于设备本身，给一个"看起来合理"的数会静默停止诊断。</li>
+</ul>
+<p>已以 <code>AI-49</code> 知会 AICloud。</p>
+
+<h3>4.4 AI 伺服/机械臂运行监测（<code>servo_health</code>）</h3>
+<div class="tw">
+<table>
+<tr><th>算法</th><td>取 9 路遥测的一段窗口（现场 10 Hz、每 5 秒取最近 20 秒）→ CNN-LSTM → <b>正常 / 轴承退化</b> + 概率。</td></tr>
+<tr><th>输入</th><td>位置指令、实际位置、跟随误差、转速、转矩、Iq、电机温度、轴承温度、IGBT 温度 —— <b>9 路全必填</b>。</td></tr>
+<tr><th>参数</th><td>「模型」：CNN-LSTM / 决策树 / SVM，默认 CNN-LSTM。</td></tr>
+<tr><th>结论点</th><td><code>verdict</code> 结论、<code>probability</code> 概率、<code>evidence</code> 判据摘要</td></tr>
+<tr><th>依赖</th><td>numpy、onnxruntime</td></tr>
+</table>
+</div>
+<div class="note"><b>它不是振动诊断</b> —— 一个振动传感器都不用，全靠驱动器内部寄存器。要接它需要的是<b>驱动器通讯口</b>，与振动那条采集路径完全不同。<br>
+<b>机械臂不单独设模块</b>：每个关节配一条本诊断。</div>
+
+<h3>4.5 AI 变频器（VFD）运行监测（<code>vfd_health</code>）</h3>
+<div class="tw">
+<table>
+<tr><th>算法</th><td>取 15 路的 60 点窗口（1 Hz、每 10 秒取最近 60 秒）→ TCN <b>三个输出头</b>。</td></tr>
+<tr><th>输入</th><td>三相输入电压 ×3、三相输出电流 ×3、输出频率、电机输出功率、输出转矩、机柜温度、变压器三相温度 ×3、功率单元 Vdc 均值与极差 —— <b>15 路全必填</b>。</td></tr>
+<tr><th>参数</th><td><b>无</b>（单一模型）</td></tr>
+<tr><th>六类</th><td>正常 / 冷却系统退化 / 功率单元异常 / 输出电流不平衡 / 输入电网异常 / 过载·异常负载</td></tr>
+<tr><th>结论点</th><td><code>fault_type</code> 故障类型、<code>confidence</code> 置信度、<code>severity</code> 当前严重度、<code>severity_30s</code>、<code>severity_60s</code>、<code>severity_120s</code>、<code>evidence</code></td></tr>
+<tr><th>依赖</th><td>numpy、onnxruntime</td></tr>
+</table>
+</div>
+<div class="note"><b>未来严重度三条是模型直接给的</b>，不是本服务拿当前值外推的。</div>
+
+<h3>4.6 AI 压装机运行监测（未落码）</h3>
+<div class="tw">
+<table>
+<tr><th>算法</th><td>每次压装结束触发一次，CNN-LSTM / SVM → 4 类。</td></tr>
+<tr><th>四类</th><td>正常压装 / 卡滞 / 压装不到位 / 配合间隙异常</td></tr>
+<tr><th>界面</th><td><b>须注明「本模型不判：漏装、零件破裂」。</b></td></tr>
+</table>
+</div>
+<div class="note"><b>输入形态已于 2026-09-18 改变</b>（实时库 H-246）：<b>一次压装 = 一个结构值点</b>（位移、速度、力三条曲线同在一个值里），不再是"三个标量点 + 边界标记点"。理由：压装横轴是<b>位移不是时间</b>，拆成三个标量点等于强行按时间对齐；而一个值 = 一次压装，事件边界自然就有。<br>
+特征量（峰值力、RMS…）仍算完<b>写回标量点</b>。依赖的结构值点能力已点亮，但<b>尚未投放到现场</b>，故本模块暂未落码。</div>
+
+<h2>五、算法接口</h2>
+<p>新增一个算法域 = 往 <code>domains/</code> 丢一个 <code>.py</code>。<b>没有第二步</b> —— 不改骨架、不改路由、不改前端、不改配置。</p>
+<pre>class MyDomain(Domain):
+    key = "my_domain";  display = "界面上的名字";  version = "1.0.0"
+
+    def declare(self) -&gt; Declaration:
+        """我要什么输入、要什么参数、出什么结论。★只描述语义，不写任何 id。"""
+
+    def infer(self, frame) -&gt; list[Finding]:
+        """给一帧已经取好、对齐好、带质量码与真实时刻的数据，回结论。"""</pre>
+<ul>
+  <li><code>declare()</code> 的内容<b>原样交给 AICloud</b>，前端据此渲染配置界面 —— 加一个参数<b>不需要前端改代码</b>。</li>
+  <li><code>infer()</code> 拿到的 <code>frame</code> 里已经有：各路采样序列、台账参数、<b>当前启用的工件</b>（模型/基线）、<b>上一拍的跨帧状态</b>。这些都由骨架准备好，域不碰存储。</li>
+  <li>结论的形状是 <code>Finding(key, value, quality, t)</code>，<b>四个字段全部必填</b>。<code>t</code> 是<b>该结论所依据的数据的时刻</b>，不是算完的时刻、不是写入的时刻。</li>
+</ul>
+
+<h3>质量码</h3>
+<div class="tw">
+<table>
+<tr><th>码</th><th>含义</th><th>现场该查什么</th></tr>
+<tr><td><code>ok</code></td><td>可信</td><td>—</td></tr>
+<tr><td><code>no_input</code></td><td>一个样本都没取到</td><td>采集链路</td></tr>
+<tr><td><code>input_bad</code></td><td>有样本但全不可信</td><td>采集链路 / 传感器</td></tr>
+<tr><td><code>insufficient_samples</code></td><td>样本不够算</td><td>节拍、窗长</td></tr>
+<tr><td><code>config_incomplete</code></td><td>必填参数/采集点没配齐</td><td>配置界面</td></tr>
+<tr><td><code>model_not_loaded</code></td><td>没启用模型或基线</td><td>工件页 / 采基线</td></tr>
+<tr><td><code>compute_error</code></td><td>算的过程中出错</td><td>模型 / 提工单</td></tr>
+</table>
+</div>
+
+<h2>六、数据流转</h2>
+<div class="tw">
+<table>
+<tr><th>步</th><th>做什么</th></tr>
+<tr><td>① 配置</td><td>AICloud <code>PutBinding</code> → 骨架记下"这条诊断用哪些点、什么参数、什么节拍"</td></tr>
+<tr><td>② 建点</td><td>骨架 <code>PushEntityConfigs</code> → 实时库：按 <code>declare()</code> 的结论点建点，推<b>全量快照</b></td></tr>
+<tr><td>③ 取数</td><td>骨架 <code>QueryHistory</code> → 实时库：按节拍取窗口内的采样，带质量码与真实时刻</td></tr>
+<tr><td>④ 成帧</td><td>骨架对齐数据，附上台账参数、当前启用工件、上一拍跨帧状态</td></tr>
+<tr><td>⑤ 推理</td><td>算法域 <code>infer(frame)</code> → <code>[Finding, …]</code></td></tr>
+<tr><td>⑥ 回流</td><td>骨架 <code>PostVQT</code> → 实时库：写结论点</td></tr>
+<tr><td>⑦ 呈现</td><td>AICloud 从实时库读结论点</td></tr>
+</table>
+</div>
+<ul>
+  <li><b>只有骨架进程写实时库</b>。重型推理进程（视频等）可用同一张证书<b>只读直连</b>，但不链写接口。</li>
+  <li><b>写路径断而复连、或对端换实例 ⇒ 必须重推全量快照。</b>引擎重启后点定义会从实体流里消失，而<b>值照样写得进</b>、健康口照样 ready —— 不重推就不会自愈。</li>
+  <li><b>结论点的建立是自动的</b>：域的 <code>declare()</code> 多一条输出，下一拍就自动补建点。</li>
+  <li><b>回溯判别</b>（拿历史片段用当前模型重跑一遍）<b>不写回实时库</b>，也不动线上的跨帧状态。</li>
+</ul>
+
+<h2>七、界面配置</h2>
+<p>振动诊断走五步；伺服 / VFD / 压装三类没有第 5 步，改为导入模型工件。</p>
+<ol>
+  <li><b>在设备上加诊断</b> —— 一台设备同一种诊断只允许一条，多测点放进同一条里；依赖没装上的模块不在列表里显示。</li>
+  <li><b>选采集点</b> —— 支持第二测点（可选一组「第二测点 X/Y/Z 速度、温度」，不配即单测点）。候选点只列本设备下的点。</li>
+  <li><b>填参数</b> —— 取数节拍（间隔、窗长）默认均 60 秒、允许修改。</li>
+  <li><b>保存生效</b> —— 必选采集点没配齐<b>也允许保存</b>，界面显示缺哪几项，结论带「配置不全」质量码；<b>保存即启用</b>，另给停用按钮。</li>
+  <li><b>采基线</b> —— 只对「AI 模型自训振动诊断」适用：选一段正常运行时间 → 点「采集基线」→ 完成后自动启用。标注与建训练集由后台自动做。</li>
+</ol>
+
+<h3>导入模型工件（伺服 / VFD / 压装）</h3>
+<p>在工件页上传模型 → 校验通过 → 启用。导入时会做严格校验，模型必须自述以下几件，缺任何一项<b>拒收</b>：</p>
+<div class="tw">
+<table>
+<tr><th>要自述</th><th>缺了会怎样</th></tr>
+<tr><td>通道顺序</td><td>喂错顺序不会报错，只会给出一个自信的错结论</td></tr>
+<tr><td>采样率</td><td>无从核对"这段窗口的疏密对不对得上模型期望的"</td></tr>
+<tr><td>类别顺序</td><td>反了就是把"正常"报成"过载"</td></tr>
+<tr><td>归一化方式（仅 VFD）</td><td>少做一次 z-score 不报错，模型照样吐出像模像样的概率与严重度</td></tr>
+</table>
+</div>
+<div class="note">这几件的共同点 —— <b>运行期不会报错，只会给出一个看起来完全正常的错结论</b>。所以只能在导入这一刻挡。</div>
+
+<h2>八、现状与前置</h2>
+<div class="tw">
+<table>
+<tr><th>模块</th><th>能不能用</th><th>卡在哪</th></tr>
+<tr><td>经典算法振动诊断</td><td>现场在跑</td><td>—</td></tr>
+<tr><td>AI 模型自训振动诊断</td><td>现场在跑</td><td>—</td></tr>
+<tr><td>AI 伺服/机械臂</td><td>代码就绪</td><td><b>驱动器通讯口未通</b>（点已建、链路未通）；且我方没有模型权重，需导入</td></tr>
+<tr><td>AI 变频器</td><td>代码就绪</td><td><b>现场 15 路一个点没接</b>；需导入模型权重</td></tr>
+<tr><td>AI 压装机</td><td>未落码</td><td>实时库<b>结构值点尚未投放到现场</b></td></tr>
+</table>
+</div>
+<div class="note"><b>伺服、VFD、压装三类，我方手上都没有可用的模型权重</b> —— 原项目的训练代码与数据未找到，或权重不适合由本仓携带。这三类要真正出结论，<b>需要有人提供训练好的模型</b>（ONNX，并按第七节自述四件事）。</div>
+
+<hr>
+<footer>
+想看细节：骨架与算法模块的分界判据见 <code>doc/骨架与算法模块分界.md</code>；配置流程与各模块定案见 <code>doc/诊断配置流程定案.md</code>；压装/波形的结构值点定案见 <code>doc/结构值点定案.md</code>；各模块的实现与验证记录见 <code>AIIntegration/README.md</code>；原四个项目的调查结论见 <code>doc/原四项目调查.md</code>。
+</footer>
+
+</body>
+</html>
