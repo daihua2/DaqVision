@@ -16,6 +16,8 @@ import logging
 import signal
 import sys
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
 from concurrent import futures
 
 import grpc
@@ -41,6 +43,44 @@ from .workbench import Workbench
 logger = logging.getLogger(__name__)
 
 VERSION = "0.1.0"
+
+
+def _build_stamp() -> str:
+    """包内**最新一个源码文件的时刻**，形如 `20260916T152600Z`。
+
+    ★为什么要这一格（AICloud `C-46`，我方 `AI-53 §3` 许下的）：
+      `InfoReply.service_version` 此前是写死的 `"0.1.0"`，从 1.0 至今没动过 ——
+      **它回答不了"跑的是哪个 build"**。于是「契约投了、实现没投」这种事
+      在接口上**完全看不出来**：对端拨 `GetInfo` 一切正常，而跑的是两天前的码。
+      这次能被发现，纯粹是因为我方碰巧升了 `proto_version`；
+      而**大多数改动只动实现、不动契约**，那时就没有任何信号。
+
+    ★取源码 mtime 而不是编译期常量，是为了**不依赖出包脚本**：
+      现场那台正是被直接 `scp` 覆盖的（没走 `make-release.sh`），
+      编译期写入的版本号在那条路径上根本不会更新，而 mtime 会。
+
+    算不出来就回空串（**绝不因为取不到版本号而拦住启动**）。
+    """
+    try:
+        newest = 0.0
+        for f in Path(__file__).resolve().parent.rglob("*.py"):
+            if "__pycache__" in f.parts:
+                continue
+            newest = max(newest, f.stat().st_mtime)
+        if newest <= 0:
+            return ""
+        return datetime.fromtimestamp(newest, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    except Exception:  # noqa: BLE001 —— 版本号取不到不是拦住服务的理由
+        return ""
+
+
+def service_version() -> str:
+    """对外自述的服务版本：`0.1.0+src20260916T152600Z`。
+
+    ★后半段是**源码时刻**，一眼看得出新旧 —— 对端不必去 `ls` 我方的机器。
+    """
+    stamp = _build_stamp()
+    return f"{VERSION}+src{stamp}" if stamp else VERSION
 
 
 def _setup_logging(store: LogStore) -> None:
@@ -108,7 +148,7 @@ class Service:
         cfg = self.cfg
         _setup_logging(self.logstore)
 
-        logger.warning("AIIntegration %s 启动", VERSION)
+        logger.warning("AIIntegration %s 启动", service_version())
         for line in cfg.describe():
             logger.info("配置生效值: %s", line)
 
@@ -187,7 +227,7 @@ class Service:
             return rediagnose_segment(seg, domains=domains, bindings=bindings,
                                       fetcher=Fetcher(client), artifacts=active_arts)
 
-        svc = api.ApiService(guid=guid, version=VERSION, logstore=self.logstore,
+        svc = api.ApiService(guid=guid, version=service_version(), logstore=self.logstore,
                              domains=domains, bindings=bindings, load_errors=load_errors,
                              # 绑定一变就重新同步：建点、推快照、起线程。
                              on_bindings_changed=(sched.sync if can_write else None),
@@ -206,7 +246,7 @@ class Service:
                              artifacts=active_arts, client=client, can_write=can_write,
                              states=workbench)
         http = httpapi.make_server(
-            cfg.http_listen, guid=guid, version=VERSION, domains=list(domains),
+            cfg.http_listen, guid=guid, version=service_version(), domains=list(domains),
             artifacts_dir=cfg.data_dir / "artifacts",
             reports_dir=cfg.data_dir / "reports", can_write=can_write, events=events,
             scheduler=sched,      # /health 的 snapshot 那一格要问它（AICloud C-27 §3.2）
