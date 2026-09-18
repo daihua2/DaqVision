@@ -22,12 +22,13 @@ from .apiproto import aiintegration_pb2 as pb
 from .bindings import Binding, BindingStore
 from .domains import LoadedDomain
 from .logstore import LogFilter, LogLevel, LogStore
+from .pointmap import default_point_name
 from .quality import Quality
 
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.9"
+PROTO_VERSION = "1.10"
 
 
 def _ts(dt: datetime) -> object:
@@ -58,7 +59,7 @@ class ApiService(WorkbenchApiMixin):
                  domains: dict[str, LoadedDomain], bindings: BindingStore,
                  load_errors: list[tuple[str, str]] | None = None,
                  on_bindings_changed=None, workbench=None, rediagnose=None,
-                 trainer=None) -> None:
+                 trainer=None, points=None) -> None:
         self._guid = guid
         self._version = version
         self._logs = logstore
@@ -74,6 +75,9 @@ class ApiService(WorkbenchApiMixin):
         self._rediagnose = rediagnose
         # 训练执行器。没接则 StartTraining/CancelTrainJob 如实回"未接"，**不建注定没人跑的任务**。
         self._trainer = trainer
+        # 点表。没接则 `Binding.points` 回空 —— 那是**如实**的（我方确实答不出点号），
+        # 不是给一个 0 冒充。贵方据此知道"这一格现在没有"，而不是"点号是 0"。
+        self._points = points
 
     # ── 身份与域 ──────────────────────────────────────────────────────────
     def GetInfo(self, request, context):
@@ -91,7 +95,10 @@ class ApiService(WorkbenchApiMixin):
         #   每个域回一遍只会重复八份一样的表，还给了它们各自改口径的机会。
         for q in Quality:
             reply.quality_codes.add(code=q.value, display=q.display(),
-                                    is_fault=q.is_fault(), hint=q.hint())
+                                    is_fault=q.is_fault(), hint=q.hint(),
+                                    # ★1.10：两套编号的对照。看结论那一侧拿到的是数值码，
+                                    #   没有这一格，「按 is_fault 区分不是设备故障」在那个界面上落不了地。
+                                    status_code=q.to_status_code())
         return reply
 
     def ListDomains(self, request, context):
@@ -136,6 +143,17 @@ class ApiService(WorkbenchApiMixin):
             out.roles[role] = gid
         for k, v in b.params.items():
             out.params[k] = v
+        # ★1.10：本条绑定产出哪些结论点 + 它们的 localId（贵方 C-47 §3）。
+        #   没有它，看结论那一侧只有点号与质量码，按 stop_behavior 置灰就只能前端写死点名单。
+        #   ★点还没建时 local_id=0 —— **0 不是可用点号**，契约里已写明不可拿它去查。
+        if self._points is not None:
+            loaded = self._domains.get(b.domain)
+            outs = loaded.declaration.outputs if loaded is not None else ()
+            for o in outs:
+                lid = self._points.local_id_of(b.domain, b.binding, o.key) or 0
+                out.points.add(key=o.key, local_id=lid,
+                               name=default_point_name(b.domain, b.binding, o.key),
+                               unit=o.unit, value_type=o.value_type)
         loaded = self._domains.get(b.domain)
         if loaded is not None:
             # 只算**测点类**必填角色：图片类输入不绑 globalId，由上传触发，不存在"没绑"。

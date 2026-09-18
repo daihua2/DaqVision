@@ -232,7 +232,7 @@ class Service:
                              # 绑定一变就重新同步：建点、推快照、起线程。
                              on_bindings_changed=(sched.sync if can_write else None),
                              workbench=workbench, rediagnose=rediagnose,
-                             trainer=trainer)
+                             trainer=trainer, points=points)
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
                              handlers=(api.build_handler(svc),))
         if server.add_insecure_port(cfg.api_listen) == 0:

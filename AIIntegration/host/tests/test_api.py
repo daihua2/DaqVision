@@ -21,6 +21,7 @@ from aiintegration.apiproto import aiintegration_pb2 as pb
 from aiintegration.bindings import Binding, BindingStore
 from aiintegration.domains import discover
 from aiintegration.logstore import LogLevel, LogStore
+from aiintegration.pointmap import PointMap
 from aiintegration.workbench import Workbench
 
 UTC = timezone.utc
@@ -97,7 +98,7 @@ class TestInfoAndDomains(ApiTestBase):
     def test_GetInfo_带身份与契约版本(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
         self.assertEqual(r.guid, "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(r.proto_version, "1.9")
+        self.assertEqual(r.proto_version, "1.10")
         self.assertEqual(r.domain_count, 1)
 
     def test_装载失败不藏(self):
@@ -341,6 +342,82 @@ class TestContract19(ApiTestBase):
         self.assertEqual(ps["thr"].min, "0", "下限没带出来，界面拦不住负数")
         self.assertTrue(ps["note"].has_default)
         self.assertEqual(ps["note"].default, "无")
+
+
+class TestContract110(unittest.TestCase):
+    """契约 1.10 的两格（AICloud `C-47` 点名，两条都是我方欠的）。
+
+    ★`Binding.points`：看结论那一侧走**数据面直连实时库**，只有点号与质量码，
+      没有「域/绑定/结论 key」⇒ 没有这张映射，按 `stop_behavior` 置灰就只能前端写死点名单。
+    ★`QualityCodeInfo.status_code`：字典里的 `code` 是我方语义码（字符串），
+      而结论点写进实时库带的是**数值码** —— 两套编号此前在契约里没有对应关系。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        dom_dir = root / "domains"; dom_dir.mkdir()
+        (dom_dir / "vib.py").write_text(DOM, encoding="utf-8")
+        loaded, failed = discover(dom_dir)
+        self.domains = {d.key: d for d in loaded}
+        self.bindings = BindingStore(root / "b.db")
+        self.points = PointMap(root / "p.db")
+        self.svc = ApiService(
+            guid="11111111-2222-3333-4444-555555555555", version="0.1.0",
+            logstore=LogStore(capacity=10), domains=self.domains,
+            bindings=self.bindings, points=self.points)
+        self.bindings.put(Binding(domain="vib", binding="dev1", roles={"x_acc": 101},
+                                  interval_sec=60, window_sec=60, enabled=True))
+
+    def tearDown(self):
+        self.points.close(); self.bindings.close(); self._tmp.cleanup()
+
+    def list_one(self):
+        r = self.svc.ListBindings(pb.ListBindingsRequest(), None)
+        return r.bindings[0]
+
+    def test_绑定带出它产出的结论点(self):
+        b = self.list_one()
+        got = {p.key: p for p in b.points}
+        self.assertEqual(set(got), {o.key for o in self.domains["vib"].declaration.outputs},
+                         "结论点没带全 —— 少一个，那个点在界面上就永远对不上域/绑定")
+        self.assertEqual(got["health_score"].value_type, "float")
+        self.assertEqual(got["health_score"].unit, "分")
+        self.assertTrue(got["health_score"].name.startswith("AI.vib.dev1."))
+
+    def test_点还没建时localId是0而不是编一个(self):
+        """★0 不是可用点号。回一个假的号会让对端**静默查到别人的点**。"""
+        b = self.list_one()
+        self.assertTrue(all(p.local_id == 0 for p in b.points))
+
+    def test_建了点之后带出真号(self):
+        lid = self.points.ensure("vib", "dev1", "health_score",
+                                 name="AI.vib.dev1.health_score",
+                                 unit="分", value_type="float").local_id
+        self.assertGreater(lid, 0)
+        got = {p.key: p for p in self.list_one().points}
+        self.assertEqual(got["health_score"].local_id, lid)
+        self.assertEqual(got["zone"].local_id, 0, "没建的那条不该跟着变")
+
+    def test_没接点表就回空而不是给一堆0(self):
+        """没接 = 我方确实答不出点号。回空是**如实**；给一串 0 会被当成"点号是 0"。"""
+        svc = ApiService(guid="1"*8 + "-2222-3333-4444-555555555555", version="0.1.0",
+                         logstore=LogStore(capacity=10), domains=self.domains,
+                         bindings=self.bindings)
+        b = svc.ListBindings(pb.ListBindingsRequest(), None).bindings[0]
+        self.assertEqual(list(b.points), [])
+
+    def test_质量码字典带数值码且与出向映射一致(self):
+        from aiintegration.quality import Quality
+        r = self.svc.GetInfo(pb.InfoRequest(), None)
+        got = {q.code: q for q in r.quality_codes}
+        for q in Quality:
+            self.assertEqual(got[q.value].status_code, q.to_status_code(),
+                             f"{q.value} 的数值码与出向映射对不上 —— 对照表就是错的")
+        # ★不是 0 —— 0 在 daq.StatusCode 里不是"正常"。这条差点被我方写进契约注释里。
+        self.assertEqual(got["ok"].status_code, 1)
+        self.assertNotEqual(got["model_not_loaded"].status_code, 0,
+                            "坏码不该是 0，那会被读成正常")
 
 
 class TestDeleteBindingClearsState(unittest.TestCase):

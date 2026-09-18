@@ -117,6 +117,16 @@ message QualityCodeInfo {
   string display  = 2;   // 如 "无输入"
   bool   is_fault = 3;   // ★false = 不是设备故障，界面别渲染成告警色
   string hint     = 4;   // "现场该查什么"，如 "采集链路"
+  // ★**写进实时库时带的数值状态码**（1.10，贵方 C-47 §4-2 点名）。
+  //   由来：本表的 `code` 是我方**本口的语义码**（字符串），
+  //   而结论点写进实时库带的是**实时库的数值码**（如 `-1034`）——
+  //   看结论那一侧拿到的是后者。两套编号此前在契约里**没有对应关系**，
+  //   于是"按 `is_fault` 区分不是设备故障"这条规矩，在真正会被现场看到的界面上落不了地。
+  //   ⇒ 这一格就是那张对照。
+  //   ★`ok` 对应 **`1`**（`daq.StatusCode.Ok`），**不是 0** —— 0 在那张枚举里不是"正常"。
+  //     另请注意：实时库**点值**的好码是 `QualityGood(5000)`，`Ok(1)` 属通用操作成功那一族；
+  //     我方结论点出向写的是 `1`，贵方按本表对照即可，不必自己推。
+  int32  status_code = 5;
 }
 message DomainLoadError {
   string file   = 1;
@@ -296,6 +306,28 @@ message Binding {
   //     **不会反写**当初用仿真数据训出来的工件（照 `Sample.label` 那条既有规矩）。
   //   ★**空 ≠ 现场**：请显示「未声明」，且与 `field` 用不同样式（贵方 C-36 §4.2.1）。
   string data_origin = 9;
+
+  // ── 1.10（贵方 C-47 §3 点名；我方 AI-41 早就许过这个出口，一直没落契约）──────
+  // ★**本条绑定产出哪些结论点，以及它们的 localId**。
+  //   由来：看结论那一侧走的是**数据面直连实时库**（趋势 / 组态图读点），
+  //   那条路上只有点号与质量码，**没有「域 / 绑定 / 结论 key」**。
+  //   ⇒ 没有这张映射，贵方要按 `OutputSpec.stop_behavior` 把停机时的数值置灰，
+  //     就只能在前端写死一张点名单 —— 而那正是我方 `AI-51 §3` 反对、
+  //     `AI-52 §3` 自己也认下不该做的做法。**是我方欠的一环，不是贵方做法不对。**
+  //
+  // ★取到 `local_id` 后，平台拿 `(AI 服务 guid, local_id)` 走 hs `LookupGlobal` 铸 globalId。
+  //   **`local_id=0` 表示该点尚未建**（绑定刚存、还没走到建点那一步）——
+  //   ★**0 不是一个可用的点号**，请勿拿它去查，那会静默查到别人的点。
+  repeated ConclusionPoint points = 10;
+}
+
+// 一条结论点的结构化出口（1.10）。字段与我方 `AI-41` 许诺的那个形状一致。
+message ConclusionPoint {
+  string key        = 1;   // 域内结论名，与 `OutputSpec.key` 逐字一致
+  int32  local_id   = 2;   // ★本服务内的点号；**0 = 尚未建点**，不可用
+  string name       = 3;   // 点名（`AI.<域>.<绑定>.<结论名>`）
+  string unit       = 4;
+  string value_type = 5;   // float | int | bool | string
 }
 message ListBindingsRequest { string domain = 1; }   // 空 = 全部
 message ListBindingsReply   { repeated Binding bindings = 1; }

@@ -83,7 +83,7 @@ class TestServiceBoot(unittest.TestCase):
 
     def test_没有写路径也起得来且域装上了(self):
         info = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
-        self.assertEqual(info.proto_version, "1.9")
+        self.assertEqual(info.proto_version, "1.10")
         # ★服务版本必须带**源码时刻**：写死的版本号回答不了"跑的是哪个 build"，
         #   于是"契约投了、实现没投"在接口上完全看不出来（AICloud C-46 实际踩到）。
         self.assertRegex(info.service_version, r"^\d+\.\d+\.\d+\+src\d{8}T\d{6}Z$",
