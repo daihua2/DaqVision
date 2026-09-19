@@ -11,3 +11,5 @@ $PY -W ignore sca_recent.py "$DATA"             | tee out/2_velocity_recent.txt
 for f in env kurt crest; do
   $PY -W ignore sca_envelope.py "$DATA" "$f"   | tee "out/3_${f}.txt"
 done
+$PY -W ignore sca_methods.py "$DATA"            | tee out/4_methods.txt
+$PY -W ignore sca_rule.py "$DATA"               | tee out/5_rule.txt
