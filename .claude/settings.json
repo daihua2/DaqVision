@@ -48,7 +48,8 @@
       "PowerShell(Get-Date)",
       "PowerShell(git branch:*)",
       "Bash(journalctl:*)",
-      "Bash(curl -s --max-time 8 http://127.0.0.1:50071/health)"
+      "Bash(curl -s --max-time 8 http://127.0.0.1:50071/health)",
+      "PowerShell(wsl bash -c \"scp -q /mnt/c/Users/rtinf/AppData/Local/Temp/claude/d--Project-daqvision/45a8ea16-773d-4839-a45e-388237fc1e98/scratchpad/deploy-1.10.sh *)"
     ],
     "ask": [
       "Bash(git push --force:*)",

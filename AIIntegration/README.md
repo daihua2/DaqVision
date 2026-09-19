@@ -1391,3 +1391,50 @@ stop_threshold: has_default=false  min='0'  blank_meaning='not_evaluated'
 | 伺服 / VFD 两个域上现场 | 要先在现场装 `numpy` + `onnxruntime`；且那两类**现在装了也出不了结论**（无输入、无权重）|
 | `vibration_baseline` 重采基线 | 要人选一段正常运行时间。**不是我方能替用户定的** |
 | 旧的 12 个 `vibration_lowfreq` 点怎么处置 | 有意留着。要不要清理另说，我方不顺手做 |
+
+---
+
+## 28. 部署记录：现场投到 1.10 + 伺服与变频器两域上线（2026-09-19，用户授权）
+
+### 28.1 投了什么、没投什么
+
+| 投 | 不投 | 为什么不投 |
+| --- | --- | --- |
+| 契约 1.10 实现（`Binding.points`、`QualityCodeInfo.status_code`，`AI-57` 许下的） | `press_fit.py` | 仍是已作废的「一次压装一个值」（`AI_PressCurve`）设计；装上会经 `ListDomains` 把作废形态亮给 AICloud。待按逐点结构 + 按字段绑定重写（定义文档 §6.3、§10） |
+| `servo_health`、`vfd_health` 两域 | `vision_helmet.py` | 缺 `cv2` |
+| 本服务 venv 补 `numpy 2.2.6`、`onnxruntime 1.23.2` 及其运行依赖 | protobuf 新版 | pip 把 `protobuf 7.36.2` 当依赖拉了下来；现场 7.36.1 已满足且是三环境测过的版本 ⇒ 从投放件里删掉，免得被顺手升级 |
+
+★依赖版本**逐个对齐 vision 测试环境**（grpcio 1.83.1 / protobuf 7.36.1 本就一致）；`onnx`、`opencv` 只为测试/视觉域，不装。
+★域的重依赖**没有现成出包机制**（`requirements.txt` 里指向的 `packaging/README.md` 不存在），本次手工下 wheel、离线装。
+
+### 28.2 步骤（每步不过就停）
+
+1. 三环境串行全量：**各 734 条全过**（3.12 与 py310 各跳过 119 条视觉用例，vision 环境 0 跳过）；
+2. 现场只读预检：记端口/进程号基线、内存（可用 2.4 GB）、服务健康；
+3. 出投放件：`host/aiintegration` + 四个域 + 8 个 wheel；属主 0:0、644/755、无 CR、无编译缓存、不含 `press_fit`/`vision_helmet`/protobuf；
+4. 传暂存目录 `/root/aii-stage-20260919/`，**sha256 两端一致**（`a0ea8293…`）；
+5. 部署脚本：预检 → **停服后**备份（`host.bak-20260919-deploy110`、`domains.bak-…`、`data/backup-20260919-deploy110/`，含 `pip freeze`；WAL 库停服后备份才一致）→ 离线装依赖并核 protobuf/grpcio **未变** → 铺代码并强制属主权限 → 起服；
+6. 回滚脚本同目录 `rollback-1.10.sh`（恢复代码与库；新装依赖留在 venv，旧代码不 import，无害）。
+
+★部署一步两次被自动审批判为「生产部署」拦下，用户在设置里加了**只限本次脚本**的放行规则后执行。
+
+### 28.3 投后实测
+
+```
+service_version = 0.1.0+src20260919T135034Z
+proto_version   = 1.10        domain_count = 4        load_errors = 无
+quality_codes   = 8 条，全部带 status_code（ok=1、input_bad=-1000、no_input=-1002、
+                  model_not_loaded=-1034、config_incomplete=-1001 …）
+domains         = servo_health, vfd_health, vibration_baseline, vibration_iso
+bindings        = vibration_baseline/khb-f1-g1-v1 points=6；vibration_iso/khb-f1-g1-v1 points=9
+启动以来 error/traceback = 0；结论点快照 27 个点 accepted=29
+```
+
+端口基线：本服务 50070/50071 换进程号（预期）。另有 `sshd` 转发口、几个 `node`、8084 的 `__debug_bin` 换了号 ——
+发生在记基线（21:46）到部署（22:31）之间，属他人远程开发会话；部署脚本只停启了 `aiintegration`。
+
+### 28.4 仍待办
+
+- ★**函告 AICloud**：1.10 实现已投（`C-47` 两件可用）、新上两域（**无绑定、无输入、无模型**，装上只为界面能按自述渲染）—— 草稿待用户过目；
+- `vibration_baseline` **重采基线**（要人选正常运行时段；实时库只剩约 1.5 天，`C-49`）；
+- 伺服、VFD 出结论还差输入与模型权重（外部导入工件）。
