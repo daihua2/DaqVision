@@ -1,0 +1,25 @@
+Bearing1_3  帧 2375 寿命   396min  vel:336  acc:172  kurt:147  crest:122  hf:91  envpk:-
+Bearing1_4  帧 1428 寿命   238min  vel:52  acc:57  kurt:58  crest:58  hf:57  envpk:7
+Bearing1_5  帧 2463 寿命   410min  vel:-  acc:9  kurt:13  crest:10  hf:9  envpk:9
+Bearing1_6  帧 2448 寿命   408min  vel:143  acc:136  kurt:141  crest:136  hf:136  envpk:136
+Bearing1_7  帧 2259 寿命   376min  vel:38  acc:88  kurt:225  crest:203  hf:175  envpk:112
+Bearing2_3  帧 1955 寿命   326min  vel:2  acc:283  kurt:283  crest:283  hf:283  envpk:-
+Bearing2_4  帧  751 寿命   125min  vel:-  acc:60  kurt:80  crest:70  hf:85  envpk:2
+Bearing2_5  帧 2311 寿命   385min  vel:-  acc:2  kurt:337  crest:318  hf:2  envpk:-
+Bearing2_6  帧  701 寿命   117min  vel:101  acc:2  kurt:6  crest:3  hf:3  envpk:-
+Bearing2_7  帧  230 寿命    38min  vel:15  acc:1  kurt:1  crest:1  hf:-  envpk:-
+Bearing3_3  帧  434 寿命    72min  vel:-  acc:60  kurt:22  crest:2  hf:60  envpk:2
+Bearing1_1  帧 2803 寿命   467min  vel:304  acc:231  kurt:248  crest:248  hf:195  envpk:-
+Bearing1_2  帧  871 寿命   145min  vel:5  acc:120  kurt:120  crest:120  hf:120  envpk:-
+Bearing2_1  帧  911 寿命   152min  vel:-  acc:129  kurt:133  crest:130  hf:128  envpk:129
+Bearing2_2  帧  797 寿命   133min  vel:79  acc:103  kurt:102  crest:8  hf:102  envpk:8
+Bearing3_1  帧  515 寿命    86min  vel:58  acc:4  kurt:38  crest:19  hf:76  envpk:-
+Bearing3_2  帧 1637 寿命   273min  vel:2  acc:33  kurt:237  crest:34  hf:34  envpk:-
+
+== 汇总（17 台）：提前量中位数（分钟 / 占寿命）、有报警的台数、早段误报中位数、单调性中位数
+vel    提前     55 min / 0.37  报警台数 12/17  早段报警 0.02（>0.2 的台数 3）  单调  0.42  报警后持续 0.87（≥0.8 的台数 7）
+acc    提前     60 min / 0.33  报警台数 17/17  早段报警 0.02（>0.2 的台数 5）  单调 -0.25  报警后持续 0.99（≥0.8 的台数 11）
+kurt   提前    120 min / 0.53  报警台数 17/17  早段报警 0.26（>0.2 的台数 12）  单调  0.32  报警后持续 0.67（≥0.8 的台数 7）
+crest  提前     70 min / 0.31  报警台数 17/17  早段报警 0.18（>0.2 的台数 7）  单调  0.23  报警后持续 0.67（≥0.8 的台数 6）
+hf     提前     88 min / 0.44  报警台数 16/17  早段报警 0.02（>0.2 的台数 7）  单调  0.32  报警后持续 0.99（≥0.8 的台数 10）
+envpk  提前      8 min / 0.04  报警台数  8/17  早段报警 0.03（>0.2 的台数 1）  单调  0.05  报警后持续 0.74（≥0.8 的台数 4）

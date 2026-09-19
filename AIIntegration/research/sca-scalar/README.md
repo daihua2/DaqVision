@@ -56,7 +56,8 @@
 | `sca_envelope.py kurt` / `crest` | 峭度 / 波峰因数（全频带加速度） | 两种都做 |
 
 复跑：`bash run_all.sh /mnt/d/download/AIRef/datasets/sca`（环境 `~/research-venv`，numpy + scipy，
-**不碰**三个测试环境）；输出在 `out/`。
+**不碰**三个测试环境）；输出在 `out/`。★2026-09-19 本机 WSL 中途失去响应（`E_UNEXPECTED`），
+实验九改在 Windows 侧独立 venv 跑（脚本不依赖平台，路径换成 `D:\download\...` 即可）。
 
 ## 3 ★为什么不能只看命中率
 
