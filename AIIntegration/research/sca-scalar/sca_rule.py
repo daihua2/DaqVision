@@ -21,6 +21,10 @@ from sca_baseline import load, raw_list, sides_of
 from sca_methods import _local_noise, cpw, ses
 
 
+#: 内圈是否把「±转频边带」当硬门槛。实验七：当门槛只增漏报、不减误报 ⇒ 可关（命令行 noside）。
+SIDEBAND_GATE = True
+
+
 def n_harm(f, S, ff, shaft, inner, harm_thr=3.0, side_thr=2.0, max_h=6) -> int:
     df = f[1] - f[0]
     if ff <= 0 or ff * 1.02 >= f[-1]:
@@ -37,7 +41,7 @@ def n_harm(f, S, ff, shaft, inner, harm_thr=3.0, side_thr=2.0, max_h=6) -> int:
             fc = f[j]
         if S[j] < harm_thr * noise:
             break
-        if inner and shaft > 0:
+        if inner and shaft > 0 and SIDEBAND_GATE:
             ok = any(((w := (f >= f[j] + s * shaft - 2 * df) & (f <= f[j] + s * shaft + 2 * df)).any()
                       and S[w].max() >= side_thr * noise) for s in (-1, 1))
             if not ok:
@@ -97,4 +101,7 @@ def main(root: str) -> None:
 
 
 if __name__ == "__main__":
+    if "noside" in sys.argv[2:]:
+        SIDEBAND_GATE = False
+    print(f"== 内圈边带门槛 {'开' if SIDEBAND_GATE else '关'}")
     main(sys.argv[1])

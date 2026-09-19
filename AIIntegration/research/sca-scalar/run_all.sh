@@ -13,3 +13,7 @@ for f in env kurt crest; do
 done
 $PY -W ignore sca_methods.py "$DATA"            | tee out/4_methods.txt
 $PY -W ignore sca_rule.py "$DATA"               | tee out/5_rule.txt
+$PY -W ignore sca_rule.py "$DATA" noside        | tee out/5b_rule_noside.txt
+$PY -W ignore cwru_check.py "${CWRU:-/mnt/d/download/AIRef/datasets/cwru}"        | tee out/6_cwru.txt
+$PY -W ignore cwru_check.py "${CWRU:-/mnt/d/download/AIRef/datasets/cwru}" noside | tee out/6b_cwru_noside.txt
+$PY -W ignore sca_lowfs.py "$DATA"              | tee out/7_lowfs.txt
