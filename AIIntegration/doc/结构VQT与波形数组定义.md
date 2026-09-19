@@ -419,3 +419,67 @@ Q 整段一份、两个 f32 列各自 XOR** —— 这正是标量点已经享�
 
 多采样率同步、变转速带键相、事件内含波形这几类，现有三个数据集都覆盖不到。
 候选数据集与验证顺序见 [research/struct-vqt-verify/候选数据集.md](../research/struct-vqt-verify/候选数据集.md)（**未下载、未验**）。
+
+---
+
+## 9 与 OPC UA 的对应（2026-09-19）
+
+> 依据：OPC 基金会在线规范 v1.05（reference.opcfoundation.org）。
+> ★**逐条核过的三处**：Part 4 §7.11 `DataValue`、Part 3 §8.51 `StructureField`、Part 8 §5.3.4.2 `YArrayItemType`。
+> 「HistoryRead 按时间范围读原始值」一条**凭对规范的了解，未逐字核对**。
+
+### 9.1 结论：两条定义在 OPC UA 里都有对应物，核心同构
+
+| 我方 | OPC UA | 兼容性 |
+| --- | --- | --- |
+| **VQT**：T、Q 在结构之外 | **`DataValue`** = Value + StatusCode + SourceTimestamp | ★**同构**：质量码与时刻挂在 `DataValue` 上，不在值的结构里 —— 即定义一「T、Q 仍归 VQT，结构只装这一刻的量」 |
+| 结构 VQT 的 V | 值为 **Structure 型 DataType**（ExtensionObject 编码） | ✅ 一个值 = 一组具名字段 |
+| 结构描述 | **`StructureDefinition` / `StructureField`** | ✅ 基本对应，两处差异见 9.3 |
+| 定义二：帧是查询结果 | **HistoryRead** 按时间范围读原始值，回一串 `DataValue`，各带自己的 SourceTimestamp | ✅ 正是「按时间范围取 ⇒ VQT 数组」 |
+| T 的语义 | SourceTimestamp：规范原话「一旦赋值，该值实例的源时刻**永不改变**」，且应在靠近数据源处打 | ★与「时标由采集侧读到那一刻打」一致 |
+| 时刻精度（hs 标称微秒） | UtcTime 100 ns，另有 SourcePicoseconds（10 ps） | ✅ OPC UA 更细；落 hs 截到微秒，对 32 kHz（间隔 31.25 µs）够用 |
+| 质量码整值一级 | 一个 `DataValue` 一个 StatusCode | ✅ 同构 |
+
+### 9.2 ★要盯的一处：OPC UA 的标准波形类型正是「一帧一个值」
+
+Part 8 为数组数据定义了 **`YArrayItemType`**：
+- 值是 Y 值数组（Int16 / Float 等），**整个数组一个时刻**，元素没有各自的时刻；
+- X 轴间隔由变量属性 `XAxisDefinition` **声明**（量程、刻度类型；间隔恒定时 `AxisSteps` 可为空）；
+- 规范自己的例子是**频谱**，原话「用于 x 轴间隔恒定的谱或分布」。
+
+⇒ 这就是 §4 推翻的形态（`H-260` 建议稿、我方撤回的 `AI-50 §2.3`）：间隔是**声明**的，丢样查不出。
+
+| 方向 | 处置 |
+| --- | --- |
+| **进**：现场 OPC UA 源用 `YArrayItemType` 送波形 | 采集侧（daqgate）把一帧拆成逐条，T 按 `XAxisDefinition` **生成** ⇒ 与维特 `RAWFIFO` 同落 §0「适用边界」另一侧：**块内丢样查不出，只能查块间**；点上标「时标来源 = generated」 |
+| **出**：我方数据经 OPC UA 对外 | 无障碍：逐条结构 VQT = 一个结构型变量 + 它的历史，HistoryRead 读出来天然是数组 |
+| **谱能量** | `YArrayItemType` 对它**是合适的** —— 一张谱确实是一个时刻的结论，与 §6.2「一条记录 = 同一张谱」一致 |
+
+### 9.3 字段层面两处差异（互缺一格）
+
+| | OPC UA `StructureField` | hs `StructField` |
+| --- | --- | --- |
+| **字段可选** | ✅ `IsOptional`（结构类型 `StructureWithOptionalFields`，编码带位掩码） | ❌ 无；proto3 下未填的 float **读出来是 0.0** |
+| **逐字段单位** | ❌ 无。工程单位放在**变量**的 `EngineeringUnits` 属性上 | ✅ `unit` |
+
+- **可选字段**：我方 v1 三件结构（`AI_VibSample3` / `AI_PressSample` / `AI_OrderEnergy`）字段全部必填，**眼下碰不到**。
+  ★但将来若要双轴/三轴共用一个结构，hs 缺这一格会把「没测」读成「测到 0」—— 那时要么向 hs 提可选字段，要么按通道数分结构；
+- **单位**：hs → OPC UA 映射时，逐字段单位要落到结构变量的子变量上或放进字段描述；反方向不丢信息。
+
+### 9.4 ★值得借鉴：`SemanticsChanged` 位
+
+规范要求：`XAxisDefinition`、工程单位这类「解释数值用的元数据」一变，**该值的 StatusCode 置 `SemanticsChanged` 位**，提示客户端重读解释信息。
+
+它正好对着我方两件悬着的事：
+- **E1 基频无法自证**（[暂缓与未定事项](暂缓与未定事项.md) 二之四）；
+- **处理链 / 时标来源变了，怎么知道从哪一刻起变的**（`AI-59 §3` 草稿问 hs 的那一问）。
+
+OPC UA 的做法：元数据**挂在点上**（与 `AI-59 §3`「落在点上」一致），**变更那一刻在数据流里打标记**。
+移植过来即：配置一变，下一条值的 Q 带「语义已变」标记 —— 不必指望 hs 记录 `Paras` 的修改历史，
+也比「一变就新建点」轻。★**仅为借鉴，未定、未对外提。**
+
+### 9.5 未知项
+
+- daqgate 现有没有 OPC UA 采集通道、现场有没有 OPC UA 振动源 —— **我方查不到**。
+  这决定 9.2「进」那一行是理论问题还是马上要处理的问题。
+  已知旁证只有一条：原 v4 设计过「KEPServer OPC UA → Telegraf → InfluxDB」一路（[v4 数据流分析](../../doc/AI振动诊断v4_数据流分析与整合预研.md)），现场在跑的是合成数据的 demo 模式。
