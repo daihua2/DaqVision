@@ -75,6 +75,21 @@ def sk_band(x: np.ndarray, fs: float) -> tuple[float, float]:
     return best[1], best[2]
 
 
+def ies(x: np.ndarray, fs: float, nw: int = 128, hop: int = 4, lo: float = 0.05, hi: float = 0.49):
+    """改进包络谱（简化）：STFT 各窄带功率序列各自做调制谱、按该带平均功率归一，再跨带平均。
+    ★思路是谱相关 / 循环平稳分析的积分形式：断续、微弱但有周期性的冲击分散在多个频带时，逐带归一后叠加能积累起来。"""
+    x = x - x.mean()
+    frames = np.lib.stride_tricks.sliding_window_view(x, nw)[::hop] * np.hanning(nw)
+    P = np.abs(np.fft.rfft(frames, axis=1)) ** 2            # (帧, 频点)
+    fb = np.fft.rfftfreq(nw, 1.0 / fs)
+    sel = (fb >= lo * fs) & (fb <= hi * fs)
+    P = P[:, sel]
+    mean = P.mean(axis=0)
+    M = np.abs(np.fft.rfft(P - mean, axis=0)) / np.maximum(mean, 1e-30) / P.shape[0]
+    return np.fft.rfftfreq(P.shape[0], hop / fs), M.mean(axis=1)
+
+
+
 # ── 读法 ────────────────────────────────────────────────────────
 def simple_read(f: np.ndarray, S: np.ndarray, ff: float) -> float:
     """同实验三：1~3 次谐波 ±3% 内峰之和 ÷ (0.5, 4ff] 内中位底噪，取 log。"""

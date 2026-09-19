@@ -17,3 +17,5 @@ $PY -W ignore sca_rule.py "$DATA" noside        | tee out/5b_rule_noside.txt
 $PY -W ignore cwru_check.py "${CWRU:-/mnt/d/download/AIRef/datasets/cwru}"        | tee out/6_cwru.txt
 $PY -W ignore cwru_check.py "${CWRU:-/mnt/d/download/AIRef/datasets/cwru}" noside | tee out/6b_cwru_noside.txt
 $PY -W ignore sca_lowfs.py "$DATA"              | tee out/7_lowfs.txt
+$PY -W ignore cwru_check.py "${CWRU:-/mnt/d/download/AIRef/datasets/cwru}" noside band ies | tee out/6c_cwru_ies.txt
+$PY -W ignore ball_check.py "${CWRU:-/mnt/d/download/AIRef/datasets/cwru}" band sk ies     | tee out/8_ball.txt

@@ -21,7 +21,7 @@ import numpy as np
 import scipy.io as sio
 from scipy.signal import decimate
 
-from sca_methods import cpw, ses, sk_band
+from sca_methods import cpw, ies, ses, sk_band
 import sca_rule
 from sca_rule import n_harm
 
@@ -53,6 +53,8 @@ def trig_rate(x: np.ndarray, fs: float, rpm: float, kind: str, pre: str, N: int)
         elif pre == "cpwband":
             # CPW 之后仍只在共振带里解调（文献里「CPW + 高通」一路的思路）
             f, S = ses(cpw(seg), fs, 0.2 * fs, 0.45 * fs)
+        elif pre == "ies":
+            f, S = ies(seg, fs)
         else:  # sk
             lo, hi = sk_band(seg, fs)
             f, S = ses(seg, fs, lo, hi)
@@ -63,7 +65,7 @@ def trig_rate(x: np.ndarray, fs: float, rpm: float, kind: str, pre: str, N: int)
 def main(root: str) -> None:
     rp = Path(root)
     fs = 12000.0
-    pres = ("band", "cpw", "cpwband", "sk")
+    pres = tuple(p for p in sys.argv[2:] if p != "noside") or ("band", "cpw", "cpwband", "sk")
     N = 2
     print(f"触发 = 连续 ≥{N} 次谐波 ≥3× 局部噪底（内圈另要转频边带）；每格 = 1 秒段中的触发比例")
     print("文件                         " + "  ".join(f"{p:>5}" for p in pres))
