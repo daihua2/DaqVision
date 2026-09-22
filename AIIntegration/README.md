@@ -1438,3 +1438,45 @@ bindings        = vibration_baseline/khb-f1-g1-v1 points=6；vibration_iso/khb-f
 - ★**函告 AICloud**：1.10 实现已投（`C-47` 两件可用）、新上两域（**无绑定、无输入、无模型**，装上只为界面能按自述渲染）—— 草稿待用户过目；
 - `vibration_baseline` **重采基线**（要人选正常运行时段；实时库只剩约 1.5 天，`C-49`）；
 - 伺服、VFD 出结论还差输入与模型权重（外部导入工件）。
+
+---
+
+## 29. 部署记录：自报身份 SOURCE_IDENTITY 落码上现场，开关仍关（2026-09-22，用户授权）
+
+### 29.1 前提
+
+- 实时库已升 **1.9.517**：`/opt/historystore/bin/historystored` sha256 `d4330762…`，与 `H-273 §7` 逐位相符；21:36 起服。
+- AICloud `C-54 §3` 同意我方第 3 步与其函告解耦：现场 hs ≥ 1.9.517、探得到能力位即可发；**打开开关那天须函告**。
+
+### 29.2 投了什么
+
+`9051f3b` 改的 8 个文件（`config.py`、`hsclient.py`、`service.py`、`hsproto/` 下契约与生成码五件），**别的一字未动**：
+暂存代码与现场逐文件 `diff -rq`，差异正好这 8 个，四个域全同。不装依赖（protobuf 7.36.1 / grpcio 1.83.1 照旧）。
+`press_fit.py`、`vision_helmet.py` 照 §28.1 不投。
+
+### 29.3 步骤（每步不过就停）
+
+1. 三环境串行全量：各 **749** 条全过；变异 8 发 8 红（见 `9051f3b` 说明）；
+2. `git archive HEAD`（`5e52ddf`）出件 → 传 `/root/aii-stage-20260922/`，sha256 两端一致（`e2e4cd92…`）；无 CR、无编译缓存；
+3. **部署前用现场 venv 跑暂存代码**：新生成码在 protobuf 7.36.1 上导得进；op 7 帧构造得出；
+   经只读回环口探得实时库能力位含 `identity-source-kind`（共 97 位）；
+4. 记端口基线（65 个监听口）→ `deploy-9051f3b.sh`：预检（drop-in 里**不得已有开关**）→ 停服 → 备份
+   （`host.bak-20260922-deploy9051f3b`、`domains.bak-…`、`data/backup-20260922-deploy9051f3b/`）→ 铺代码、强制属主权限 → 起服；
+5. 回滚脚本同目录 `rollback-9051f3b.sh`（恢复代码与库）。
+
+### 29.4 投后实测（21:49:10 起服）
+
+```
+service_version = 0.1.0+src20260922T132824Z   (= 5e52ddf 提交时刻)
+proto_version   = 1.10        domain_count = 4        load_errors = 无
+bindings        = vibration_baseline points=6；vibration_iso points=9
+配置生效值      = AII_SOURCE_IDENTITY=off(default)  AII_SOURCE_NAME=AI 集成服务(AISERVER)(default)
+快照            = 27 个点 accepted=29（不带身份帧，与部署前相同）
+起服以来 error/traceback = 0；端口 65 个里只有本服务 50070/50071 换进程号
+```
+
+### 29.5 仍待办
+
+- ★**打开开关**：drop-in 加 `Environment=AII_SOURCE_IDENTITY=on` → `daemon-reload` → 只重启本服务 →
+  核日志「结论点快照已推送：27 个点，accepted=30（含自报身份 SOURCE_IDENTITY）」→ **当天函告 AICloud**（`C-54 §3` 请求 1）。
+  须用户另行授权；回退 = 删那一行 → reload → restart（身份行不落盘，hs 下次重启即消失；在那之前 AICloud 新代码按 kind 不建不列）。
