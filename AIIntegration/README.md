@@ -70,7 +70,7 @@
 | 算法本体从哪来 | ✅ **已定：从原项目拷 / 原作者重写后交付**（2026-09-10） |
 | 骨架边界 | ✅ **已定：推理 + 训练面**；标注/训练集/模型工件由本目录自持（用正经的库，不重蹈 v5 的 JSON 全量读写）。界面由 AICloud 做（2026-09-10） |
 | 结论以什么身份进平台 | ✅ **已定：甲 —— 直连 hs 当一个"源"**（2026-09-10），见 §5 |
-| 平台里的身份类别 | ✅ **已定：AICloud 单立类别 `68`**，照实时数据库(51) 那套形状（管理员手建、不进菜单、由管理视图收纳），**不照网关**；过渡期我方**不发 `op=IDENTITY`**（已实跑验证，见 docs/ `AI-4`）。★2026-09-22：`SOURCE_IDENTITY`（op 7）由 AICloud `C-50` 催办，三方上线顺序已定（hs 投契约 → AICloud 改判据并函告 → 我方才发），我方 `AI-60` / `AI-61` / `AI-62` 已投；hs 1.9.515 落地（1.9.517 修 0 点源移出），我方已落码（`9051f3b`，开关 `AII_SOURCE_IDENTITY` 缺省 off），AICloud `C-54` 已同意解耦：**现场 hs 升到 1.9.517 后即可打开开关**，当天函告 AICloud；`IDENTITY(5)` 前后都不发 |
+| 平台里的身份类别 | ✅ **已定：AICloud 单立类别 `68`**，照实时数据库(51) 那套形状（管理员手建、不进菜单、由管理视图收纳），**不照网关**；过渡期我方**不发 `op=IDENTITY`**（已实跑验证，见 docs/ `AI-4`）。★2026-09-22：`SOURCE_IDENTITY`（op 7）由 AICloud `C-50` 催办，三方上线顺序已定（hs 投契约 → AICloud 改判据并函告 → 我方才发），我方 `AI-60` / `AI-61` / `AI-62` 已投；hs 1.9.515 落地（1.9.517 修 0 点源移出），我方已落码（`9051f3b`，开关 `AII_SOURCE_IDENTITY` 缺省 off），★**2026-09-22 21:51 已打开**（hs 1.9.517，README §29），`AI-63` 当天函告 AICloud；`IDENTITY(5)` 前后都不发 |
 | 服务形态 | ✅ **已定：一个服务装四个域，可扩展**（2026-09-10）—— 一份 guid/证书；域是插件、骨架是宿主，新增域不改骨架，接口带域维度但**不枚举域**。★**只有骨架进程持有身份并对外通信**（对 hs 的 gRPC、对 AICloud 的口都只在骨架进程上）；**worker 只跑算法，不持证书、不连 hs**。理由见下方 §6 |
 | 对外接口 | ✅ **已定：控制面 gRPC / 大对象 HTTP**；**对 AICloud 一个口，浏览器不直连**（浏览器经 AICloud 的桥，否则我方要把平台的账号与 ACL 抄一份，两份必漂）；proto 正本在本仓 `AIIntegration/proto/`，分发点 `AISERVER:/home/Project/AIIntegration/proto/`，**不一致以本仓为准**，**改即投并发函** |
 | 发布方式 | ✅ **已定：离线 wheelhouse + 目标机现场建 venv**，按 `平台 × 后端` 分别打；自建独立 venv，**绝不共用 v4 那个**。实测：e52c 目标平台**全部有 arm64 预编译 wheel、无一需现场编译**；走 NPU 后端那份约 **131 MB**（不含 torch；含 torch 则 674 MB） |
@@ -1477,6 +1477,15 @@ bindings        = vibration_baseline points=6；vibration_iso points=9
 
 ### 29.5 仍待办
 
-- ★**打开开关**：drop-in 加 `Environment=AII_SOURCE_IDENTITY=on` → `daemon-reload` → 只重启本服务 →
+- ~~打开开关~~（已做，见 §29.6）：drop-in 加 `Environment=AII_SOURCE_IDENTITY=on` → `daemon-reload` → 只重启本服务 →
   核日志「结论点快照已推送：27 个点，accepted=30（含自报身份 SOURCE_IDENTITY）」→ **当天函告 AICloud**（`C-54 §3` 请求 1）。
   须用户另行授权；回退 = 删那一行 → reload → restart（身份行不落盘，hs 下次重启即消失；在那之前 AICloud 新代码按 kind 不建不列）。
+
+### 29.6 开关已打开（2026-09-22 21:51:26，用户授权）
+
+- drop-in **单独一个文件** `aiintegration.service.d/source-identity.conf`（`Environment=AII_SOURCE_IDENTITY=on`），回退 = 删它 → reload → restart；
+- 日志：`结论点快照已推送：27 个点，accepted=30（含自报身份 SOURCE_IDENTITY）`；error 0；端口只有本服务两口换号；
+- 实时库侧现取（回环只读 `ListEntityIdentities`）：缺省请求 **0** 行、缺省按 guid 点名 **0** 行、显式 `includeNonGatewaySources` **1** 行 ——
+  `name=AI 集成服务(AISERVER)`、`sourceKind=ai-service`、`isGateway=true`、`localId=0`、`globalId=2761`、`attrs={hostName, version, app}`；
+  缺省请求下网关行仍是原来 3 行；
+- 当天函告：`AI-63`。
