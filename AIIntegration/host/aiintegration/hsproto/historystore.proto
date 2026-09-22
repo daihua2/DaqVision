@@ -842,11 +842,25 @@ message	EntityConfigPush {
 		// ★**不得硬编码行数**。2026-08-24 实证:daqgate 源码里 61 行(含 6 行注释掉的停用类别)、
 		//   现场库里 55 行,任一侧写死都会错 —— 发多少收多少。
 		CATEGORY		= 6;
+		// **非网关来源**自报身份(AIIntegration AI-2 §3.2 提形状、AICloud C-2 §4.2 接受,2026-09-10 定案;
+		// hs H-272 落地,能力位 "identity-source-kind")。起因:直连写点、但**不是网关**的来源
+		// (AI 集成服务写结论点)在身份表里没有行,平台只认得出一个 guid(AICloud C-50 §1)。
+		//
+		// ★与 IDENTITY 逐条同规矩:建流后先发一条,重报即覆盖(同一源恒一份,**与 IDENTITY 共用那一份**
+		//   —— 后到的 op 决定这一源此刻是网关还是非网关来源),不落盘,不属于快照事务;
+		//   guid 仍从 peer cert 取,载荷不带 guid。
+		// ★**kind 必填**。kind 空的 op 7 hs **拒收**(记 ERROR,不改身份):那一行会与真网关的 IDENTITY
+		//   **逐位相同**,正是 AICloud C-50 §4 / AIIntegration AI-61 §3 说的"建出一台删不掉的网关"那个态。
+		// ★读侧:ListEntityIdentities **默认不回**这类行(见 EntityIdentityReq.includeNonGatewaySources)。
+		// ★本 op **只在推流(本 message)上有**;daq.EntityConfigEvent(拉取流)没有对应值 ——
+		//   daqgate 的主控不是非网关来源。两边 op 号至今逐字对齐,**daqgate 那边的 7 请勿另作他用**。
+		SOURCE_IDENTITY	= 7;
 	}
 	Op					op		= 1;
 	int32				id		= 2;	// REMOVE 用;PUT 时冗余带 = entity.Id
 	daq.EntityConfig	entity	= 3;	// PUT 用;其余 op 为空。hs 按【内容】去重(不信 Version)
 	GatewayIdentity		gateway	= 4;	// IDENTITY 用;其余 op 为空
+	SourceIdentity		source	= 7;	// SOURCE_IDENTITY 用;其余 op 为空
 	// 类别族根(daqgate 2026-08-11 §3 方案 B,本方回执采纳)。语义与 daq.EntityConfigEvent 的
 	// 同名字段**逐字一致**:最近的、落在 {12,15,17,21,0} 内的祖先(含自身),**不是**上溯到顶层。
 	// PUT 用;其余 op 为 0。hs 不解释,存下来在 ListEntityIdentities 原样回。
@@ -888,6 +902,18 @@ message	GatewayIdentity	{
 	// 主机名/固件版本/项目名…… 任意补充属性,hs 原样存回。放 map 而不是逐个开字段:这些是
 	// daqgate 的领域概念,每加一个就要动我的对外契约一次,而我又不理解它们的语义。
 	map<string, string>	attrs	= 3;
+}
+
+// 非网关来源的自报身份(EntityConfigPush.SOURCE_IDENTITY)。前三格与 GatewayIdentity **同号同义**,
+// 只多一格 kind。hs 不解释任何一格,存下来经 ListEntityIdentities 原样回(kind → EntityIdentity.sourceKind)。
+message	SourceIdentity	{
+	string				name	= 1;	// 显示名
+	string				des		= 2;	// 描述(只作描述,不作判据)
+	map<string, string>	attrs	= 3;	// 补充属性(hostName/version/commit/app …),只作并排显示,不作分流
+	// 来源种类,**一等公民、不是自由文本约定**。已定的值:"ai-service"(AIIntegration AI-61 §4)。
+	// 消费侧只认"空 / 非空"决定是不是网关,具体值只用于日志与展示 —— 将来多一类来源两方都不改代码。
+	// **必填**:空串 hs 拒收(见 SOURCE_IDENTITY 说明)。
+	string				kind	= 4;
 }
 
 message	PushEntityConfigsRes	{
@@ -1200,6 +1226,14 @@ message	CtrlDownRelayRes
 message	EntityIdentityReq	{
 	repeated int32	categoryIds	= 1;	// 只要这些类别(空 = 全部非采集点实体)。hs 不解释类别号
 	string			guid		= 2;	// 只要这个网关的(空 = 全部可见的)。受限连接填别人一律 PERMISSION_DENIED
+	// 要不要回**非网关来源**的身份行(sourceKind 非空的那些,来自 SOURCE_IDENTITY)。
+	// ★缺省 false = **逐位等于引入本格之前的行为**:老消费方(没重生成客户端的)看不见这类行。
+	//   理由(AIIntegration AI-60 §3.2 提、AICloud C-51 §4 取证):这类行对老客户端长得是
+	//   isGateway=true + 无 sourceKind,与真网关逐位相同;daqgate「网关管理」按 isGateway 取全部行
+	//   补列表,旁边就是「整台移出」(RemoveGateway,不可逆)。默认不回 ⇒ 谁升级谁看得见,老的零影响。
+	// ★与 guid 过滤正交:按 guid 点名要一台非网关来源,也得同时置本格,否则回空。
+	// 能力位 "identity-source-kind"(老引擎不认识本格,会照回全部行 —— 而老引擎本就不会产生这类行)。
+	bool			includeNonGatewaySources	= 3;
 }
 message	EntityIdentity	{
 	string	guid		= 1;	// 来源网关;空 = 主控直存段(不属任何从网关)
@@ -1280,6 +1314,13 @@ message	EntityIdentity	{
 	//     最终判据仍是消费侧的逐条探测(AICloud r174 §5 自己也是这么约的)。
 	// 探测位:capabilities features 的 "identity-peer-addr"(空串有"引擎不认识"与"确无记录"两义)。
 	string				peerAddr	= 15;
+	// 来源种类(SourceIdentity.kind 原样;能力位 "identity-source-kind")。仅 isGateway=true 的行有意义。
+	//   空   = 网关(IDENTITY 自报)、或 EnsureSelfGid 自报的身份型源 —— 即引入本格之前就有的那些行;
+	//   非空 = 非网关来源(SOURCE_IDENTITY 自报),如 "ai-service"。**只在请求置了
+	//          includeNonGatewaySources 时才会出现**。
+	// ★isGateway 语义**一字不改**:它标的是"这一行是身份行、不是实体行"(AI-2 §1 / C-2 §1 已订正),
+	//   非网关来源的行照样 isGateway=true、localId=0。**分流看本格,不看 isGateway**。
+	string				sourceKind	= 16;
 }
 message	EntityIdentitiesRes	{	repeated EntityIdentity	identities	= 1;	}
 

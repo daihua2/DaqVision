@@ -18,8 +18,18 @@
   两个口在现网是**同时监听**的（`gRPC listening: 127.0.0.1:5400(明文) + …(mTLS)`），
   所以这条路不需要任何一方改代码或重启。
 
-过渡期：**不发 `op=IDENTITY`**（AI-3 §3.1 定、AI-4 实跑验证）。
-  身份表里没有我方的行 ⇒ AICloud 对账器的 `HasIdentity=false` ⇒ 不会被建成"网关"实体。
+**永不发 `op=IDENTITY`(5)**（AI-3 §3.1 定、AI-4 实跑验证）。那是网关的身份帧：
+  发了，身份表里我方就是 `isGateway=true` + 无种类，与真网关逐位相同 ⇒ 会被建成"网关"实体。
+
+自报身份走 **`op=SOURCE_IDENTITY`(7)**（`AI-2 §3.2` / `C-2 §4.2` 定案，hs `H-272` 于 1.9.515 落地），
+  三道闸，缺一不发：
+  ① **开关**：`HsConfig.source_identity` 为 None（缺省）就不发。何时打开由往来函定
+     （`C-50 §4`：AICloud 消费侧上线并函告、`AI-61 §3` 演练通过之后），不由代码自己判断；
+  ② **能力位** `identity-source-kind`：老引擎（< 1.9.515）收到 op 7 **静默忽略、回成功**
+     （`H-272 §4.3`），不探就不知道自己白发了；
+  ③ **`kind` 非空**：hs 对空 kind 的 op 7 拒收（`H-272 §4.3`）—— 空 kind 的行在读侧与网关逐位相同。
+  放在**每一条新流的开头**：身份不落盘、hs 重启即丢，靠发方重报；我方每次推快照都是一条新流，
+  于是 hs 重启后第一次重推就补回来了（`H-272 §4.2`：不老化，不必另配心跳）。
 
 ★★ **两个 id 空间 —— 用错了不报错，只是查不到**（2026-09-10 隔离实例实测，不是推断）：
 
@@ -71,6 +81,27 @@ PARAS_ACC = "Acc"
 # daqgate VARENUM（取 hs 侧 `Acc` 的取值口径）
 _VARENUM = {"bool": 11, "int": 3, "float": 5, "string": 8}
 
+#: 我方自报的来源种类（`AI-61 §4` 定：小写、逐字、恒定，不随版本/主机/域数变）。
+#: AICloud 只认"空 / 非空"决定建不建网关，具体值只用于显示 —— 但**改它就是改对外约定**，要发函。
+SOURCE_KIND = "ai-service"
+
+#: 对端支持 op 7 的能力位（`H-272 §1`）。
+FEATURE_SOURCE_IDENTITY = "identity-source-kind"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceIdentityInfo:
+    """`SourceIdentity` 的内容。`kind` 不在这里 —— 它是常量 `SOURCE_KIND`，不给配置改的口子。"""
+
+    name: str
+    """显示名，`AI-61 §4` 定为 `AI 集成服务(<主机名>)`。平台日志与界面按它说话。"""
+
+    des: str = ""
+    """描述。**只作描述、不作判据**（`AI-61 §4`）。"""
+
+    attrs: tuple[tuple[str, str], ...] = ()
+    """补充属性，键名照 AICloud `C-1`：`hostName` / `version` / `commit` / `app`。**只作并排显示、不作分流**。"""
+
 
 @dataclass(frozen=True, slots=True)
 class HsConfig:
@@ -83,6 +114,9 @@ class HsConfig:
     ca_file: Path | None = None
     cert_file: Path | None = None
     key_file: Path | None = None
+
+    source_identity: SourceIdentityInfo | None = None
+    """自报身份（op 7）。**None = 不发**，这是缺省。见模块头「三道闸」第 ①。"""
 
     def can_write(self) -> bool:
         return bool(self.write_addr and self.ca_file and self.cert_file and self.key_file)
@@ -116,14 +150,37 @@ def build_entity(row: PointRow, *, description: str = "") -> daq.EntityConfig:
     )
 
 
-def build_snapshot_frames(rows: list[PointRow]) -> list[hs.EntityConfigPush]:
-    """一整轮快照的帧序列。
+def build_source_identity_frame(info: SourceIdentityInfo, *,
+                                kind: str = SOURCE_KIND) -> hs.EntityConfigPush:
+    """自报身份帧（op 7）。
+
+    ★`kind` 空一律拒绝构造：hs 会拒收这一帧（`H-272 §4.3`），而更要紧的是它为什么拒 ——
+      空 kind 的身份行在读侧与网关的 `IDENTITY` **逐位相同**，就是 `C-50 §4` 那台删不掉的网关。
+      在我方这一侧先挡一道，不指望对端兜底。`kind` 形参只为了让这条能被单测到，调用方不传。
+    """
+    if not kind.strip():
+        raise ValueError("SOURCE_IDENTITY 的 kind 不能为空 —— 空 kind 在读侧与网关逐位相同")
+    if not info.name.strip():
+        raise ValueError("SOURCE_IDENTITY 的 name 不能为空 —— 平台日志要按它说出我方是谁")
+    return hs.EntityConfigPush(
+        op=hs.EntityConfigPush.SOURCE_IDENTITY,
+        source=hs.SourceIdentity(name=info.name, des=info.des, kind=kind,
+                                 attrs=dict(info.attrs)))
+
+
+def build_snapshot_frames(rows: list[PointRow], *,
+                          identity: SourceIdentityInfo | None = None) -> list[hs.EntityConfigPush]:
+    """一整轮快照的帧序列（一条流的全部内容）。
 
     ★**必须全量**：`SNAPSHOT_END` 是原子提交，**本轮未出现的旧实体一律删除** ——
       漏发一个就是删一个。所以这里接的是 `PointMap.all()`，不是"变化的那些"。
-    ★**不含 `op=IDENTITY`**：过渡期定案，见模块头。
+    ★**永不含 `op=IDENTITY`(5)**，见模块头。
+    ★`identity` 给了就在**最前面**放一帧 op 7：它不属于快照事务（`H-272 §4.1`），
+      放在 `SNAPSHOT_BEGIN` 之前，流断在快照中途时身份也已经送到了。
+      要不要给由调用方决定（开关 + 能力位），这里只管摆放。
     """
-    frames = [hs.EntityConfigPush(op=hs.EntityConfigPush.SNAPSHOT_BEGIN)]
+    frames = [build_source_identity_frame(identity)] if identity is not None else []
+    frames.append(hs.EntityConfigPush(op=hs.EntityConfigPush.SNAPSHOT_BEGIN))
     for row in rows:
         frames.append(hs.EntityConfigPush(
             op=hs.EntityConfigPush.PUT, id=row.local_id, entity=build_entity(row)))
@@ -311,19 +368,44 @@ class HsClient:
         return list(res.globalIds)
 
     # ── 结论回流 ──────────────────────────────────────────────────────────
+    def source_identity_to_send(self) -> SourceIdentityInfo | None:
+        """这一条流要不要带自报身份。模块头「三道闸」的 ① ② 在这里判（③ 在构造帧时判）。
+
+        ★开关关着就**不探能力位**：探一次是一次 `Ping`，关着的时候没有理由多打对端。
+        ★能力位探不到（连不上）按"没有"处理 —— `has_feature` 已收口；紧接着推快照也会失败，
+          那一路有自己的退避与告警，这里不重复吵。
+        """
+        info = self._cfg.source_identity
+        if info is None:
+            return None
+        if not self.has_feature(FEATURE_SOURCE_IDENTITY):
+            # ★每次推快照都打（兜底一小时一次，不密）：开关开着却发不出去，是现场要知道的事 ——
+            #   典型原因是实时库还没升到 1.9.515，此时发了也会被静默忽略（H-272 §4.3）。
+            logger.warning("自报身份已开启，但对端没有能力位 %s（实时库 < 1.9.515？）"
+                           "—— 本次不发 SOURCE_IDENTITY，平台仍认不出我方是谁",
+                           FEATURE_SOURCE_IDENTITY)
+            return None
+        return info
+
+    def snapshot_frames(self, rows: list[PointRow]) -> list[hs.EntityConfigPush]:
+        """本次推送的完整帧序列：闸门判完的身份帧（可能没有）+ 全量快照。"""
+        return build_snapshot_frames(rows, identity=self.source_identity_to_send())
+
     def push_snapshot(self, rows: list[PointRow], timeout: float = 60.0) -> int:
         """把**全部**结论点作为一份快照推上去。返回被接收的帧数。
 
         串行化：同一 guid 同一时刻只允许一条流（并发会互相踢，见模块头）。
         """
-        frames = build_snapshot_frames(rows)
+        frames = self.snapshot_frames(rows)
         with self._push_lock:
             res = self._write_channel().stream_unary(
                 f"{SERVICE}/PushEntityConfigs",
                 request_serializer=lambda m: m.SerializeToString(),
                 response_deserializer=hs.PushEntityConfigsRes.FromString,
             )(iter(frames), timeout=timeout)
-        logger.info("结论点快照已推送：%d 个点，accepted=%d", len(rows), res.accepted)
+        with_identity = bool(frames) and frames[0].op == hs.EntityConfigPush.SOURCE_IDENTITY
+        logger.info("结论点快照已推送：%d 个点，accepted=%d%s", len(rows), res.accepted,
+                    "（含自报身份 SOURCE_IDENTITY）" if with_identity else "")
         return res.accepted
 
     def post_vqt(self, items: list[tuple[int, Finding]], timeout: float = 15.0) -> daq.Status:

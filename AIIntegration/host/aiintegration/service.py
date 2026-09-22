@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import socket
 import sys
 import threading
 from datetime import datetime, timezone
@@ -30,7 +31,7 @@ from .domains import discover
 from .artifact_import import ArtifactImporter
 from .events import EventRunner
 from .fetch import Fetcher
-from .hsclient import HsClient, HsConfig
+from .hsclient import HsClient, HsConfig, SourceIdentityInfo
 from .identity import SystemGuid
 from .logstore import LogStore, LogStoreHandler
 from .pointmap import PointMap
@@ -81,6 +82,24 @@ def service_version() -> str:
     """
     stamp = _build_stamp()
     return f"{VERSION}+src{stamp}" if stamp else VERSION
+
+
+def source_identity_info(cfg: Config, *, domain_count: int) -> SourceIdentityInfo | None:
+    """自报身份的内容（hs op 7）。开关关着回 None —— 那就是"不发"。
+
+    取值照 `AI-61 §4`：`name` 按配置（缺省 `AI 集成服务(<主机名>)`）；`des` 随实际取、不写死；
+    `attrs` 用 AICloud `C-1` 的键名。★`commit` 这一键**不给**：我方版本串里只有源码时刻、
+    没有提交号，编一个等于报假；对端按"缺键"处理比拿到一个错的强。
+    """
+    if not cfg.source_identity:
+        return None
+    return SourceIdentityInfo(
+        name=cfg.source_name,
+        des=f"AI 算法集成服务 · 契约 {api.PROTO_VERSION} · {domain_count} 个域",
+        attrs=(("hostName", socket.gethostname()),
+               ("version", service_version()),
+               ("app", "AIIntegration")),
+    )
 
 
 def _setup_logging(store: LogStore) -> None:
@@ -197,7 +216,8 @@ class Service:
                     cfg.hs_write_addr, cfg.cert_dir)
         client = HsClient(HsConfig(
             read_addr=cfg.hs_read_addr, write_addr=cfg.hs_write_addr,
-            ca_file=cfg.ca_file, cert_file=cfg.cert_file, key_file=cfg.key_file))
+            ca_file=cfg.ca_file, cert_file=cfg.cert_file, key_file=cfg.key_file,
+            source_identity=source_identity_info(cfg, domain_count=len(domains))))
         # 当前启用工件的提供者：推理时交给模块（模块不碰存储）。
         active_arts = ActiveArtifacts(workbench, cfg.data_dir / "artifacts")
         sched = Scheduler(client=client, fetcher=Fetcher(client), domains=domains,
@@ -283,7 +303,13 @@ class Service:
 
 
 def main() -> int:
-    return Service(Config.from_env()).run()
+    try:
+        cfg = Config.from_env()
+    except ConfigError as e:
+        # 日志还没装上（装日志要先有配置），直接写 stderr —— systemd 照样收进 journal。
+        print(f"配置不合规：{e} —— 服务不启动（改对再起）", file=sys.stderr)
+        return 2
+    return Service(cfg).run()
 
 
 if __name__ == "__main__":

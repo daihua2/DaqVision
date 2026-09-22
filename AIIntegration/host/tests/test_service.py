@@ -60,6 +60,41 @@ class TestConfig(unittest.TestCase):
                 (Path(tmp) / n).write_text("x")
             self.assertTrue(Config.from_env().can_write())
 
+    # ── 自报身份开关（hs op 7）────────────────────────────────────────────
+    def test_自报身份缺省关(self):
+        """何时打开由往来函定（C-50 §4 + AI-61 §3 演练），缺省必须是关。"""
+        from aiintegration.service import source_identity_info
+        c = Config.from_env()
+        self.assertFalse(c.source_identity)
+        self.assertIsNone(source_identity_info(c, domain_count=4))
+        self.assertIn("AII_SOURCE_IDENTITY=off(default)", "\n".join(c.describe()))
+
+    def test_自报身份打开后内容照AI_61(self):
+        import socket
+        from aiintegration.service import source_identity_info
+        os.environ["AII_SOURCE_IDENTITY"] = "ON"
+        c = Config.from_env()
+        info = source_identity_info(c, domain_count=4)
+        self.assertEqual(info.name, f"AI 集成服务({socket.gethostname()})")
+        self.assertIn("4 个域", info.des)
+        attrs = dict(info.attrs)
+        self.assertEqual(attrs["app"], "AIIntegration")
+        self.assertEqual(attrs["hostName"], socket.gethostname())
+        # 没有提交号就不给这一键 —— 编一个等于报假
+        self.assertNotIn("commit", attrs)
+
+    def test_自报身份名字可覆盖(self):
+        os.environ["AII_SOURCE_NAME"] = "AI 集成服务(E52c)"
+        self.assertEqual(Config.from_env().source_name, "AI 集成服务(E52c)")
+
+    def test_自报身份开关只认on与off(self):
+        """猜错一个方向就是"以为开了其实没开"或反过来 —— 拒绝启动，不猜。"""
+        from aiintegration.config import ConfigError
+        for bad in ("yes", "1", "true", "enable", "o n"):
+            os.environ["AII_SOURCE_IDENTITY"] = bad
+            with self.assertRaises(ConfigError, msg=bad):
+                Config.from_env()
+
 
 class TestHttpApi(unittest.TestCase):
     def setUp(self):

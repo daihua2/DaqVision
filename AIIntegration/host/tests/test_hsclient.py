@@ -1,7 +1,7 @@
 """hs 客户端的回归 —— 全部是**离线**用例（只验消息构造，不连网）。
 
 钉的四件：
-  · 快照**必须全量、且不含 IDENTITY**；
+  · 快照**必须全量、且永不含 IDENTITY(5)**；自报身份走 op 7，三道闸（开关 / 能力位 / kind 非空）缺一不发；
   · VQT 的 V/Q/T 三者都来自 Finding，一个都不在客户端现编（尤其 T 不许填 now()）；
   · 坏结论走**坏值锚点**（NullValue + 质量码），而不是"不发"；
   · 能力位**缺失 = 不支持**，且"探不到"与"没有这一位"在 `has_feature` 上处置相同。
@@ -158,3 +158,110 @@ class TestFeatures(unittest.TestCase):
         c = self.client(boom=True)
         with self.assertRaises(RuntimeError):
             c.features()
+
+
+class TestSourceIdentity(unittest.TestCase):
+    """自报身份（op 7，`SOURCE_IDENTITY`）—— 三道闸与摆放位置。
+
+    ★为什么每一道都要钉（`C-50 §4`、`AI-61 §3`、`H-272 §4.3`）：
+      发错的后果是平台把我方建成一台"网关"，而那台**删不掉**；误点「整台移出」则连历史一起清、不可逆。
+      ① 开关关着就不发 —— 何时打开由往来函定，不由代码判断；
+      ② 对端没有能力位就不发 —— 老引擎静默吞掉 op 7、回成功；
+      ③ kind 空不构造 —— 空 kind 的身份行在读侧与网关**逐位相同**。
+    """
+
+    def setUp(self):
+        from aiintegration.hsclient import SourceIdentityInfo
+        self.info = SourceIdentityInfo(
+            name="AI 集成服务(AISERVER)", des="AI 算法集成服务 · 契约 1.10 · 4 个域",
+            attrs=(("hostName", "AISERVER"), ("version", "0.1.0+src1"), ("app", "AIIntegration")))
+
+    def client(self, *, info, features=(), boom=False):
+        from aiintegration.hsclient import HsClient, HsConfig
+        c = HsClient(HsConfig(read_addr="127.0.0.1:1", write_addr="", source_identity=info))
+        self.pings = 0
+
+        def fake_ping():
+            self.pings += 1
+            if boom:
+                raise RuntimeError("连不上")
+            return hs.PingRes(features=list(features))
+
+        c.ping = fake_ping
+        return c
+
+    # ── 帧本身 ────────────────────────────────────────────────────────────
+    def test_身份帧是op7且kind为ai_service(self):
+        from aiintegration.hsclient import SOURCE_KIND, build_source_identity_frame
+        f = build_source_identity_frame(self.info)
+        self.assertEqual(f.op, hs.EntityConfigPush.SOURCE_IDENTITY)
+        self.assertEqual(f.source.kind, "ai-service")
+        self.assertEqual(SOURCE_KIND, "ai-service", "改 kind 就是改对外约定（AI-61 §4），要先发函")
+        self.assertEqual(f.source.name, "AI 集成服务(AISERVER)")
+        self.assertEqual(dict(f.source.attrs)["app"], "AIIntegration")
+        # 载荷走 source（字段 7），不借网关那一格
+        self.assertFalse(f.HasField("gateway"))
+
+    def test_kind空拒绝构造(self):
+        from aiintegration.hsclient import build_source_identity_frame
+        for bad in ("", "   "):
+            with self.assertRaises(ValueError):
+                build_source_identity_frame(self.info, kind=bad)
+
+    def test_name空拒绝构造(self):
+        from aiintegration.hsclient import SourceIdentityInfo, build_source_identity_frame
+        with self.assertRaises(ValueError):
+            build_source_identity_frame(SourceIdentityInfo(name=" "))
+
+    def test_身份帧在最前_在快照事务之外(self):
+        f = build_snapshot_frames([row(), row(1001, "fault_type", "string", "")], identity=self.info)
+        ops = [x.op for x in f]
+        self.assertEqual(ops[0], hs.EntityConfigPush.SOURCE_IDENTITY)
+        self.assertEqual(ops[1], hs.EntityConfigPush.SNAPSHOT_BEGIN)
+        self.assertEqual(ops[-1], hs.EntityConfigPush.SNAPSHOT_END)
+        self.assertEqual(ops.count(hs.EntityConfigPush.SOURCE_IDENTITY), 1)
+
+    def test_带身份时也永不含IDENTITY5(self):
+        f = build_snapshot_frames([row()], identity=self.info)
+        self.assertFalse(any(x.op == hs.EntityConfigPush.IDENTITY for x in f))
+
+    def test_不给身份时帧序列与原来逐帧相同(self):
+        rows = [row(), row(1001, "fault_type", "string", "")]
+        self.assertEqual(build_snapshot_frames(rows), build_snapshot_frames(rows, identity=None))
+        self.assertFalse(any(x.op == hs.EntityConfigPush.SOURCE_IDENTITY
+                             for x in build_snapshot_frames(rows)))
+
+    # ── 闸 ① ② ────────────────────────────────────────────────────────────
+    def test_开关关着不发且不去探能力位(self):
+        c = self.client(info=None, features=["identity-source-kind"])
+        f = c.snapshot_frames([row()])
+        self.assertEqual(f[0].op, hs.EntityConfigPush.SNAPSHOT_BEGIN)
+        self.assertEqual(self.pings, 0, "开关关着还去 Ping 对端 —— 没有理由多打一次")
+
+    def test_开关开_对端有能力位才发(self):
+        c = self.client(info=self.info, features=["identity-source-kind", "struct-value"])
+        f = c.snapshot_frames([row()])
+        self.assertEqual(f[0].op, hs.EntityConfigPush.SOURCE_IDENTITY)
+        self.assertEqual(f[0].source.kind, "ai-service")
+
+    def test_开关开_老引擎没有能力位不发且吵一句(self):
+        """现网 1.9.445 就是这个情况：发了会被静默吞掉、回成功（H-272 §4.3）。"""
+        c = self.client(info=self.info, features=["struct-value"])
+        with self.assertLogs("aiintegration.hsclient", level="WARNING") as cm:
+            f = c.snapshot_frames([row()])
+        self.assertEqual(f[0].op, hs.EntityConfigPush.SNAPSHOT_BEGIN)
+        self.assertTrue(any("identity-source-kind" in m for m in cm.output))
+
+    def test_开关开_探不到能力位按没有处理(self):
+        c = self.client(info=self.info, boom=True)
+        with self.assertLogs("aiintegration.hsclient", level="WARNING"):
+            f = c.snapshot_frames([row()])
+        self.assertFalse(any(x.op == hs.EntityConfigPush.SOURCE_IDENTITY for x in f))
+
+    def test_每次推快照都重新判_hs重启后第一次重推即补回(self):
+        """身份不落盘，hs 重启即丢；我方每次推快照都是一条新流，每条都要带（H-272 §4.2）。"""
+        c = self.client(info=self.info, features=["identity-source-kind"])
+        for _ in range(3):
+            self.assertEqual(c.snapshot_frames([row()])[0].op,
+                             hs.EntityConfigPush.SOURCE_IDENTITY)
+        self.assertEqual(self.pings, 3)

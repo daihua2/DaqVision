@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,6 +77,21 @@ def addr_problem(addr: str, *, what: str) -> str | None:
     return None
 
 
+def parse_switch(v: str, *, what: str) -> bool:
+    """开关只认 `on` / `off`（不分大小写）。
+
+    ★别的写法一律拒绝启动，不猜：`yes`、`1`、`true`、`enable` 各有人写，
+      猜错一个方向就是"以为开了其实没开"或反过来 —— 而这个开关管的是对外自报身份，
+      开早了违反与 AICloud 约定的上线顺序（`C-50 §4`）。
+    """
+    s = v.strip().lower()
+    if s == "on":
+        return True
+    if s == "off":
+        return False
+    raise ConfigError(f"{what}={v!r} 不合规：只认 on / off")
+
+
 def _env(name: str, default: str) -> tuple[str, bool]:
     """返回 (值, 是否来自环境)。第二项用来在启动日志里标 (env)/(default)。"""
     v = os.environ.get(name)
@@ -98,6 +114,11 @@ class Config:
     http_listen: str
 
     log_capacity: int
+
+    # 自报身份（hs op 7，`SOURCE_IDENTITY`）。★缺省**关**：何时打开由往来函定
+    # （`C-50 §4` AICloud 函告 + `AI-61 §3` 演练通过），不由代码自己判断。见 hsclient 模块头。
+    source_identity: bool = False
+    source_name: str = ""
     _sources: dict = field(default_factory=dict, compare=False)
 
     @staticmethod
@@ -128,6 +149,10 @@ class Config:
             api_listen=pick("AII_API_LISTEN", "127.0.0.1:50070"),
             http_listen=pick("AII_HTTP_LISTEN", "127.0.0.1:50071"),
             log_capacity=int(pick("AII_LOG_CAPACITY", "20000")),
+            source_identity=parse_switch(pick("AII_SOURCE_IDENTITY", "off"),
+                                         what="AII_SOURCE_IDENTITY"),
+            # `AI-61 §4` 定的写法：带主机名，照 hs 身份表现有的「AI边缘计算网关(AISERVER)」。
+            source_name=pick("AII_SOURCE_NAME", f"AI 集成服务({socket.gethostname()})"),
             _sources=src,
         )
 
@@ -176,5 +201,7 @@ class Config:
             ("AII_HS_READ", self.hs_read_addr), ("AII_HS_WRITE", self.hs_write_addr or "(未配置)"),
             ("AII_API_LISTEN", self.api_listen), ("AII_HTTP_LISTEN", self.http_listen),
             ("AII_LOG_CAPACITY", self.log_capacity),
+            ("AII_SOURCE_IDENTITY", "on" if self.source_identity else "off"),
+            ("AII_SOURCE_NAME", self.source_name),
         ]
         return [f"{k}={v}({self._sources.get(k, 'default')})" for k, v in rows]
