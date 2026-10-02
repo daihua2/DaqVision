@@ -100,11 +100,15 @@ class VibrationBaseline(Domain):
                     # ★第二测点是一组：全配或全不配（契约 1.9，AICloud C-45 §3.1）。
                     group=("point2" if point else ""),
                     group_display=("第二测点" if point else ""),
+                    # ★按字段绑到结构值点时（契约 1.11）：物理量须是速度；同一测点的 x/y/z
+                    #   必须出自同一个点（同一条记录），否则"同一时刻"的保证就没了。
+                    quantity="velocity", record=f"point{point or '1'}",
                     display=f"{name} {axis.upper()} 轴速度",
                     description=("速度有效值。至少选测点 1 的 X 轴速度；第二测点不配即按单测点算"
                                  if first else "速度有效值，可不选")))
             inputs.append(InputSpec(
                 role=_temp_role(point), unit="℃", required=False,
+                quantity="temperature",
                 group=("point2" if point else ""),
                 group_display=("第二测点" if point else ""),
                 display=f"{name} 温度",

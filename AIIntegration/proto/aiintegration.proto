@@ -28,6 +28,9 @@ service AIIntegrationService {
   rpc ListBindings (ListBindingsRequest) returns (ListBindingsReply);
   rpc PutBinding   (PutBindingRequest)   returns (PutBindingReply);
   rpc DeleteBinding(DeleteBindingRequest) returns (DeleteBindingReply);
+  // ★结构值点有哪些字段（1.11）：贵方绑定表单选了结构值点后，**按它列字段**供选。
+  //   实时库点表不暴露点挂的结构，我方取该点最近一条值得知（近 7 天无值 ⇒ ok=false 并说明）。
+  rpc DescribeStructPoint(DescribeStructPointReq) returns (DescribeStructPointRes);
 
   // ── 日志：**形状与 historystore 逐条对齐**（用户要求"装设 hs 类似的日志接口"）──
   //   对齐的四条见 host/aiintegration/logstore.py 模块头：同一判据、ASCII 折叠、真实总数、背压不静默。
@@ -212,6 +215,21 @@ message InputSpec {
   string group         = 7;
   // 该组给人看的名字，如 "第二测点"。空 = 界面自行处理。
   string group_display = 8;
+
+  // ── 1.11 按字段绑定（定义文档 §10.3）──────────────────────────────────
+  // ★字段绑定的角色**仍是 `kind="point"`**：域只声明"要一路速度"，绑整点还是绑某个结构值点的字段，
+  //   由绑定决定（`Binding.role_fields`），域不知道数据来自结构值。
+  //
+  // ★期望的**物理量**，取值照 historystore `H-261 §2.1`：`acceleration` / `velocity` /
+  //   `displacement` / `force` / `temperature`… 空 = 不核。
+  //   只在**绑到字段**时核对：字段 `attrs["quantity"]` 必须逐字相等，**缺键也拒**（不换算、只拒绝）。
+  //   整点标量没有这项元数据，不核。
+  string quantity = 9;
+  // ★**同记录组**：同一 `record` 的角色，凡有一个绑到结构值字段，组内已绑的就必须**全是同一个点**的字段。
+  //   由来：振动 x/y/z 绑成"x 取点 A、y 取点 B"，同一时刻的保证就没了，且不报错。
+  //   与 `group`（全配或全不配）是两件事，可同时给。空 = 不约束。
+  //   ⇒ 贵方表单：组内一路选了结构值点，其余几路宜锁定为同一个点、只选字段。
+  string record = 10;
 }
 
 // ───────────────────────── 外部工件导入（1.5，走 HTTP，不在本 service 里）─────────────────────────
@@ -319,6 +337,14 @@ message Binding {
   //   **`local_id=0` 表示该点尚未建**（绑定刚存、还没走到建点那一步）——
   //   ★**0 不是一个可用的点号**，请勿拿它去查，那会静默查到别人的点。
   repeated ConclusionPoint points = 10;
+
+  // ── 1.11 按字段绑定 ──────────────────────────────────────────────────
+  // ★角色 → **结构值点的字段名**。该角色的点仍在 `roles` 里（globalId），这里只多给字段名。
+  //   **不在本表里的角色 = 整点标量**（与 1.10 完全相同）—— 老绑定、纯标量绑定无需任何改动。
+  //   我方存之前核对：字段存在、是数值标量、单位与 `InputSpec.unit` 一致、物理量与 `InputSpec.quantity`
+  //   一致、同记录组同点；不过即 `PutBindingReply.ok=false` 并写明哪一路哪一条。
+  //   ★空串不等于"不按字段"：整点请**不要放进本表**。
+  map<string, string> role_fields = 11;
 }
 
 // 一条结论点的结构化出口（1.10）。字段与我方 `AI-41` 许诺的那个形状一致。
@@ -337,6 +363,28 @@ message DeleteBindingRequest{ string domain = 1; string binding = 2; }
 // ★删绑定**只停算，不删已经写进实时库的结论点** —— 绑定是"要不要继续算"，
 //   结论点是"算过的历史"，顺手删点会把用户唯一能回看的东西抹掉。
 message DeleteBindingReply  { bool ok = 1; string message = 2; }
+
+// ── 结构值点的字段（1.11）──
+message DescribeStructPointReq { int32 point_id = 1; }   // ★globalId，与 `Binding.roles` 同一个号空间
+message StructFieldInfo {
+  string name         = 1;   // 字段名 —— 填进 `Binding.role_fields` 的就是它
+  string display_name = 2;
+  string type         = 3;   // int32 | int64 | uint32 | uint64 | float | double | bool | string | bytes | timestamp | numbuf；repeated 带 "[]"
+  string unit         = 4;
+  string quantity     = 5;   // attrs["quantity"]（H-261 §2.1）；空 = 采集侧未声明
+  string axis         = 6;   // attrs["axis"]；无方向的量为空
+  bool   bindable     = 7;   // ★能不能绑给一路测点角色：**非 repeated 的数值标量**才行。请只让人选 true 的
+  string description  = 8;
+}
+message DescribeStructPointRes {
+  bool   ok             = 1;
+  string message        = 2;   // ok=false 时说明原因（不是结构值点 / 近 7 天无值 / 实时库不可用…）
+  string struct_name    = 3;
+  int32  struct_id      = 4;
+  int32  struct_version = 5;   // ★取自该点**最近一条值**；采集侧发新版本后会变
+  google.protobuf.Timestamp seen_at = 6;   // 据以判断的那条值的时刻
+  repeated StructFieldInfo fields = 7;
+}
 
 // ───────────────────────── 日志（形状对齐 hs）─────────────────────────
 enum LogLevel {

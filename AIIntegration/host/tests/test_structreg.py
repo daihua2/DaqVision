@@ -76,7 +76,9 @@ class FakeHs:
         return res
 
     def get_struct(self, *, name="", struct_id=0, version=0, with_descriptor=False):
-        self.get_calls.append((name, version, with_descriptor))
+        self.get_calls.append((name or struct_id, version, with_descriptor))
+        if not name:   # 读侧按值自带的 id 取（值里没有结构名）
+            name = next((n for (n, _), d in self.defs.items() if d.id == struct_id), "")
         key = (name, version if version else 1)
         d = self.defs.get(key)
         if d is None:
@@ -162,7 +164,9 @@ class TestRegister(unittest.TestCase):
         reg = StructRegistry(FakeHs())
         self.assertEqual(reg.register([SPEC]), 1)
         paras = reg.paras_for(SPEC.name)
-        self.assertEqual(paras[PARAS_STRUCT_REF], "42")
+        # ★是**结构名**不是 id：hs 按名解析（`GetByName`）。本条原先断言的是 "42" ——
+        #   用例把缺陷钉成了"正确"，建出来的点会被 hs 拒（2026-10-03 订正）。
+        self.assertEqual(paras[PARAS_STRUCT_REF], "AI_PressCurve")
         self.assertEqual(paras[PARAS_ACC], str(ACC_VT_RECORD),
                          "★结构值点的 Acc 必须是 VT_RECORD(36)，与字节点 VT_BLOB(65) 分开")
 

@@ -43,6 +43,7 @@ AICloud `C-11 §3.3` 点名的：v5 是同步阻塞 + 一句"通常需要几十�
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -319,9 +320,9 @@ class Trainer:
             # 样本自己的时间范围就是窗口，**不用绑定上配的 window_sec**：
             # 那个是在线节拍用的，与人当初框的那一段无关。
             window = max(1.0, (s.t_to - s.t_from).total_seconds())
-            probe = Binding(domain=b.domain, binding=b.binding, roles=b.roles,
-                            params=b.params, interval_sec=b.interval_sec,
-                            window_sec=window, enabled=b.enabled)
+            # ★用 replace 而不是逐个抄字段：逐个抄会漏掉后加的（`data_origin`、1.11 的 `fields`），
+            #   漏了 `fields` 的探测会把结构值点当整点取，拿到的全是坏样本。
+            probe = dataclasses.replace(b, window_sec=window)
             try:
                 frame = self._fetcher.fetch(probe, s.t_to)
             except Exception as exc:  # noqa: BLE001

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import signal
 import socket
@@ -37,8 +38,8 @@ from .logstore import LogStore, LogStoreHandler
 from .pointmap import PointMap
 from .runner import run_domain
 from .scheduler import Scheduler
+from .structreg import StructRegistry
 from .trainer import Trainer
-from .types import Frame
 from .workbench import Workbench
 
 logger = logging.getLogger(__name__)
@@ -142,10 +143,7 @@ def rediagnose_segment(seg, *, domains, bindings, fetcher, artifacts):
     frame = fetcher.fetch(b, seg.t_to,
                           artifacts=artifacts.for_binding(seg.domain, seg.binding))
     # 片段的窗口就是片段本身的时间范围，不是绑定上配的那个 window_sec。
-    frame = Frame(domain=frame.domain, binding=frame.binding,
-                  t_start=seg.t_from, t_end=seg.t_to,
-                  channels=frame.channels, params=frame.params,
-                  artifacts=frame.artifacts)
+    frame = dataclasses.replace(frame, t_start=seg.t_from, t_end=seg.t_to)
     res = run_domain(loaded_dom, frame)
     names = {o.key: o.display for o in loaded_dom.declaration.outputs}
     note = ("用当前配置与模型重跑；**未写回实时库**"
@@ -218,15 +216,18 @@ class Service:
             read_addr=cfg.hs_read_addr, write_addr=cfg.hs_write_addr,
             ca_file=cfg.ca_file, cert_file=cfg.cert_file, key_file=cfg.key_file,
             source_identity=source_identity_info(cfg, domain_count=len(domains))))
+        # 结构值的描述与解码（按字段绑定，契约 1.11）。★全进程**一个**：描述按 (id, 版本) 缓存，
+        #   三处取数共用，不各拨各的。
+        structs = StructRegistry(client)
         # 当前启用工件的提供者：推理时交给模块（模块不碰存储）。
         active_arts = ActiveArtifacts(workbench, cfg.data_dir / "artifacts")
-        sched = Scheduler(client=client, fetcher=Fetcher(client), domains=domains,
+        sched = Scheduler(client=client, fetcher=Fetcher(client, structs), domains=domains,
                           bindings=bindings, points=points, artifacts=active_arts,
                           states=workbench)
         # 训练执行器：串行一条，排队顺序 = 建任务顺序（见 trainer 模块头 §2）。
         # ★没有写路径也照起 —— 训练只读实时库、只写本地工件，与结论回流无关。
         trainer = Trainer(workbench=workbench, bindings=bindings, domains=domains,
-                          fetcher=Fetcher(client),
+                          fetcher=Fetcher(client, structs),
                           artifacts_dir=cfg.data_dir / "artifacts")
         trainer.start()
 
@@ -245,14 +246,15 @@ class Service:
         # ⑤ 对外两口
         def rediagnose(seg):
             return rediagnose_segment(seg, domains=domains, bindings=bindings,
-                                      fetcher=Fetcher(client), artifacts=active_arts)
+                                      fetcher=Fetcher(client, structs), artifacts=active_arts)
 
         svc = api.ApiService(guid=guid, version=service_version(), logstore=self.logstore,
                              domains=domains, bindings=bindings, load_errors=load_errors,
                              # 绑定一变就重新同步：建点、推快照、起线程。
                              on_bindings_changed=(sched.sync if can_write else None),
                              workbench=workbench, rediagnose=rediagnose,
-                             trainer=trainer, points=points)
+                             trainer=trainer, points=points,
+                             hs_client=client, structs=structs)
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
                              handlers=(api.build_handler(svc),))
         if server.add_insecure_port(cfg.api_listen) == 0:

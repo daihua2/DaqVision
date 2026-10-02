@@ -9,6 +9,10 @@
 
 ★**不做单位换算**。`InputSpec.unit` 只是绑定时给人核对的提示 ——
   换算错了比不换算更危险：不换算是"图形不对，一眼看得出"，换错了是"数值看着合理但全错"。
+
+★**按字段绑定**（契约 1.11，定义文档 §10.3）：角色可以对到**结构值点的某个字段**上 ——
+  `roles[角色]` 仍是那个点的 globalId，`fields[角色]` 是字段名。不在 `fields` 里 = 整点标量（原语义）。
+  字段对不对（存在、数值标量、单位与物理量相符、同记录组同点）由 `structbind` 在存之前核，这一层只管形状。
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ CREATE TABLE IF NOT EXISTS bindings (
     params_json  TEXT NOT NULL DEFAULT '{}',
     -- 这组点接的是仿真信号还是现场工况（契约 1.6）。老库由 _migrate 补列。
     data_origin  TEXT NOT NULL DEFAULT '',
+    -- 角色 → 结构值点的字段名（契约 1.11）。老库由 _migrate 补列。
+    fields_json  TEXT NOT NULL DEFAULT '{}',
     interval_sec REAL NOT NULL,
     window_sec   REAL NOT NULL,
     enabled      INTEGER NOT NULL DEFAULT 1,
@@ -76,6 +82,9 @@ class Binding:
     window_sec: float = DEFAULT_WINDOW_SEC
     enabled: bool = True
 
+    fields: dict[str, str] = field(default_factory=dict)
+    """角色 → 结构值点的**字段名**（契约 1.11）。不在表里的角色 = 整点标量。"""
+
     def missing_required(self, required_roles: list[str]) -> list[str]:
         """声明里必填、而绑定里没给的那些角色。"""
         return [r for r in required_roles if r not in self.roles]
@@ -112,6 +121,11 @@ class BindingStore:
             self._conn.execute(
                 "ALTER TABLE bindings ADD COLUMN data_origin TEXT NOT NULL DEFAULT ''")
             logger.info("绑定表已补列 data_origin（老库升级；老绑定一律未声明，不当现场）")
+        if "fields_json" not in have:
+            # 老绑定一律整点标量 —— 那正是它们存下时的意思。
+            self._conn.execute(
+                "ALTER TABLE bindings ADD COLUMN fields_json TEXT NOT NULL DEFAULT '{}'")
+            logger.info("绑定表已补列 fields_json（老库升级；老绑定一律整点标量）")
 
     def close(self) -> None:
         with self._lock:
@@ -134,6 +148,15 @@ class BindingStore:
                     f"绑定 {b.domain}/{b.binding} 的角色 {role} 指向非法 globalId {gid!r}"
                     "（0 = hs 尚未分配映射；**绝不能拿 0 去查**，那会静默查到别人的点）"
                 )
+        for role, fname in b.fields.items():
+            if role not in b.roles:
+                # 有字段没有点 = 不知道去哪个点上取这个字段。
+                raise ValueError(
+                    f"绑定 {b.domain}/{b.binding} 的角色 {role} 指定了字段 {fname!r}，却没绑点")
+            if not isinstance(fname, str) or not fname:
+                raise ValueError(
+                    f"绑定 {b.domain}/{b.binding} 的角色 {role} 字段名为空"
+                    "（整点标量请不要放进 fields，空串不等于「不按字段」）")
         for k, v in b.params.items():
             # 只管形状（键非空、值是字符串），**语义一律不碰** —— 那是域的事。
             if not k or not isinstance(k, str):
@@ -145,16 +168,18 @@ class BindingStore:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO bindings(domain,binding,roles_json,params_json,data_origin,"
-                "interval_sec,window_sec,enabled) "
-                "VALUES(?,?,?,?,?,?,?,?) "
+                "interval_sec,window_sec,enabled,fields_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(domain,binding) DO UPDATE SET "
                 "roles_json=excluded.roles_json, params_json=excluded.params_json, "
+                "fields_json=excluded.fields_json, "
                 "data_origin=excluded.data_origin, interval_sec=excluded.interval_sec, "
                 "window_sec=excluded.window_sec, enabled=excluded.enabled, "
                 "updated_at=datetime('now')",
                 (b.domain, b.binding, json.dumps(b.roles, ensure_ascii=False),
                  json.dumps(b.params, ensure_ascii=False), dataorigin.normalize(b.data_origin),
-                 float(b.interval_sec), float(b.window_sec), 1 if b.enabled else 0),
+                 float(b.interval_sec), float(b.window_sec), 1 if b.enabled else 0,
+                 json.dumps(b.fields, ensure_ascii=False)),
             )
             self._conn.commit()
 
@@ -205,4 +230,5 @@ def _to_binding(row: sqlite3.Row) -> Binding:
         interval_sec=float(row["interval_sec"]),
         window_sec=float(row["window_sec"]),
         enabled=bool(row["enabled"]),
+        fields={k: str(v) for k, v in json.loads(row["fields_json"] or "{}").items()},
     )

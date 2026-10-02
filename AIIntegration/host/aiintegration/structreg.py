@@ -36,8 +36,11 @@ from __future__ import annotations
 import logging
 import struct as _struct
 import threading
+import time
+from datetime import timezone
 
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+from google.protobuf import timestamp_pb2
 
 from .hsproto import historystore_pb2 as hs
 from .types import NumBuf, StructFieldSpec, StructSample, StructSpec
@@ -74,6 +77,15 @@ _DTYPE_MAP = {
     "f32": hs.NBD_F32, "f64": hs.NBD_F64,
 }
 _DTYPE_BACK = {v: k for k, v in _DTYPE_MAP.items()}
+
+#: 可以按字段绑给一路测点角色的类型：**非 repeated 的数值标量**（定义文档 §10.3 第 2 条）。
+#: bool / 字符串 / 时刻 / 数值缓冲都不是"一路采样"，绑上去域拿到的不是它以为的东西。
+BINDABLE_TYPES = frozenset({hs.SFT_INT32, hs.SFT_INT64, hs.SFT_UINT32, hs.SFT_UINT64,
+                            hs.SFT_FLOAT, hs.SFT_DOUBLE})
+
+#: 取不到某个 (结构 id, 版本) 的描述后，多久内不再去拨。
+#: ★一帧几万条同版本的值，不缓存失败就是几万次往返 —— 而答案在这几秒里不会变。
+_MISS_TTL_SEC = 60.0
 
 
 #: protobuf 里 `LABEL_REPEATED` 的值（老版 `FieldDescriptor.label` 用它）。
@@ -148,9 +160,16 @@ class StructRegistry:
         self._lock = threading.RLock()
         #: 结构名 → 生效的 `StructDef`（含 hs 分配的 id / version / number）
         self._defs: dict[str, hs.StructDef] = {}
-        #: (结构名, 版本) → 动态消息类。★按**值自带的版本**取，不拿最新版解老值
-        self._msgs: dict[tuple[str, int], type] = {}
+        #: 读侧：(结构 id, 版本) → (该版本的 `StructDef`, 动态消息类)。
+        #  ★按**值自带的** id 与版本取（值里只有这两样，没有结构名），不拿最新版解老值。
+        self._entries: dict[tuple[int, int], tuple[hs.StructDef, type]] = {}
+        self._misses: dict[tuple[int, int], tuple[float, str]] = {}
         self._pool = descriptor_pool.DescriptorPool()
+        # ★hs 对带 TIMESTAMP 字段的结构在描述符里加了 `google/protobuf/timestamp.proto` 依赖；
+        #   空池里没有它，`Add` 会当场失败 —— 先放进去。
+        ts = descriptor_pb2.FileDescriptorProto()
+        timestamp_pb2.DESCRIPTOR.CopyToProto(ts)
+        self._pool.Add(ts)
         self._available: bool | None = None
         self._degraded: list[str] = []
 
@@ -217,60 +236,91 @@ class StructRegistry:
         if d is None:
             return {}
         # ★`StructRef` 一旦绑定**不许换**（换结构 = 新建点）；缺键/空串 = 保持原绑定。
-        return {PARAS_STRUCT_REF: str(d.id), PARAS_ACC: str(ACC_VT_RECORD)}
+        # ★填的是**结构名**，不是 id：hs 按名解析（`GetByName`），daqgate 也填名。
+        #   原先这里填 `str(d.id)`，建出来的点会被 hs 以「StructRef 在注册表里不存在」拒掉（2026-10-03 订正）。
+        return {PARAS_STRUCT_REF: d.name, PARAS_ACC: str(ACC_VT_RECORD)}
 
     def struct_id(self, struct_name: str) -> int:
         with self._lock:
             d = self._defs.get(struct_name)
         return d.id if d is not None else 0
 
-    # ── 解码 ──────────────────────────────────────────────────────────────
-    def decode(self, name: str, sv, t, quality) -> StructSample:
+    # ── 读侧：描述与解码 ────────────────────────────────────────────────
+    def describe(self, struct_id: int, version: int) -> hs.StructDef:
+        """该 (id, 版本) 的结构描述。★`unit` / `attrs` 只在这里有 —— hs 导出的描述符**不带**它们。"""
+        return self._entry(struct_id, version)[0]
+
+    def decode_value(self, sv, t, quality) -> StructSample:
         """`VQT.StructVal` → `StructSample`。
 
-        ★**按 `sv.StructVersion` 取描述符**，不拿最新版解老值（定案 P6、契约约束 4）。
+        ★**按 `sv.StructId` + `sv.StructVersion` 取描述**（定案 P6、契约约束 4）：
+          值里只有这两样；拿最新版解老值是静默错读。
+        ★字段元数据（dtype / shape / 端序）取**同一版本**的 def —— 原先取的是"第一次见到的那版"，
+          版本一多就会拿 v1 的形状去解 v2 的缓冲（2026-10-03 订正）。
         """
-        msg_cls = self._message_class(name, int(sv.StructVersion))
-        m = msg_cls()
+        d, cls = self._entry(int(sv.StructId), int(sv.StructVersion))
+        m = cls()
         m.ParseFromString(bytes(sv.Data))
-        spec_fields = {f.name: f for f in self._defs[name].fields}
+        meta = {f.name: f for f in d.fields}
         out: dict[str, object] = {}
         for f in m.DESCRIPTOR.fields:
-            sf = spec_fields.get(f.name)
+            sf = meta.get(f.name)
             v = getattr(m, f.name)
             if sf is not None and sf.type == hs.SFT_NUMBUF:
                 out[f.name] = NumBuf(data=bytes(v), dtype=_DTYPE_BACK.get(sf.dtype, ""),
                                      shape=tuple(sf.shape), big_endian=bool(sf.bigEndian))
             elif is_repeated(f):
                 out[f.name] = list(v)
+            elif sf is not None and sf.type == hs.SFT_TIMESTAMP:
+                out[f.name] = v.ToDatetime().replace(tzinfo=timezone.utc)
             else:
                 out[f.name] = v
         return StructSample(t=t, quality=quality, fields=out,
-                            struct_name=name, struct_version=int(sv.StructVersion))
+                            struct_name=d.name, struct_version=int(sv.StructVersion))
 
-    def _message_class(self, name: str, version: int):
-        key = (name, version)
-        with self._lock:
-            cls = self._msgs.get(key)
-            if cls is not None:
-                return cls
-        res = self._client.get_struct(name=name, version=version, with_descriptor=True)
-        if not res.fileDescriptor:
+    def decode(self, name: str, sv, t, quality) -> StructSample:
+        """同 `decode_value`，另核对值确实属于结构 `name` —— 不是就抛，不按错的结构解。"""
+        s = self.decode_value(sv, t, quality)
+        if s.struct_name != name:
             raise StructRegistryError(
-                f"结构 {name} v{version} 没有描述符 —— 解不了这个值（不猜字段号）")
-        fdp = descriptor_pb2.FileDescriptorProto()
-        fdp.ParseFromString(bytes(res.fileDescriptor))
+                f"值属于结构 {s.struct_name!r}（id {sv.StructId}），不是期望的 {name!r}")
+        return s
+
+    def _entry(self, struct_id: int, version: int) -> tuple[hs.StructDef, type]:
+        key = (struct_id, version)
         with self._lock:
-            self._defs.setdefault(name, getattr(res, "def"))
-            try:
-                file_desc = self._pool.Add(fdp)
-            except Exception:  # 同名文件已加过（版本各一份），直接取
-                file_desc = self._pool.FindFileByName(fdp.name)
-            full = f"{fdp.package + '.' if fdp.package else ''}{fdp.message_type[0].name}"
-            desc = self._pool.FindMessageTypeByName(full)
-            cls = message_class(desc, self._pool)
-            self._msgs[key] = cls
-            return cls
+            hit = self._entries.get(key)
+            if hit is not None:
+                return hit
+            miss = self._misses.get(key)
+            if miss is not None and time.monotonic() - miss[0] < _MISS_TTL_SEC:
+                raise StructRegistryError(miss[1])
+        try:
+            res = self._client.get_struct(struct_id=struct_id, version=version,
+                                          with_descriptor=True)
+            if not res.fileDescriptor:
+                raise StructRegistryError(
+                    f"结构 id {struct_id} v{version} 没有描述符 —— 解不了这个值（不猜字段号）")
+            d = getattr(res, "def")
+            fdp = descriptor_pb2.FileDescriptorProto()
+            fdp.ParseFromString(bytes(res.fileDescriptor))
+            with self._lock:
+                try:
+                    self._pool.Add(fdp)
+                except Exception:  # noqa: BLE001 —— 同名文件已加过（并发取同一版），直接取
+                    self._pool.FindFileByName(fdp.name)
+                full = f"{fdp.package + '.' if fdp.package else ''}{fdp.message_type[0].name}"
+                cls = message_class(self._pool.FindMessageTypeByName(full), self._pool)
+                entry = (d, cls)
+                self._entries[key] = entry
+                self._misses.pop(key, None)
+                return entry
+        except Exception as exc:
+            why = (str(exc) if isinstance(exc, StructRegistryError)
+                   else f"取结构 id {struct_id} v{version} 失败：{type(exc).__name__}: {exc}")
+            with self._lock:
+                self._misses[key] = (time.monotonic(), why)
+            raise StructRegistryError(why) from exc
 
 
 def numbuf_to_list(buf: NumBuf) -> list:

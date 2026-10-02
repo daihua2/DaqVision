@@ -565,7 +565,7 @@ OPC UA 的做法：元数据**挂在点上**（与 `AI-59 §3`「落在点上」
 ### 11.1 保持族查询对结构值点**不适用** ⇒ 取帧一律 `kRawData`
 
 `kBeginInterpolated` / `kEndInterpolated` / `kTrendData`，以及**桶内没有样本**时的
-`kFirstValue` / `kLastValue`：每桶回 `NullValue` + `QualityStatisticsBad(-1028)`，栅格仍满
+`kFirstValue` / `kLastValue`：每桶回 `NullValue` + `QualityStatisticsBad(-1028)`，栅格仍满（★订正 2026-10-03：hs 09-20 起改为 `QualityMethodNotApplicableBad(-1036)`（`D-261`）；且 `kFirstValue`/`kLastValue` **桶内有真样本照发整值**，只有空桶才回坏码 —— 读 hs `aggregator.cpp` 核实；★但**时刻是桶起点**不是样本时刻（WSL 联机实测），要样本时刻用 `kLastTime`/`kFirstTime`，它们回样本本身）
 （用户 2026-09-19 裁定，hs 定稿 #31）。理由是结构值不参与重建，"保持"会把上一条结构值
 当成这一刻的值发出去。
 
@@ -581,7 +581,7 @@ OPC UA 的做法：元数据**挂在点上**（与 `AI-59 §3`「落在点上」
 
 ⇒ **我方取结构值帧时，时间窗右端至少留 5 秒**。否则 §3 推论里那条
 「相邻 T 之差 > 1.5 倍即丢过样」的判据会把这个可见性窗口当成丢样**误报** ——
-而那正是我方拿来当"数据可信"硬门槛的判据（骨架层 `runner.py` 据此拒出结论）。
+而那正是我方拿来当"数据可信"硬门槛的判据。★订正（2026-10-03）：原文此处写「骨架层 `runner.py` 据此拒出结论」，**代码里没有这道门** —— 丢样判据只在本文与 `research/` 里；「基准间隔」怎么取也没定（§8.1 已警告它比判据本身更容易错）。已列入 [暂缓与未定事项](暂缓与未定事项.md) §二之五 F14。
 
 ★另一条只影响 daqgate、我方不受影响，但记下免得复述错：`1.9.493` 上结构值点的
 `kCount` / `kChangeCount` / `kTimeGood` / `kFirstTime` / `kLastTime` **全错**（样本数恒 0），

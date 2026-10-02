@@ -24,11 +24,12 @@ from .domains import LoadedDomain
 from .logstore import LogFilter, LogLevel, LogStore
 from .pointmap import default_point_name
 from .quality import Quality
+from . import structbind
 
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.10"
+PROTO_VERSION = "1.11"
 
 
 def _ts(dt: datetime) -> object:
@@ -59,7 +60,7 @@ class ApiService(WorkbenchApiMixin):
                  domains: dict[str, LoadedDomain], bindings: BindingStore,
                  load_errors: list[tuple[str, str]] | None = None,
                  on_bindings_changed=None, workbench=None, rediagnose=None,
-                 trainer=None, points=None) -> None:
+                 trainer=None, points=None, hs_client=None, structs=None) -> None:
         self._guid = guid
         self._version = version
         self._logs = logstore
@@ -78,6 +79,10 @@ class ApiService(WorkbenchApiMixin):
         # 点表。没接则 `Binding.points` 回空 —— 那是**如实**的（我方确实答不出点号），
         # 不是给一个 0 冒充。贵方据此知道"这一格现在没有"，而不是"点号是 0"。
         self._points = points
+        # 按字段绑定的核对与字段描述（1.11）要读实时库。★没接就**拒绝字段绑定**并说清，
+        #   不跳过核对把它存下来 —— 那等于"不换算、只拒绝"那条规矩在这条路上失效。
+        self._hs = hs_client
+        self._structs = structs
 
     # ── 身份与域 ──────────────────────────────────────────────────────────
     def GetInfo(self, request, context):
@@ -114,7 +119,8 @@ class ApiService(WorkbenchApiMixin):
                 info.inputs.add(role=i.role, unit=i.unit,
                                 required=i.required, description=i.description,
                                 kind=i.kind, display=i.display,
-                                group=i.group, group_display=i.group_display)
+                                group=i.group, group_display=i.group_display,
+                                quantity=i.quantity, record=i.record)
             for o in d.declaration.outputs:
                 ospec = info.outputs.add(
                     key=o.key, display=o.display, value_type=o.value_type,
@@ -141,6 +147,8 @@ class ApiService(WorkbenchApiMixin):
                          enabled=b.enabled, data_origin=b.data_origin)
         for role, gid in b.roles.items():
             out.roles[role] = gid
+        for role, fname in b.fields.items():
+            out.role_fields[role] = fname
         for k, v in b.params.items():
             out.params[k] = v
         # ★1.10：本条绑定产出哪些结论点 + 它们的 localId（贵方 C-47 §3）。
@@ -178,18 +186,62 @@ class ApiService(WorkbenchApiMixin):
         # 纯图片域（没有测点类输入）的绑定本就没有 roles —— 只有这种域才放行空 roles。
         loaded = self._domains[b.domain]
         no_point_inputs = not any(i.kind == "point" for i in loaded.declaration.inputs)
+        nb = Binding(
+            domain=b.domain, binding=b.binding, roles=dict(b.roles),
+            params=dict(b.params),
+            data_origin=b.data_origin,
+            interval_sec=b.interval_sec or 60.0,
+            window_sec=b.window_sec or 60.0,
+            enabled=b.enabled, fields=dict(b.role_fields))
+        if nb.fields:
+            why = self._check_fields(nb, loaded)
+            if why:
+                return pb.PutBindingReply(ok=False, message=why)
         try:
-            self._bindings.put(Binding(
-                domain=b.domain, binding=b.binding, roles=dict(b.roles),
-                params=dict(b.params),
-                data_origin=b.data_origin,
-                interval_sec=b.interval_sec or 60.0,
-                window_sec=b.window_sec or 60.0,
-                enabled=b.enabled), allow_no_roles=no_point_inputs)
+            self._bindings.put(nb, allow_no_roles=no_point_inputs)
         except ValueError as exc:
             # 校验失败原样回给调用方（globalId=0、一个角色都没绑…），**不吞**。
             return pb.PutBindingReply(ok=False, message=str(exc))
         return pb.PutBindingReply(ok=True, message=self._notify_changed())
+
+    def _check_fields(self, b: Binding, loaded: LoadedDomain) -> str:
+        """按字段绑定的核对（`structbind`）。过了回空串，不过回原因。"""
+        if self._hs is None or self._structs is None:
+            return "本服务未接实时库读口，无法核对结构值字段 —— 按字段绑定一律拒绝（不跳过核对存下来）"
+        try:
+            structbind.check_binding(b, loaded.declaration.inputs,
+                                     structbind.cached_lookup(self._hs, self._structs))
+        except structbind.StructBindError as exc:
+            return str(exc)
+        except Exception as exc:  # noqa: BLE001 —— 连不上实时库等：如实回，不当成核对通过
+            logger.warning("按字段绑定核对时读实时库失败：%s", exc)
+            return f"读实时库失败，无法核对结构值字段（{type(exc).__name__}: {exc}）—— 绑定未保存，请稍后重试"
+        return ""
+
+    def DescribeStructPoint(self, request, context):
+        if self._hs is None or self._structs is None:
+            return pb.DescribeStructPointRes(ok=False, message="本服务未接实时库读口")
+        gid = int(request.point_id)
+        if gid <= 0:
+            return pb.DescribeStructPointRes(
+                ok=False, message=f"point_id={gid} 不是可用的 globalId（0 = hs 尚未分配，绝不能拿 0 去查）")
+        try:
+            ps = structbind.find_point_struct(self._hs, self._structs, gid)
+        except structbind.StructBindError as exc:
+            return pb.DescribeStructPointRes(ok=False, message=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return pb.DescribeStructPointRes(
+                ok=False, message=f"读实时库失败：{type(exc).__name__}: {exc}")
+        d = ps.struct
+        res = pb.DescribeStructPointRes(ok=True, struct_name=d.name, struct_id=d.id,
+                                        struct_version=d.version, seen_at=_ts(ps.seen_at))
+        for f in d.fields:
+            res.fields.add(name=f.name, display_name=f.displayName,
+                           type=structbind.type_name(f), unit=f.unit,
+                           quantity=f.attrs.get(structbind.ATTR_QUANTITY, ""),
+                           axis=f.attrs.get(structbind.ATTR_AXIS, ""),
+                           bindable=structbind.is_bindable(f), description=f.description)
+        return res
 
     def DeleteBinding(self, request, context):
         ok = self._bindings.delete(request.domain, request.binding)
@@ -289,6 +341,8 @@ def build_handler(svc: ApiService) -> grpc.GenericRpcHandler:
         "ListBindings":  _unary(svc.ListBindings, pb.ListBindingsRequest, pb.ListBindingsReply),
         "PutBinding":    _unary(svc.PutBinding, pb.PutBindingRequest, pb.PutBindingReply),
         "DeleteBinding": _unary(svc.DeleteBinding, pb.DeleteBindingRequest, pb.DeleteBindingReply),
+        "DescribeStructPoint": _unary(svc.DescribeStructPoint, pb.DescribeStructPointReq,
+                                      pb.DescribeStructPointRes),
         "QueryLogs":     _unary(svc.QueryLogs, pb.LogQueryReq, pb.QueryLogsRes),
         "SubscribeLogs": _stream(svc.SubscribeLogs, pb.LogSubscribeReq, pb.LogStreamItem),
     }

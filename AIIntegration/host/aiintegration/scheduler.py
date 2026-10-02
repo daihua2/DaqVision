@@ -67,6 +67,12 @@ RESNAPSHOT_INTERVAL_KNOWN_PEER_SEC = 3600.0
 #: 退避不是为了少打扰对端，是为了不让日志被刷爆；降级态 WARN 仍每周期都打。
 MAX_BACKOFF_SEC = 60.0
 
+#: 按字段绑定（结构值点）的绑定，取数窗右端至少离节拍这么远（`H-263`，定义文档 §11.2）。
+#: ★写入洪流停后约 3 秒内，最近一块在提交队列里、查询路径看不见它 ⇒ 窗口取到节拍上，
+#:   右端那几秒会"少一块"，看着像丢样。**不丢数据**，只是取早了。
+#: 只用于在线节拍：回溯判别与训练取的是早已落盘的历史片段，不平移。
+STRUCT_RIGHT_MARGIN_SEC = 5.0
+
 
 def aligned_tick(now: datetime, interval_sec: float) -> datetime:
     """`now` 之前最近的一个整节拍边界（含相等）。
@@ -178,7 +184,8 @@ class Scheduler:
 
         # ★推理路径**带上当前启用的工件**；训练路径不带（拿旧模型当输入 = 模型喂自己）。
         arts = self._artifacts.for_binding(b.domain, b.binding) if self._artifacts else {}
-        frame = self._fetcher.fetch(b, tick, artifacts=arts)   # hs 不可用会抛，调用方按退避处置
+        end = tick - timedelta(seconds=STRUCT_RIGHT_MARGIN_SEC) if b.fields else tick
+        frame = self._fetcher.fetch(b, end, artifacts=arts)    # hs 不可用会抛，调用方按退避处置
         result = run_domain(loaded, frame, states=self._states)
 
         items: list[tuple[int, Finding]] = []
