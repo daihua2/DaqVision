@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aiintegration.pointmap import DEFAULT_BASE_LOCAL_ID, PointMap, default_point_name
+from aiintegration.pointmap import (
+    DEFAULT_BASE_LOCAL_ID, PointMap, container_name, default_point_name,
+)
 
 
 class TestPointMap(unittest.TestCase):
@@ -76,6 +78,79 @@ class TestPointMap(unittest.TestCase):
         m = self.pm()
         self.assertIsNone(m.local_id_of("vib", "nope", "health_score"))
         m.close()
+
+    # ── 上级实体（C-57，甲：服务 → 域 → 绑定 → 点）────────────────────────
+    def test_新点带上绑定与域的实体号_且三者互不撞号(self):
+        m = self.pm()
+        r = self.ensure(m)
+        self.assertNotEqual(r.binding_entity_id, 0)
+        self.assertNotEqual(r.domain_entity_id, 0)
+        self.assertEqual(len({r.local_id, r.binding_entity_id, r.domain_entity_id}), 3)
+        m.close()
+
+    def test_同域共用域实体_同名绑定跨域是两个实体(self):
+        m = self.pm()
+        a = self.ensure(m, binding="dev1")
+        b = self.ensure(m, binding="dev2")
+        c = self.ensure(m, domain="vfd", binding="dev1")
+        self.assertEqual(a.domain_entity_id, b.domain_entity_id)
+        self.assertNotEqual(a.binding_entity_id, b.binding_entity_id)
+        self.assertNotEqual(a.binding_entity_id, c.binding_entity_id, "一条通道只属一条连接")
+        self.assertNotEqual(a.domain_entity_id, c.domain_entity_id)
+        m.close()
+
+    def test_点与上级共用号段_后分的点不撞上级的号(self):
+        m = self.pm()
+        self.ensure(m, key="a")
+        self.ensure(m, binding="dev2", key="a")
+        self.ensure(m, key="b")
+        ids = []
+        for r in m.all():
+            ids.append(r.local_id)
+        ids += {x for r in m.all() for x in (r.binding_entity_id, r.domain_entity_id)}
+        self.assertEqual(len(ids), len(set(ids)))
+        m.close()
+
+    def test_all与ensure给出同样的上级号_重启不变(self):
+        m = self.pm(); r = self.ensure(m); m.close()
+        m2 = self.pm()
+        (got,) = m2.all()
+        self.assertEqual((got.binding_entity_id, got.domain_entity_id),
+                         (r.binding_entity_id, r.domain_entity_id))
+        self.assertEqual(self.ensure(m2), got)
+        m2.close()
+
+    def test_老库开库补登上级_点号一个不动(self):
+        # 现场 27 个点就是这种库：上级实体之前建的，points 表有、containers 表没有。
+        import sqlite3
+        con = sqlite3.connect(str(self.db))
+        con.execute("CREATE TABLE points (domain TEXT NOT NULL, binding TEXT NOT NULL, key TEXT NOT NULL,"
+                    " local_id INTEGER NOT NULL UNIQUE, name TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '',"
+                    " value_type TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                    " PRIMARY KEY (domain, binding, key))")
+        old = [("vib", "dev1", "a", 1000), ("vib", "dev1", "b", 1001), ("vfd", "dev1", "a", 1002)]
+        for d, b, k, i in old:
+            con.execute("INSERT INTO points(domain,binding,key,local_id,name,value_type) VALUES(?,?,?,?,?,?)",
+                        (d, b, k, i, default_point_name(d, b, k), "float"))
+        con.commit(); con.close()
+
+        m = self.pm()
+        rows = m.all()
+        self.assertEqual([(r.domain, r.binding, r.key, r.local_id) for r in rows],
+                         [(d, b, k, i) for d, b, k, i in old])
+        self.assertTrue(all(r.binding_entity_id > 1002 and r.domain_entity_id > 1002 for r in rows))
+        first = [(r.binding_entity_id, r.domain_entity_id) for r in rows]
+        m.close()
+        m2 = self.pm()
+        self.assertEqual([(r.binding_entity_id, r.domain_entity_id) for r in m2.all()], first,
+                         "再开库又分了一次上级号")
+        self.assertEqual(self.ensure(m2, key="c").local_id,
+                         max(max(first, key=max)) + 1)
+        m2.close()
+
+    def test_上级名与点名同一套前缀(self):
+        self.assertEqual(container_name("vib"), "AI.vib")
+        self.assertEqual(container_name("vib", "dev1"), "AI.vib.dev1")
 
     def test_点名模板一眼看得出来源(self):
         # 点表是运维天天看的地方，名字含糊的点等于没有。

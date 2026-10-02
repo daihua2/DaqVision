@@ -14,6 +14,12 @@
   · 不破"骨架零重依赖"（不引第三方）；
   · 不重蹈 v5 那个坑 —— 它的 `frames.json` 每追加一帧就把整个数组反序列化 + 重新序列化，
     O(n²)，现场真的写坏过（文件里还带着 JSON 损坏自愈逻辑）。
+
+**上级实体**（`C-57`，2026-10-02 用户定「甲 + 族根 15/17」）：来源自己登记自己的结构 ——
+  服务 → **域** → **绑定** → 点，对齐网关的 网关 → 连接 → 通道 → 点。域与绑定各是 hs 里的一个实体，
+  也要一个本 guid 空间内稳定的 localId，理由同点：换号 = hs 那边新建一个、旧的成孤儿。
+  ⇒ 与点**共用一个号段**（取两张表的最大号 +1），只增不回收；绑定实体按 (域, 绑定) 区分 ——
+  同名绑定挂在两个域下就是两个实体（一条通道只属一条连接）。
 """
 
 from __future__ import annotations
@@ -41,6 +47,14 @@ CREATE TABLE IF NOT EXISTS points (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (domain, binding, key)
 );
+-- 上级实体。binding = '' 是域实体，否则是该域下的绑定实体。
+CREATE TABLE IF NOT EXISTS containers (
+    domain     TEXT NOT NULL,
+    binding    TEXT NOT NULL,
+    local_id   INTEGER NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (domain, binding)
+);
 """
 
 
@@ -53,6 +67,10 @@ class PointRow:
     name: str
     unit: str
     value_type: str
+    binding_entity_id: int = 0
+    """所属绑定实体的 localId（点的 `RelationId`）。0 = 不挂上级（只在手工构造的行上出现）。"""
+    domain_entity_id: int = 0
+    """所属域实体的 localId（绑定实体的 `ContainerId`）。"""
 
 
 class PointMap:
@@ -75,6 +93,7 @@ class PointMap:
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._backfill_containers()
 
     def close(self) -> None:
         with self._lock:
@@ -105,18 +124,65 @@ class PointMap:
                         (name, unit, value_type, domain, binding, key),
                     )
                     self._conn.commit()
-                return PointRow(domain, binding, key, row["local_id"], name, unit, value_type)
+                return PointRow(domain, binding, key, row["local_id"], name, unit, value_type,
+                                *self._containers_of(domain, binding))
 
-            cur = self._conn.execute("SELECT MAX(local_id) AS m FROM points").fetchone()
-            nxt = self._base if cur["m"] is None else max(int(cur["m"]) + 1, self._base)
+            nxt = self._next_id()
             self._conn.execute(
                 "INSERT INTO points(domain,binding,key,local_id,name,unit,value_type) "
                 "VALUES(?,?,?,?,?,?,?)",
                 (domain, binding, key, nxt, name, unit, value_type),
             )
+            # 点先分号、上级后分 —— 空库第一个点仍是基数号。同一事务提交，不会出现"有点无上级"。
+            parents = self._ensure_containers(domain, binding)
             self._conn.commit()
             logger.info("分配结论点 localId=%d ← %s/%s/%s (%s)", nxt, domain, binding, key, name)
-            return PointRow(domain, binding, key, nxt, name, unit, value_type)
+            return PointRow(domain, binding, key, nxt, name, unit, value_type, *parents)
+
+    # ── 上级实体（调用方持锁）────────────────────────────────────────────
+    def _next_id(self) -> int:
+        """点与上级实体共用的下一个号。**两张表一起取最大** —— 只看一张就会撞号。"""
+        cur = self._conn.execute(
+            "SELECT MAX(m) AS m FROM (SELECT MAX(local_id) AS m FROM points "
+            "UNION ALL SELECT MAX(local_id) FROM containers)").fetchone()
+        return self._base if cur["m"] is None else max(int(cur["m"]) + 1, self._base)
+
+    def _container_id(self, domain: str, binding: str) -> int:
+        row = self._conn.execute(
+            "SELECT local_id FROM containers WHERE domain=? AND binding=?",
+            (domain, binding)).fetchone()
+        if row is not None:
+            return int(row["local_id"])
+        nxt = self._next_id()
+        self._conn.execute("INSERT INTO containers(domain,binding,local_id) VALUES(?,?,?)",
+                           (domain, binding, nxt))
+        logger.info("分配上级实体 localId=%d ← %s", nxt, container_name(domain, binding))
+        return nxt
+
+    def _ensure_containers(self, domain: str, binding: str) -> tuple[int, int]:
+        """→ (绑定实体号, 域实体号)。不提交，由调用方与点一起提交。"""
+        dom = self._container_id(domain, "")
+        return self._container_id(domain, binding), dom
+
+    def _containers_of(self, domain: str, binding: str) -> tuple[int, int]:
+        """已有点的上级号。开库时已补登（`_backfill_containers`），这里只读。"""
+        rows = {r["binding"]: int(r["local_id"]) for r in self._conn.execute(
+            "SELECT binding, local_id FROM containers WHERE domain=? AND binding IN (?, '')",
+            (domain, binding))}
+        return rows.get(binding, 0), rows.get("", 0)
+
+    def _backfill_containers(self) -> None:
+        """给**还没有上级**的已有点补登域 / 绑定实体（上级实体之前建的库，现场 27 个点即是）。
+
+        ★已有点的号**一个都不动** —— 补登只新分上级的号，从现有最大号往后排。
+        ★按 (域, 绑定) 排序补，结果与开库次数无关；补过的再开库不会再分。
+        """
+        with self._lock:
+            pairs = self._conn.execute(
+                "SELECT DISTINCT domain, binding FROM points ORDER BY domain, binding").fetchall()
+            for p in pairs:
+                self._ensure_containers(p["domain"], p["binding"])
+            self._conn.commit()
 
     # ── 读 ────────────────────────────────────────────────────────────────
     def all(self) -> list[PointRow]:
@@ -124,10 +190,14 @@ class PointMap:
         本轮未出现的旧实体一律删除，漏发一个就是删一个。"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM points ORDER BY local_id").fetchall()
+                "SELECT p.*, COALESCE(b.local_id, 0) AS bid, COALESCE(d.local_id, 0) AS did "
+                "FROM points p "
+                "LEFT JOIN containers b ON b.domain = p.domain AND b.binding = p.binding "
+                "LEFT JOIN containers d ON d.domain = p.domain AND d.binding = '' "
+                "ORDER BY p.local_id").fetchall()
         return [
             PointRow(r["domain"], r["binding"], r["key"], r["local_id"],
-                     r["name"], r["unit"], r["value_type"])
+                     r["name"], r["unit"], r["value_type"], r["bid"], r["did"])
             for r in rows
         ]
 
@@ -151,3 +221,8 @@ def default_point_name(domain: str, binding: str, key: str) -> str:
     点表是运维天天看的地方，名字含糊的点等于没有。
     """
     return f"AI.{domain}.{binding}.{key}"
+
+
+def container_name(domain: str, binding: str = "") -> str:
+    """上级实体的显示名，与点名同一套前缀：`AI.<域>` / `AI.<域>.<绑定>`。"""
+    return f"AI.{domain}.{binding}" if binding else f"AI.{domain}"

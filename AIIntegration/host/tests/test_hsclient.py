@@ -53,6 +53,69 @@ class TestSnapshot(unittest.TestCase):
                          [hs.EntityConfigPush.SNAPSHOT_BEGIN, hs.EntityConfigPush.SNAPSHOT_END])
 
 
+class TestContainers(unittest.TestCase):
+    """C-57：点 → 绑定（族根 17）→ 域（族根 15）→ hs 合成到我方身份 gid。"""
+
+    def rows(self):
+        # 域 vib：2001；其下绑定 dev1：2002、dev2：2003；域 vfd：2004，其下同名绑定 dev1：2005
+        return [
+            PointRow("vib", "dev1", "a", 1000, "AI.vib.dev1.a", "", "float", 2002, 2001),
+            PointRow("vib", "dev1", "b", 1001, "AI.vib.dev1.b", "", "float", 2002, 2001),
+            PointRow("vib", "dev2", "a", 1002, "AI.vib.dev2.a", "", "float", 2003, 2001),
+            PointRow("vfd", "dev1", "a", 1003, "AI.vfd.dev1.a", "", "float", 2005, 2004),
+        ]
+
+    def puts(self, rows):
+        return [x for x in build_snapshot_frames(rows) if x.op == hs.EntityConfigPush.PUT]
+
+    def test_每域一个连接_每个域绑定对一个通道_在点之前(self):
+        p = self.puts(self.rows())
+        self.assertEqual([(x.id, x.categoryRootId) for x in p],
+                         [(2001, 15), (2004, 15), (2002, 17), (2003, 17), (2005, 17),
+                          (1000, 12), (1001, 12), (1002, 12), (1003, 12)])
+
+    def test_族根是present而不是缺席(self):
+        # 缺席与 present-0 处置相反（historystore.proto 该字段注释）；三类都要 present。
+        self.assertTrue(all(x.HasField("categoryRootId") for x in self.puts(self.rows())))
+
+    def test_链能拼通_点指绑定_绑定指域_域到顶(self):
+        p = {x.id: x.entity for x in self.puts(self.rows())}
+        self.assertEqual(p[1003].RelationId, 2005)
+        self.assertEqual(p[2005].ContainerId, 2004)
+        self.assertEqual(p[2004].ContainerId, 0)
+        self.assertEqual((p[2001].CategoryId, p[2002].CategoryId), (15, 17))
+
+    def test_上级不是采集点(self):
+        # hs 判采集点认的是 Paras 里的 Acc；上级带了 Acc 就会被当成一个点。
+        import json
+        p = {x.id: x.entity for x in self.puts(self.rows())}
+        for i in (2001, 2002):
+            self.assertNotIn(PARAS_ACC, json.loads(p[i].Paras or "{}"))
+        self.assertEqual(p[2002].Name, "AI.vib.dev1")
+        self.assertEqual(p[2001].Name, "AI.vib")
+
+    def test_没挂上级的行不产生上级实体(self):
+        p = self.puts([row()])
+        self.assertEqual(len(p), 1)
+        self.assertEqual(p[0].entity.RelationId, 0)
+
+    def test_与PointMap接起来链完整(self):
+        import tempfile
+        from pathlib import Path
+        from aiintegration.pointmap import PointMap
+        with tempfile.TemporaryDirectory() as d:
+            m = PointMap(Path(d) / "p.db")
+            for b in ("dev1", "dev2"):
+                m.ensure("vib", b, "a", name=f"AI.vib.{b}.a", unit="", value_type="float")
+            p = {x.id: (x.categoryRootId, x.entity) for x in self.puts(m.all())}
+            m.close()
+        for root, e in p.values():
+            if root == 12:
+                self.assertEqual(p[e.RelationId][0], 17, "点的 RelationId 没指到一个本轮推了的通道")
+            elif root == 17:
+                self.assertEqual(p[e.ContainerId][0], 15, "通道的 ContainerId 没指到一个本轮推了的连接")
+
+
 class TestEntity(unittest.TestCase):
     def test_Paras带Acc这是采集点的判别键(self):
         import json

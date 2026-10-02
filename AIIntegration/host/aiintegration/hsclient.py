@@ -62,7 +62,7 @@ import grpc
 
 from .hsproto import daqcontract_pb2 as daq
 from .hsproto import historystore_pb2 as hs
-from .pointmap import PointRow
+from .pointmap import PointRow, container_name
 from .quality import Quality
 from .types import Finding
 
@@ -87,6 +87,13 @@ SOURCE_KIND = "ai-service"
 
 #: 对端支持 op 7 的能力位（`H-272 §1`）。
 FEATURE_SOURCE_IDENTITY = "identity-source-kind"
+
+# 类别族根（`EntityConfigPush.categoryRootId`，daqgate categoryRootSet 成员）。
+# hs 拼归属链**只认 17（通道）/ 15（连接）**（`ancestry.h`），故域当连接、绑定当通道
+# （`C-57`，2026-10-02 用户定「甲 + 族根 15/17」）。改它们就是改对外约定，要发函。
+CATEGORY_POINT = 12
+CATEGORY_LINK = 15      # 域
+CATEGORY_CHANNEL = 17   # 绑定
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,10 +151,37 @@ def build_entity(row: PointRow, *, description: str = "") -> daq.EntityConfig:
     return daq.EntityConfig(
         Id=row.local_id,
         Name=row.name,
-        CategoryId=12,
+        CategoryId=CATEGORY_POINT,
+        # 点 → 它的绑定（hs 视作采集通道）。0 = 不挂，hs 那边链就是空的（`C-57` 报的那个态）。
+        RelationId=row.binding_entity_id,
         Paras=json.dumps(paras, ensure_ascii=False),
         Version="1",
     )
+
+
+def build_container_entities(rows: list[PointRow]) -> list[tuple[int, daq.EntityConfig]]:
+    """由点行归纳出上级实体：每个域一个（族根 15），每个 (域, 绑定) 一个（族根 17）。
+
+    → `[(categoryRootId, entity)]`，域在前、绑定在后，各按 localId 排。
+    ★**不另读库**：上级号随点行带来（`PointMap.all()` 一次 JOIN 取齐），快照里的点与上级
+      出自同一次读，不会出现"点指向一个本轮没推的上级"。没挂上级的行（号为 0）不产生实体。
+    ★绑定实体 `ContainerId` = 域实体号：hs 由通道的 containerId 走到连接（`normalizedParentOf` ②）；
+      域实体 `ContainerId` = 0，hs 由族根 15 合成最后一跳到我方身份 gid（同 ③）。
+    """
+    domains: dict[int, str] = {}
+    bindings: dict[int, tuple[str, str, int]] = {}
+    for r in rows:
+        if r.domain_entity_id:
+            domains[r.domain_entity_id] = r.domain
+        if r.binding_entity_id:
+            bindings[r.binding_entity_id] = (r.domain, r.binding, r.domain_entity_id)
+    out = [(CATEGORY_LINK, daq.EntityConfig(
+        Id=i, Name=container_name(d), CategoryId=CATEGORY_LINK, Version="1"))
+        for i, d in sorted(domains.items())]
+    out += [(CATEGORY_CHANNEL, daq.EntityConfig(
+        Id=i, Name=container_name(d, b), CategoryId=CATEGORY_CHANNEL, ContainerId=did, Version="1"))
+        for i, (d, b, did) in sorted(bindings.items())]
+    return out
 
 
 def build_source_identity_frame(info: SourceIdentityInfo, *,
@@ -178,12 +212,19 @@ def build_snapshot_frames(rows: list[PointRow], *,
     ★`identity` 给了就在**最前面**放一帧 op 7：它不属于快照事务（`H-272 §4.1`），
       放在 `SNAPSHOT_BEGIN` 之前，流断在快照中途时身份也已经送到了。
       要不要给由调用方决定（开关 + 能力位），这里只管摆放。
+    ★上级实体（域、绑定）在点之前，同属这一份快照 —— 漏推上级同样是删上级。
+    ★每帧 PUT 都带 `categoryRootId`（present）：hs 按它判这一跳是通道还是连接，
+      AICloud 按 presence 决定要不要退回自己的判据（`historystore.proto` 该字段注释）。
     """
     frames = [build_source_identity_frame(identity)] if identity is not None else []
     frames.append(hs.EntityConfigPush(op=hs.EntityConfigPush.SNAPSHOT_BEGIN))
+    for root, ent in build_container_entities(rows):
+        frames.append(hs.EntityConfigPush(
+            op=hs.EntityConfigPush.PUT, id=ent.Id, entity=ent, categoryRootId=root))
     for row in rows:
         frames.append(hs.EntityConfigPush(
-            op=hs.EntityConfigPush.PUT, id=row.local_id, entity=build_entity(row)))
+            op=hs.EntityConfigPush.PUT, id=row.local_id, entity=build_entity(row),
+            categoryRootId=CATEGORY_POINT))
     frames.append(hs.EntityConfigPush(op=hs.EntityConfigPush.SNAPSHOT_END))
     return frames
 
@@ -404,7 +445,8 @@ class HsClient:
                 response_deserializer=hs.PushEntityConfigsRes.FromString,
             )(iter(frames), timeout=timeout)
         with_identity = bool(frames) and frames[0].op == hs.EntityConfigPush.SOURCE_IDENTITY
-        logger.info("结论点快照已推送：%d 个点，accepted=%d%s", len(rows), res.accepted,
+        logger.info("结论点快照已推送：%d 个点（另 %d 个上级实体），accepted=%d%s", len(rows),
+                    sum(f.op == hs.EntityConfigPush.PUT for f in frames) - len(rows), res.accepted,
                     "（含自报身份 SOURCE_IDENTITY）" if with_identity else "")
         return res.accepted
 
