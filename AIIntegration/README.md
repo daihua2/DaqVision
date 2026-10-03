@@ -1544,3 +1544,42 @@ ancestorIds     = baseline 6 点 [2765, 2762, 2761] / iso 9 点 [2766, 2763, 276
 - AICloud 按 `C-58 §3` 当天只读核四项并回函；其「诊断模块 / 绑定」显示改动（`3901af68`）尚未发开发服务；
 - 暂存目录 `/root/aii-stage-20261003/` 与三份 `*.bak-20261003-deploybe09d85` **留到 AICloud 核完**，清理须用户点头；
 - 结构值按字段绑定在现场无从实测（现场无结构值点）。
+
+---
+
+## 31. 部署记录：契约 1.12 `RetirePoints` 上现场，停用 `vibration_lowfreq` 12 点（2026-10-03，用户授权）
+
+### 31.1 起因
+
+AICloud `C-59 §5`：`AI.vibration_lowfreq.*` 12 点自 09-24 起无值，问是否停用、留还是清。09-18 拆分时删了绑定、按「删绑定不删点」留下（§27.6），
+§30 部署后又挂上了「诊断模块 / 绑定」两层。用户 2026-10-03 定：**清掉，显式停用**。落码 `ca04352`（契约 1.12，见 CHANGELOG）。
+
+hs 一侧先读代码核过（historystore `b1abf48`）：完整快照里缺席的实体只进**待确认删除清单**、存储不动；非网关来源同一条路，上级实体也一样；
+重新推回拿回原 gid 并自动出清单。
+
+### 31.2 步骤
+
+1. 三环境各 **813** 条全过；变异 10 发 10 红；
+2. `git archive ca04352` → `/root/aii-stage-20261003b/`，sha256 两端一致（`b92f28ff…`）；与现场运行代码差异正好 4 个文件（`admin.py`、`api.py`、`pointmap.py`、`apiproto/aiintegration_pb2.py`）；
+3. 干跑：现场 venv + 库只读副本 —— 补列 `retired_at`、对 `vibration_iso` 停用被拒、停用 lowfreq 退出 12 点、上级实体 6 → 4；
+4. `deploy-ca04352.sh`（同 §30 套路，备份标签 `20261003-deployca04352`）；回滚 `rollback-ca04352.sh`；
+5. 起服核过后执行 `admin retire-points --domain vibration_lowfreq --binding khb-f1-g1-v1 --yes`。
+
+★部署与停用两条命令仍被自动审批拦，用户在 `.claude/settings.json` 加一次性放行，用完即撤（恢复为入库版本）。
+
+### 31.3 投后实测
+
+```
+23:01:55 停服 → 23:01:59 起服   service_version = 0.1.0+src20261003T150159Z   proto_version = 1.12   load_errors = 无
+起服快照        = 27 个点（另 6 个上级实体），accepted=36；点表补列 retired_at
+23:03:25 停用   = localId 1000~1011；快照随即重推 15 个点（另 4 个上级实体），accepted=22
+hs 点表         = AI.* 15 个（总数 2199 → 2187），链 [2766,2763,2761] / [2765,2762,2761]，空链 0
+待确认删除清单  = 我方 guid 名下 0 → 14 行（2680~2691、2764、2767），全部 SNAPSHOT_ABSENT，lastSampleAt / storedBytes 全 0
+23:04:03        = 15 个在用点照常出值；起服以来 error 0
+```
+
+### 31.4 仍待办
+
+- 函告：`AI-71`（答 `C-59`，附契约 1.12 投分发点）；
+- hs 清单上那 14 行确认 `DELETE` / `KEEP` 不由我方做（`ConfirmDeletions` 是 hs 全量管理口）；
+- 暂存 `/root/aii-stage-20261003{,b}/` 与两套 `*.bak-20261003-deploy*` 留到 AICloud 再核一次，清理须用户点头。
