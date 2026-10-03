@@ -1497,3 +1497,50 @@ bindings        = vibration_baseline points=6；vibration_iso points=9
   `name=AI 集成服务(AISERVER)`、`sourceKind=ai-service`、`isGateway=true`、`localId=0`、`globalId=2761`、`attrs={hostName, version, app}`；
   缺省请求下网关行仍是原来 3 行；
 - 当天函告：`AI-63`。
+
+---
+
+## 30. 部署记录：结论点挂上级 + 契约 1.11 结构值读侧上现场（2026-10-03，用户授权）
+
+### 30.1 前提
+
+- AICloud `C-58`（答 `AI-69 §5`）：对账器见我方族根 15/17 行**不建任何平台实体**，类别名录不必报 ⇒ 可以部署，部署时刻另函告。
+- 实时库已是 **1.9.537**（10-03 10:41 由 daqgate 升），`historystored` sha256 `182b6c01…` 与 `H-280 §5` 逐位相符。
+- 现场已无回滚备份（10-02 全清）⇒ 本次部署脚本**先备份再铺码**。
+
+### 30.2 投了什么
+
+`be09d85` 相对现场（`5e52ddf`）的运行代码：`host/aiintegration/` 12 个改动文件 + 新增 `structbind.py`，
+`vibration_baseline.py`、`vibration_iso.py` 两个域。`hsproto/` 未变；不装依赖（protobuf 7.36.1 / grpcio 1.83.1 照旧）。
+`press_fit.py`、`vision_helmet.py` 照 §28.1 不投。现场 `host/tests/` 未同步（现场不跑单测，仍是旧版）。
+
+### 30.3 步骤（每步不过就停）
+
+1. 三环境串行全量：各 **802** 条全过；
+2. `git archive be09d85` 出件 → `/root/aii-stage-20261003/`，sha256 两端一致（`70c23911…`）；无 CR、无编译缓存；逐文件 `diff -rq` 与上面清单一致；
+3. **部署前干跑**：用现场 venv 跑暂存代码，打开三张库的**只读副本**（sqlite backup API 从 `mode=ro` 拷出）——
+   27 点号 1000~1026 不动、上级实体分到 1027~1032（3 域 × 1 绑定，含已下线的 `vibration_lowfreq`）、绑定表补列 `fields_json`（老绑定整点标量）、工作台库开得起来、新生成码在 protobuf 7.36.1 上导得进；
+4. 记端口基线（72 个监听口）→ `deploy-be09d85.sh`：预检 → 停服 → 备份（`host.bak-20261003-deploybe09d85`、`domains.bak-…`、`data/backup-…`，含 `pip freeze`）→ `install` 铺 14 个文件（root:root 644）、清编译缓存 → 起服；
+5. 回滚脚本同目录 `rollback-be09d85.sh`（恢复代码与三张库）。
+
+★部署一步又被自动审批判为「生产部署」拦下，用户在 `.claude/settings.json` 加只限本次脚本的放行规则后执行，用完即撤（恢复为入库版本）。
+
+### 30.4 投后实测（21:04:37 停服、21:04:44 起服）
+
+```
+service_version = 0.1.0+src20261003T130444Z   ← ★是铺码时刻不是提交时刻：取源码最新 mtime，install 不保留 mtime（§29 用的是 cp -a）
+proto_version   = 1.11        domain_count = 4        load_errors = 无
+快照            = 27 个点（另 6 个上级实体），accepted=36（部署前 30）
+ancestorIds     = baseline 6 点 [2765, 2762, 2761] / iso 9 点 [2766, 2763, 2761] / lowfreq 12 点 [2767, 2764, 2761]，均未截断，空链 0
+                  ancestorLocalIds 对应 [1028,1027,0] / [1030,1029,0] / [1032,1031,0]（末跳 0 = 身份行自身 localId）
+结论点          = iso 21:07:30 一轮全 Ok；baseline 21:08:17 仍 QualityModelNotLoaded（基线待重采，§27.5）；lowfreq 12 点无值（历史点）
+起服以来 error/traceback = 0；端口 72 个只有本服务 50070 换 fd
+```
+
+⇒ `C-57` 在我方一侧闭合。函告：`AI-71`。
+
+### 30.5 仍待办
+
+- AICloud 按 `C-58 §3` 当天只读核四项并回函；其「诊断模块 / 绑定」显示改动（`3901af68`）尚未发开发服务；
+- 暂存目录 `/root/aii-stage-20261003/` 与三份 `*.bak-20261003-deploybe09d85` **留到 AICloud 核完**，清理须用户点头；
+- 结构值按字段绑定在现场无从实测（现场无结构值点）。
