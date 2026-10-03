@@ -16,6 +16,8 @@
 
   .venv/bin/python -m aiintegration.admin activate-artifact --id 3 --yes
 
+  .venv/bin/python -m aiintegration.admin retire-points --domain vibration_lowfreq --binding khb-f1-g1-v1 --yes
+
 ★来源、训练数据说明、许可三项**必填**：不清楚就明写"未知"，留空会被服务拒收。
 ★`activate-artifact` 必须带 `--yes`：启用是人的决定，免得顺手一敲就换了现场模型。
 """
@@ -128,6 +130,26 @@ def _deactivate_artifact(a: argparse.Namespace) -> int:
     return 0
 
 
+def _retire_points(a: argparse.Namespace) -> int:
+    if not a.yes:
+        # ★说清后果：点会从实时库点表里消失（平台点表随之不列）；历史不删，进实时库的待确认删除清单。
+        print("✗ 停用后这些结论点不再推进实时库点表，平台上随之不列；历史不删 —— "
+              "确认后加 --yes 再执行", file=sys.stderr)
+        return 2
+    from .apiproto import aiintegration_pb2 as pb
+    res = _grpc_call(a.api, "RetirePoints", pb.RetirePointsReq(domain=a.domain, binding=a.binding),
+                     pb.RetirePointsRes)
+    if not res.ok:
+        print(f"✗ {res.message}", file=sys.stderr)
+        return 1
+    ids = list(res.local_ids)
+    print(f"✓ 已停用 {a.domain}/{a.binding} 名下 {len(ids)} 个结论点（localId {ids[0]}~{ids[-1]}）")
+    if res.message:
+        print(f"  ★{res.message}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="aiintegration.admin", description="AIIntegration 管理命令行（走服务的口，不直接开库）")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -164,6 +186,14 @@ def main(argv: list[str] | None = None) -> int:
     deact.add_argument("--yes", action="store_true")
     deact.add_argument("--api", default=DEFAULT_API)
     deact.set_defaults(fn=_deactivate_artifact)
+
+    ret = sub.add_parser("retire-points",
+                         help="停用已删绑定留下的结论点（必须带 --yes）★不再推进实时库点表，历史不删")
+    ret.add_argument("--domain", required=True)
+    ret.add_argument("--binding", required=True)
+    ret.add_argument("--yes", action="store_true")
+    ret.add_argument("--api", default=DEFAULT_API)
+    ret.set_defaults(fn=_retire_points)
 
     a = p.parse_args(argv)
     return a.fn(a)

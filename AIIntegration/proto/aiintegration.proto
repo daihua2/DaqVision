@@ -28,6 +28,8 @@ service AIIntegrationService {
   rpc ListBindings (ListBindingsRequest) returns (ListBindingsReply);
   rpc PutBinding   (PutBindingRequest)   returns (PutBindingReply);
   rpc DeleteBinding(DeleteBindingRequest) returns (DeleteBindingReply);
+  // ★停用一条**已删**绑定留下的结论点（1.12，贵方 C-59 §5）：不再推进实时库点表。不删任何历史。
+  rpc RetirePoints (RetirePointsReq) returns (RetirePointsRes);
   // ★结构值点有哪些字段（1.11）：贵方绑定表单选了结构值点后，**按它列字段**供选。
   //   实时库点表不暴露点挂的结构，我方取该点最近一条值得知（近 7 天无值 ⇒ ok=false 并说明）。
   rpc DescribeStructPoint(DescribeStructPointReq) returns (DescribeStructPointRes);
@@ -363,6 +365,19 @@ message DeleteBindingRequest{ string domain = 1; string binding = 2; }
 // ★删绑定**只停算，不删已经写进实时库的结论点** —— 绑定是"要不要继续算"，
 //   结论点是"算过的历史"，顺手删点会把用户唯一能回看的东西抹掉。
 message DeleteBindingReply  { bool ok = 1; string message = 2; }
+
+// ── 停用结论点（1.12）──
+// 删绑定留下的点，每轮快照照推，平台点表上一直列着、看不出是停用的。本口把 (域, 绑定) 名下的点**移出快照**：
+//   ★**不删历史**：点从快照里消失后，实时库只把它记进待确认删除清单、存储不动，真删要人在实时库那边确认；
+//   ★号**不回收**：日后重建同名绑定，原样复用原来的号（同一个结论还是同一个点）；
+//   ★该 (域, 绑定) **还有绑定就拒绝**（ok=false）—— 先 `DeleteBinding`，免得停了一个还在算的绑定；
+//   名下的「绑定」实体随之不推；域下再无在用的点时，「诊断模块」实体也不推。
+message RetirePointsReq { string domain = 1; string binding = 2; }
+message RetirePointsRes {
+  bool   ok        = 1;
+  string message   = 2;                // ok=false 时说为什么；ok=true 而快照未推成时也在这里说
+  repeated int32 local_ids = 3;        // 这次停用的点号（已停用的不重复列）
+}
 
 // ── 结构值点的字段（1.11）──
 message DescribeStructPointReq { int32 point_id = 1; }   // ★globalId，与 `Binding.roles` 同一个号空间

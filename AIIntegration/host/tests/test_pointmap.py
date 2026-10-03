@@ -158,5 +158,83 @@ class TestPointMap(unittest.TestCase):
                          "AI.vib.dev1.health_score")
 
 
+
+class TestRetire(unittest.TestCase):
+    """停用（`C-59 §5`）：移出快照、号不回收、上级实体随之不推。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self._tmp.name) / "points.db"
+        self.m = PointMap(self.db)
+
+    def tearDown(self):
+        self.m.close(); self._tmp.cleanup()
+
+    def ensure(self, binding, key, domain="vib"):
+        return self.m.ensure(domain, binding, key, name=default_point_name(domain, binding, key),
+                             unit="", value_type="float")
+
+    def test_停用后不进全表_不给号_号不回收(self):
+        a, b, c = self.ensure("dev1", "a"), self.ensure("dev1", "b"), self.ensure("dev2", "a")
+        self.assertEqual(self.m.retire("vib", "dev1"), [a.local_id, b.local_id])
+        self.assertEqual([r.local_id for r in self.m.all()], [c.local_id])
+        self.assertIsNone(self.m.local_id_of("vib", "dev1", "a"),
+                          "停用点还给号 —— 会往一个不在快照里的点写值")
+        self.assertEqual(self.m.count(), 1)
+        used = max(c.local_id, c.binding_entity_id, c.domain_entity_id,
+                   a.binding_entity_id, a.domain_entity_id)
+        self.assertGreater(self.ensure("dev3", "a").local_id, used, "停用点的号被回收了")
+
+    def test_重复停用不重复算(self):
+        self.ensure("dev1", "a")
+        self.assertEqual(len(self.m.retire("vib", "dev1")), 1)
+        self.assertEqual(self.m.retire("vib", "dev1"), [])
+        self.assertEqual(self.m.retire("vib", "没有"), [])
+
+    def test_重建同名绑定复用原号并吵一句(self):
+        a = self.ensure("dev1", "a")
+        self.m.retire("vib", "dev1")
+        with self.assertLogs("aiintegration.pointmap", level="WARNING") as cm:
+            again = self.ensure("dev1", "a")
+        self.assertEqual(again, a, "同一个结论换了号 —— hs 那边就是新点，旧历史接不上")
+        self.assertIn("重新启用", " ".join(cm.output))
+        self.assertEqual(self.m.all(), [a])
+
+    def test_停用持久_重开库仍不在全表(self):
+        self.ensure("dev1", "a"); self.m.retire("vib", "dev1"); self.m.close()
+        self.m = PointMap(self.db)
+        self.assertEqual(self.m.all(), [])
+
+    def test_上级实体随之不推_同域还有在用的点则域实体照推(self):
+        from aiintegration.hsclient import build_container_entities
+        a, c = self.ensure("dev1", "a"), self.ensure("dev2", "a")
+        o = self.ensure("x", "a", domain="old")
+        self.m.retire("vib", "dev1")
+        self.m.retire("old", "x")
+        ids = {e.Id for _, e in build_container_entities(self.m.all())}
+        self.assertNotIn(a.binding_entity_id, ids, "停用绑定的「绑定」实体还在推")
+        self.assertIn(c.domain_entity_id, ids, "同域还有在用的点，「诊断模块」不该跟着消失")
+        self.assertNotIn(o.domain_entity_id, ids, "域下已无在用的点，「诊断模块」还在推")
+        self.assertEqual(ids, {c.binding_entity_id, c.domain_entity_id})
+
+    def test_老库补列_已有点一律在用(self):
+        # 现场 points.db 没有 retired_at 列。
+        import sqlite3
+        self.m.close()
+        self.db.unlink()
+        con = sqlite3.connect(str(self.db))
+        con.execute("CREATE TABLE points (domain TEXT NOT NULL, binding TEXT NOT NULL, key TEXT NOT NULL,"
+                    " local_id INTEGER NOT NULL UNIQUE, name TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '',"
+                    " value_type TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                    " PRIMARY KEY (domain, binding, key))")
+        con.execute("INSERT INTO points(domain,binding,key,local_id,name,value_type) "
+                    "VALUES('vib','dev1','a',1000,'AI.vib.dev1.a','float')")
+        con.commit(); con.close()
+        self.m = PointMap(self.db)
+        self.assertEqual([r.local_id for r in self.m.all()], [1000])
+        self.assertEqual(self.m.retire("vib", "dev1"), [1000])
+        self.assertEqual(self.m.all(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

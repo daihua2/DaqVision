@@ -29,7 +29,7 @@ from . import structbind
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.11"
+PROTO_VERSION = "1.12"
 
 
 def _ts(dt: datetime) -> object:
@@ -261,7 +261,24 @@ class ApiService(WorkbenchApiMixin):
             self._notify_changed()
         return pb.DeleteBindingReply(ok=ok, message="" if ok else "没有这条绑定")
 
-    def _notify_changed(self) -> str:
+    def RetirePoints(self, request, context):
+        """停用已删绑定留下的结论点（1.12，C-59 §5）：移出快照，号不回收，不删历史。"""
+        if self._points is None:
+            return pb.RetirePointsRes(ok=False, message="本服务未接点表")
+        if not request.domain or not request.binding:
+            return pb.RetirePointsRes(ok=False, message="domain 与 binding 都必填")
+        # ★还有绑定就拒 —— 停了一个还在算的绑定，下一拍 ensure 又会把点启用回来，
+        #   来回翻的样子是点在平台点表上时有时无。要停先删绑定（启用与否都算"还有"）。
+        if self._bindings.get(request.domain, request.binding) is not None:
+            return pb.RetirePointsRes(
+                ok=False, message=f"{request.domain}/{request.binding} 还有绑定，请先 DeleteBinding")
+        ids = self._points.retire(request.domain, request.binding)
+        if not ids:
+            return pb.RetirePointsRes(ok=False, message="名下没有在用的结论点（没建过或已停用）")
+        # 借绑定变更那条路重推全量快照 —— 停用的点正是靠"本轮快照里缺席"退出点表。
+        return pb.RetirePointsRes(ok=True, message=self._notify_changed("点已停用"), local_ids=ids)
+
+    def _notify_changed(self, done: str = "绑定已存") -> str:
         """通知调度器同步。**失败不吞**：回给调用方，否则配置者以为生效了。"""
         if self._on_changed is None:
             return ""
@@ -270,7 +287,7 @@ class ApiService(WorkbenchApiMixin):
             return ""
         except Exception as exc:  # noqa: BLE001
             logger.exception("绑定变更后同步调度失败")
-            return f"绑定已存，但调度同步失败（下次重启或再次改绑定会重试）: {exc}"
+            return f"{done}，但调度同步失败（下次重启或再次改绑定会重试）: {exc}"
 
     # ── 日志（形状对齐 hs）────────────────────────────────────────────────
     @staticmethod
@@ -341,6 +358,7 @@ def build_handler(svc: ApiService) -> grpc.GenericRpcHandler:
         "ListBindings":  _unary(svc.ListBindings, pb.ListBindingsRequest, pb.ListBindingsReply),
         "PutBinding":    _unary(svc.PutBinding, pb.PutBindingRequest, pb.PutBindingReply),
         "DeleteBinding": _unary(svc.DeleteBinding, pb.DeleteBindingRequest, pb.DeleteBindingReply),
+        "RetirePoints": _unary(svc.RetirePoints, pb.RetirePointsReq, pb.RetirePointsRes),
         "DescribeStructPoint": _unary(svc.DescribeStructPoint, pb.DescribeStructPointReq,
                                       pb.DescribeStructPointRes),
         "QueryLogs":     _unary(svc.QueryLogs, pb.LogQueryReq, pb.QueryLogsRes),

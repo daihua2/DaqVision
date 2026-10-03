@@ -20,6 +20,13 @@
   也要一个本 guid 空间内稳定的 localId，理由同点：换号 = hs 那边新建一个、旧的成孤儿。
   ⇒ 与点**共用一个号段**（取两张表的最大号 +1），只增不回收；绑定实体按 (域, 绑定) 区分 ——
   同名绑定挂在两个域下就是两个实体（一条通道只属一条连接）。
+
+**停用**（`C-59 §5`，2026-10-03 用户定「清掉、显式停用」）：删绑定只停算、不删点（那是历史），
+  于是旧绑定的点会被每轮快照永远推下去，平台点表上一直列着、看不出是停用的。停用 = 点行标上
+  `retired_at`，**不再进快照**；号照旧占着、绝不回收（同上：号代表过一段历史）。
+  ★从快照里消失之后，hs 只把它记进**待确认删除清单**、存储一个字节不动（`PendingDeletion`），
+    真删要人在 hs 那边确认 —— 停用本身不删任何历史。
+  ★上级实体不另标：它们由点行归纳（`hsclient.build_container_entities`），名下没有在用的点就不推。
 """
 
 from __future__ import annotations
@@ -45,6 +52,7 @@ CREATE TABLE IF NOT EXISTS points (
     unit       TEXT NOT NULL DEFAULT '',
     value_type TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    retired_at TEXT NOT NULL DEFAULT '',   -- 非空 = 已停用：不进快照，号不回收
     PRIMARY KEY (domain, binding, key)
 );
 -- 上级实体。binding = '' 是域实体，否则是该域下的绑定实体。
@@ -92,8 +100,17 @@ class PointMap:
         #   丢了就意味着重新分配 localId，代价远大于那点吞吐。
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
         self._backfill_containers()
+
+    def _migrate(self) -> None:
+        """老库补列（`CREATE TABLE IF NOT EXISTS` 不会给已有的表长新列，同 `BindingStore._migrate`）。"""
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(points)")}
+        if "retired_at" not in have:
+            self._conn.execute(
+                "ALTER TABLE points ADD COLUMN retired_at TEXT NOT NULL DEFAULT ''")
+            logger.info("点表已补列 retired_at（老库升级；已有点一律在用）")
 
     def close(self) -> None:
         with self._lock:
@@ -109,6 +126,15 @@ class PointMap:
                 (domain, binding, key),
             ).fetchone()
             if row is not None:
+                if row["retired_at"]:
+                    # ★停用过的三元组又被要了（同名绑定重建）—— 同一个 (域, 绑定, 结论名) 就是
+                    #   同一个意思，复用原号，不另分；吵一句，免得"停用"被悄悄撤销没人知道。
+                    self._conn.execute(
+                        "UPDATE points SET retired_at='' WHERE domain=? AND binding=? AND key=?",
+                        (domain, binding, key))
+                    self._conn.commit()
+                    logger.warning("结论点 %s/%s/%s（localId=%d）停用于 %s，现被重新启用",
+                                   domain, binding, key, row["local_id"], row["retired_at"])
                 # 显示名/单位允许改（那是展示层的事），localId 绝不动。
                 if row["name"] != name or row["unit"] != unit or row["value_type"] != value_type:
                     if row["value_type"] != value_type:
@@ -184,16 +210,36 @@ class PointMap:
                 self._ensure_containers(p["domain"], p["binding"])
             self._conn.commit()
 
+    # ── 停用 ──────────────────────────────────────────────────────────────
+    def retire(self, domain: str, binding: str) -> list[int]:
+        """停用 (域, 绑定) 名下**全部在用**的点 → 这次停用的 localId（已停用的不重复算）。
+
+        ★只标记、不删行：号绝不回收。是否允许停用（例如绑定还在不在）由调用方判。
+        """
+        with self._lock:
+            ids = [int(r["local_id"]) for r in self._conn.execute(
+                "SELECT local_id FROM points WHERE domain=? AND binding=? AND retired_at='' "
+                "ORDER BY local_id", (domain, binding))]
+            if ids:
+                self._conn.execute(
+                    "UPDATE points SET retired_at=datetime('now') "
+                    "WHERE domain=? AND binding=? AND retired_at=''", (domain, binding))
+                self._conn.commit()
+                logger.warning("停用结论点 %d 个 ← %s（localId %d~%d），不再进快照",
+                               len(ids), container_name(domain, binding), ids[0], ids[-1])
+            return ids
+
     # ── 读 ────────────────────────────────────────────────────────────────
     def all(self) -> list[PointRow]:
-        """全表。**每轮快照都要发全量** —— hs 的 `SNAPSHOT_END` 是原子提交，
-        本轮未出现的旧实体一律删除，漏发一个就是删一个。"""
+        """**在用的**全表。**每轮快照都要发全量** —— hs 的 `SNAPSHOT_END` 是原子提交，
+        本轮未出现的旧实体一律删除，漏发一个就是删一个。停用的点正是借这一条退出快照。"""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT p.*, COALESCE(b.local_id, 0) AS bid, COALESCE(d.local_id, 0) AS did "
                 "FROM points p "
                 "LEFT JOIN containers b ON b.domain = p.domain AND b.binding = p.binding "
                 "LEFT JOIN containers d ON d.domain = p.domain AND d.binding = '' "
+                "WHERE p.retired_at = '' "
                 "ORDER BY p.local_id").fetchall()
         return [
             PointRow(r["domain"], r["binding"], r["key"], r["local_id"],
@@ -202,16 +248,20 @@ class PointMap:
         ]
 
     def local_id_of(self, domain: str, binding: str, key: str) -> int | None:
+        """在用点的号；没有或已停用 → None。★停用点不给号：给了就会往一个不在快照里的点写值。"""
         with self._lock:
             row = self._conn.execute(
-                "SELECT local_id FROM points WHERE domain=? AND binding=? AND key=?",
+                "SELECT local_id FROM points WHERE domain=? AND binding=? AND key=? "
+                "AND retired_at=''",
                 (domain, binding, key),
             ).fetchone()
         return None if row is None else int(row["local_id"])
 
     def count(self) -> int:
+        """在用点数。"""
         with self._lock:
-            return int(self._conn.execute("SELECT COUNT(*) AS c FROM points").fetchone()["c"])
+            return int(self._conn.execute(
+                "SELECT COUNT(*) AS c FROM points WHERE retired_at=''").fetchone()["c"])
 
 
 def default_point_name(domain: str, binding: str, key: str) -> str:

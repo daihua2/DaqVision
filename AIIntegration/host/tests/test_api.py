@@ -98,7 +98,7 @@ class TestInfoAndDomains(ApiTestBase):
     def test_GetInfo_带身份与契约版本(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
         self.assertEqual(r.guid, "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(r.proto_version, "1.11")
+        self.assertEqual(r.proto_version, "1.12")
         self.assertEqual(r.domain_count, 1)
 
     def test_装载失败不藏(self):
@@ -466,6 +466,87 @@ class TestDeleteBindingClearsState(unittest.TestCase):
                 pb.DeleteBindingRequest(domain="vib", binding="dev1"), None)
         self.assertTrue(r.ok)
         self.assertIsNone(self.bindings.get("vib", "dev1"))
+
+
+
+class TestRetirePoints(unittest.TestCase):
+    """契约 1.12 `RetirePoints`（AICloud `C-59 §5`）：已删绑定留下的点移出快照，号不回收，不删历史。
+
+    ★走**真 gRPC**：新 RPC 没登记进 handler 表的话，直接调方法的用例全绿、对端一调就 UNIMPLEMENTED。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.bindings = BindingStore(root / "b.db")
+        self.points = PointMap(root / "p.db")
+        self.synced = 0
+        self.sync_error = None
+        self.svc = ApiService(
+            guid="11111111-2222-3333-4444-555555555555", version="0.1.0",
+            logstore=LogStore(capacity=10), domains={}, bindings=self.bindings,
+            points=self.points, on_bindings_changed=self._on_changed)
+        self.ids = [self.points.ensure("vib", "dev1", k, name=f"AI.vib.dev1.{k}", unit="",
+                                       value_type="float").local_id for k in ("a", "b")]
+        self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=2),
+                                  handlers=(build_handler(self.svc),))
+        port = self.server.add_insecure_port("127.0.0.1:0")
+        self.server.start()
+        self.ch = grpc.insecure_channel(f"127.0.0.1:{port}", options=[("grpc.enable_http_proxy", 0)])
+
+    def tearDown(self):
+        self.ch.close(); self.server.stop(0)
+        self.points.close(); self.bindings.close(); self._tmp.cleanup()
+
+    def _on_changed(self):
+        if self.sync_error:
+            raise self.sync_error
+        self.synced += 1
+
+    def retire(self, domain="vib", binding="dev1"):
+        return self.ch.unary_unary(
+            f"/{SERVICE}/RetirePoints", request_serializer=lambda m: m.SerializeToString(),
+            response_deserializer=pb.RetirePointsRes.FromString)(
+                pb.RetirePointsReq(domain=domain, binding=binding), timeout=5)
+
+    def test_已删绑定的点停用后移出点表并重推快照(self):
+        r = self.retire()
+        self.assertTrue(r.ok, r.message)
+        self.assertEqual(list(r.local_ids), self.ids)
+        self.assertEqual(r.message, "")
+        self.assertEqual(self.points.all(), [], "停用了还在点表里 —— 会被下一轮快照照推")
+        self.assertEqual(self.synced, 1, "停用后没重推快照 —— 要等一小时周期重推才生效")
+
+    def test_还有绑定就拒_停用的不是已删的(self):
+        # ★未启用的绑定也算"还有"：启用那一刻 ensure 会把点启用回来，点在平台上时有时无。
+        self.bindings.put(Binding(domain="vib", binding="dev1", roles={"x_acc": 101},
+                                  interval_sec=60, window_sec=60, enabled=False))
+        r = self.retire()
+        self.assertFalse(r.ok)
+        self.assertIn("DeleteBinding", r.message)
+        self.assertEqual(len(self.points.all()), 2)
+        self.assertEqual(self.synced, 0)
+
+    def test_名下没有在用的点就如实说没停成(self):
+        self.assertTrue(self.retire().ok)
+        r = self.retire()
+        self.assertFalse(r.ok, "第二次什么也没停，却回 ok —— 调用方会以为又停了一批")
+        self.assertEqual(list(r.local_ids), [])
+        self.assertFalse(self.retire(binding="不存在").ok)
+
+    def test_快照没推成要说出来(self):
+        self.sync_error = RuntimeError("hs 不在")
+        with self.assertLogs("aiintegration.api", level="ERROR"):
+            r = self.retire()
+        self.assertTrue(r.ok, "点已经停了，回失败会让调用方以为没停")
+        self.assertIn("点已停用，但调度同步失败", r.message)
+
+    def test_域与绑定必填(self):
+        r = self.retire(binding="")
+        self.assertFalse(r.ok)
+        # 落到"名下没有在用的点"也是 ok=false，但那句话会让人去查点 —— 要说的是参数没填。
+        self.assertIn("必填", r.message)
+        self.assertEqual(len(self.points.all()), 2)
 
 
 if __name__ == "__main__":
