@@ -1425,6 +1425,7 @@ stop_threshold: has_default=false  min='0'  blank_meaning='not_evaluated'
 6. 回滚脚本同目录 `rollback-1.10.sh`（恢复代码与库；新装依赖留在 venv，旧代码不 import，无害）。
 
 ★部署一步两次被自动审批判为「生产部署」拦下，用户在设置里加了**只限本次脚本**的放行规则后执行。
+★订正（2026-10-04）：这条规则（`scp … deploy-1.10.sh *`）随 `b8c6721` 进了入库的 `.claude/settings.json`，**用完没撤**，留到 10-04 才删。此后的部署都按「用完即撤、恢复入库版本」做。
 
 ### 28.3 投后实测
 
@@ -1583,3 +1584,4 @@ hs 点表         = AI.* 15 个（总数 2199 → 2187），链 [2766,2763,2761]
 - ~~函告~~ `AI-71`（答 `C-59`）与契约 1.12 **已于 2026-10-03 23:09 投出**，三份文件两端 sha256 一致；
 - hs 清单上那 14 行确认 `DELETE` / `KEEP` 不由我方做（`ConfirmDeletions` 是 hs 全量管理口）；
 - ~~暂存 `/root/aii-stage-20261003{,b}/` 与两套 `*.bak-20261003-deploy*` 留到 AICloud 再核一次~~ —— `C-60`（10-04）核完、与我方一致；经用户同意 **10-04 已清**（8 个目录），服务未受影响（active、NRestarts=0）。⇒ **现场已无回滚备份，下次部署前必须先备份**。
+  同日经用户同意又清了 `$APP/host.old-20260916-{1501,1533}`（9-16 的旧代码副本，服务未引用）与 `data/{bindings,workbench}.db.bak-20260918-223252`；`$APP` 下现只剩 `cert data docs domains host proto system.guid`。
