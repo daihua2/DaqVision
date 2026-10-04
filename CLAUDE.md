@@ -50,6 +50,7 @@ wsl bash /mnt/d/Project/daqvision/AIIntegration/host/run-tests.sh py310    # 只
 ## 往来函（与 AICloud / historystore / daqgate）
 
 - 唯一投递位 `AISERVER:/home/Project/AIIntegration/docs/`（`ssh aiserver`），命名规范见该目录 README。
+  ★例外：**daqgate 函件不发此处、在本仓 `doc/` 收**（2026-10-04 用户定）—— 不算漏投、我方不代投；查 daqgate 来函先看本仓 `doc/` 里未跟踪的 `*D-*.md`。
 - 编号前缀：我方 `AI-`，AICloud `C-`，historystore `H-`，daqgate `D-`；接龙不跳号。
 - **发文前先 `ls -lt` 该目录**，确认没漏看对方来函、编号没撞。回执一律新建文件不追加；发出不改，订正另发。
 - 发函、部署、改现场 = 对外动作，先给用户过目。
