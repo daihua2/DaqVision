@@ -1390,6 +1390,7 @@ stop_threshold: has_default=false  min='0'  blank_meaning='not_evaluated'
 
 - `vibration_baseline` 落 `model_not_loaded`：三个基线工件挂在**旧域名**下，新域看不到。
   `U6` 本就写着"迁移时重采基线"。⇒ 界面应按 `is_fault=false` 呈现为**「待采基线」**，不是故障；
+  ★`C-63 §3`（2026-10-04）：平台对 `-1034` 统一显示「质量坏[模型未加载]」（`C-28` 定、各来源一样）；对我方点改叫「待采基线」由 AICloud 用户定，**未承诺**；
 - 两域 `run_state` 都是「未判」：`stop_threshold` 没填，而它**没有缺省、不填即不判**。
 
 ### 27.6 仍未做
