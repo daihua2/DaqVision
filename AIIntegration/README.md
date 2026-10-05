@@ -146,9 +146,8 @@ worker 只吃数据出结论，交回骨架。容量无虑 —— 单 guid 快�
 
 | 域 | 文件 | 状态 |
 | --- | --- | --- |
-| ~~低频振动 `vibration_lowfreq`~~ | ~~`domains/vibration_lowfreq.py`~~ | ★**2026-09-17 已拆分**，见下两行 |
-| **经典算法振动诊断 `vibration_iso`** | `domains/vibration_iso.py` | ISO 20816-3:2022 烈度判级 + 方向性提示（原第 ① 层） |
-| **AI 模型自训振动诊断 `vibration_baseline`** | `domains/vibration_baseline.py` | 基线偏离，基线用中位数/四分位距（原第 ② 层） |
+| ~~低频振动 `vibration_lowfreq`~~ | ~~`domains/vibration_lowfreq.py`~~ | ★**2026-09-17 已拆分**，★2026-10-05 又合并为下一行 |
+| **低频采集AI振动诊断 `vibration`** | `domains/vibration.py` | ★2026-10-05 由 `vibration_iso`（国标判级 + 方向性提示，原第 ① 层）与 `vibration_baseline`（基线偏离，原第 ② 层）合并；参数「启用算法」选经典 / 自训 / 两者，检测状态在模块内合成（契约 1.14） |
 | 高频振动 / 视觉 / VFD | — | 未开工 |
 
 ### 8.1 第一个域检验了"丢一个 `.py` 就多一个域"

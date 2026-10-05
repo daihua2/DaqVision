@@ -29,7 +29,7 @@ from . import structbind
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.13"
+PROTO_VERSION = "1.14"
 
 
 def _ts(dt: datetime) -> object:
@@ -191,6 +191,8 @@ class ApiService(WorkbenchApiMixin):
             required = [i.role for i in loaded.declaration.inputs
                         if i.required and i.kind == "point"]
             out.missing_required.extend(b.missing_required(required))
+            # ★1.14：**本条绑定**要哪几类工件（按它的参数算；只启用经典的振动诊断不要基线）。
+            out.requires_artifacts.extend(loaded.required_artifacts(b.params))
         return out
 
     def ListBindings(self, request, context):

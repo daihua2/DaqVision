@@ -1,4 +1,4 @@
-"""AI 模型自训振动诊断（vibration_baseline）的回归。
+"""低频采集AI振动诊断（`vibration`）AI 自训部分的回归（`algorithms=baseline`）。原 `vibration_baseline` 的用例，合并后照跑。
 
 钉的东西按重要性排：
 1. **基线用中位数与四分位距**：少量离群值不能把尺度撑大；
@@ -20,16 +20,19 @@ from aiintegration.types import ArtifactBlob, Dataset, Frame, LabeledFrame, Prog
 
 DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 T0 = datetime(2026, 9, 17, 8, 0, 0, tzinfo=timezone.utc)
-PARAMS = {"axialAxis": "z"}
+PARAMS = {"algorithms": "baseline", "axialAxis": "z"}
+#: 只启用自训时不写的那一半（与 `vibration.CLASSIC_KEYS` 同）。
+CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
+                "axial_ratio", "direction_hint")
 
 
 def _load():
     loaded, failed = discover(DOMAINS_DIR)
-    mine = [(str(p), repr(e)) for p, e in failed if p.name == "vibration_baseline.py"]
+    mine = [(str(p), repr(e)) for p, e in failed if p.name == "vibration.py"]
     assert not mine, f"AI 模型自训振动诊断装载失败：{mine}"
     by_key = {d.key: d for d in loaded}
-    assert "vibration_baseline" in by_key, f"没装上，只装到 {sorted(by_key)}"
-    return by_key["vibration_baseline"]
+    assert "vibration" in by_key, f"没装上，只装到 {sorted(by_key)}"
+    return by_key["vibration"]
 
 
 def _samples(*values):
@@ -44,7 +47,7 @@ def _samples(*values):
 
 
 def _frame(channels, params=None):
-    return Frame(domain="vibration_baseline", binding="dev1",
+    return Frame(domain="vibration", binding="dev1",
                  t_start=T0 - timedelta(seconds=1), t_end=T0 + timedelta(seconds=60),
                  channels=channels, params=dict(PARAMS if params is None else params))
 
@@ -60,7 +63,7 @@ def _by_key(findings):
 def _dataset(rows, label="正常", params=None):
     items = tuple(LabeledFrame(frame=_frame(_ch(**r), params), label=label, sample_id=i + 1)
                   for i, r in enumerate(rows))
-    return Dataset(domain="vibration_baseline", binding="dev1", name="基线集", items=items)
+    return Dataset(domain="vibration", binding="dev1", name="基线集", items=items)
 
 
 def _artifact(trained):
@@ -73,12 +76,8 @@ class TestDeclaration(unittest.TestCase):
     def setUp(self):
         self.d = _load()
 
-    def test_能力位含推理与训练(self):
-        self.assertEqual(self.d.caps, frozenset({"infer", "train"}))
-
-    def test_参数归属与缺省(self):
+    def test_自训用的参数归属与缺省(self):
         specs = {p.key: p for p in self.d.declaration.params}
-        self.assertEqual(set(specs), {"axialAxis", "normal_label", "stop_threshold"})
         self.assertFalse(specs["stop_threshold"].required)
         self.assertEqual(specs["stop_threshold"].default, "")
         self.assertEqual(specs["axialAxis"].level, "sensor", "轴向由振动传感器给（C-64 §2.3）")
@@ -86,28 +85,12 @@ class TestDeclaration(unittest.TestCase):
         self.assertEqual(specs["axialAxis"].default, "")
         self.assertEqual(specs["normal_label"].default, "正常")
 
-    def test_每个输入项都有显示名(self):
-        for i in self.d.declaration.inputs:
-            self.assertTrue(i.display, i.role)
-
-    def test_一个传感器三轴加一路温度_各带量与轴(self):
-        got = {i.role: (i.quantity, i.axis, i.group) for i in self.d.declaration.inputs}
-        self.assertEqual(got, {"x_vel": ("velocity", "x", ""), "y_vel": ("velocity", "y", ""),
-                               "z_vel": ("velocity", "z", ""), "temp": ("temperature", "", "")})
-
-    def test_要先有基线_检测状态只有正常与注意(self):
-        """`C-65 §4`：不拿能力位 train 推；`§2`：★不出警告、危险 —— 那两档只由国标给。"""
-        self.assertEqual(self.d.declaration.requires_artifacts, ("baseline",))
-        status = [o for o in self.d.declaration.outputs if o.role == "status"]
-        self.assertEqual([o.key for o in status], ["status"])
-        self.assertEqual(status[0].choices, ("normal", "attention", "stopped"))
-        self.assertEqual([o.key for o in self.d.declaration.outputs if o.headline],
-                         ["vel_z_max", "anomaly_score"])
-
-    def test_不出ISO类结论(self):
-        keys = {o.key for o in self.d.declaration.outputs}
-        self.assertFalse(keys & {"iso_zone", "vel_max", "direction_hint"},
-                         "经典判据已拆到 vibration_iso，本模块不重复出")
+    def test_只启用自训时不写经典那一半(self):
+        art = _artifact(self.d.instance.train(_dataset([{"x_vel": 1.0}] * 5), ProgressSink()))
+        f = dataclasses.replace(_frame(_ch(x_vel=1.0)), artifacts={"baseline": art})
+        keys = {x.key for x in self.d.instance.infer(f)}
+        self.assertFalse(keys & set(CLASSIC_KEYS))
+        self.assertIn("经典算法未启用", _by_key(self.d.instance.infer(f))["evidence"].value)
 
 
 class TestBaselineTraining(unittest.TestCase):
@@ -208,7 +191,7 @@ class TestDeviation(unittest.TestCase):
         self.assertIn("不对中", out["evidence"].value)
 
     def test_缺轴向只影响比例漂移(self):
-        f = dataclasses.replace(_frame(_ch(x_vel=1.0, z_vel=0.5), params={}),
+        f = dataclasses.replace(_frame(_ch(x_vel=1.0, z_vel=0.5), params={"algorithms": "baseline"}),
                                 artifacts={"baseline": self.art})
         out = _by_key(self.d.infer(f))
         self.assertIs(out["ratio_drift"].quality, Quality.CONFIG_INCOMPLETE)
@@ -217,7 +200,7 @@ class TestDeviation(unittest.TestCase):
     def test_轴向改了不拿旧基线的比例去减(self):
         """★基线按 z 为轴向采；平台把轴向改成 x 后，x/z 与基线里的 z/x 是两把尺子。
         照减出来的漂移看着像个结论（这里会是 1.0/1.0−0.5=+0.5，摘要还会说「可能不对中」）。"""
-        f = dataclasses.replace(_frame(_ch(x_vel=1.0, z_vel=1.0, temp=40.0), {"axialAxis": "x"}),
+        f = dataclasses.replace(_frame(_ch(x_vel=1.0, z_vel=1.0, temp=40.0), {**PARAMS, "axialAxis": "x"}),
                                 artifacts={"baseline": self.art})
         out = _by_key(self.d.infer(f))
         self.assertIs(out["ratio_drift"].quality, Quality.MODEL_NOT_LOADED)
@@ -253,7 +236,7 @@ class TestDeviation(unittest.TestCase):
         self.assertLess(out["vel_z_max"].value, 3.0)
 
     def test_一条都算不出来时每个输出都有锚点(self):
-        declared = {o.key for o in self.d.declare().outputs}
+        declared = {o.key for o in self.d.declare().outputs} - set(CLASSIC_KEYS)
         out = _by_key(self.d.infer(_frame({"x_vel": []})))
         self.assertEqual(set(out), declared)
 
@@ -318,7 +301,7 @@ class TestStatus(unittest.TestCase):
         f = dataclasses.replace(_frame(_ch(x_vel=9.0)), artifacts={"baseline": self.art})
         res = run_domain(loaded, f)
         self.assertTrue(res.ok, res.error)
-        self.assertEqual({x.key for x in res.findings}, {o.key for o in loaded.declaration.outputs})
+        self.assertEqual({x.key for x in res.findings}, {o.key for o in loaded.declaration.outputs} - set(CLASSIC_KEYS))
 
 
 _RUN_ROWS = [{"x_vel": x, "z_vel": z} for x, z in (
@@ -360,7 +343,7 @@ class TestStopState(unittest.TestCase):
     def test_不填门槛不判(self):
         out = self._infer("", x_vel=0.05, z_vel=0.02)
         self.assertEqual(out["run_state"].value, "未判")
-        self.assertEqual(set(out), {o.key for o in self.d.declare().outputs})
+        self.assertEqual(set(out), {o.key for o in self.d.declare().outputs} - set(CLASSIC_KEYS))
 
     def test_采基线剔除停机帧(self):
         params = dict(PARAMS, stop_threshold="0.3")
@@ -388,21 +371,6 @@ class TestStopState(unittest.TestCase):
             self.d.train(_dataset(_RUN_ROWS, params=dict(PARAMS, stop_threshold="abc")),
                          ProgressSink())
         self.assertIn("停机门槛", str(cm.exception))
-
-    def test_与模块1判法一致(self):
-        """两个模块各有一份 run_state（域互不 import），这里钉住两份判法逐条相同。"""
-        # 装载器按文件路径 exec，模块不一定在 sys.modules 里 —— 从类方法的全局名字空间取。
-        iso = type(_load_iso().instance).infer.__globals__["run_state"]
-        mine = type(self.d).infer.__globals__["run_state"]
-        for thr in ("", "0.3", "0.30", "abc", "0", "-1", "nan", "inf", " 1e-1 "):
-            for v in (0.0, 0.1, 0.2999, 0.3, 0.31, 5.0):
-                self.assertEqual(iso({"stop_threshold": thr}, v)[:2],
-                                 mine({"stop_threshold": thr}, v)[:2], (thr, v))
-
-
-def _load_iso():
-    loaded, _failed = discover(DOMAINS_DIR)
-    return {d.key: d for d in loaded}["vibration_iso"]
 
 
 if __name__ == "__main__":

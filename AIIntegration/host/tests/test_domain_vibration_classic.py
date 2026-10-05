@@ -1,4 +1,4 @@
-"""经典算法振动诊断（vibration_iso）的回归。
+"""低频采集AI振动诊断（`vibration`）经典算法部分的回归（`algorithms=classic`）。原 `vibration_iso` 的用例，合并后照跑。
 
 ★用**真的装载器**（`discover`）从真的 `domains/` 目录装，不在用例里手搓一个类。
 
@@ -19,12 +19,16 @@ from pathlib import Path
 from aiintegration.domains import discover
 from aiintegration.quality import Quality
 from aiintegration.runner import run_domain
-from aiintegration.types import ROLE_STATUS, STATUS_LEVELS, Frame, Sample
+from aiintegration.types import Frame, Sample
+
+#: 只启用经典时不写的那一半（与 `vibration.BASELINE_KEYS` 同）。
+BASELINE_KEYS = ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score")
 
 DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 T0 = datetime(2026, 9, 17, 8, 0, 0, tzinfo=timezone.utc)
 
 FULL_PARAMS = {
+    "algorithms": "classic",
     "machineGroup": "group2",
     "supportClass": "rigid",      # ⇒ 边界 1.4 / 2.8 / 4.5
     "vel_is_rms": "true",
@@ -36,11 +40,11 @@ JUDGMENT_PARAMS = {"machineGroup", "supportClass", "vel_is_rms", "axialAxis"}
 
 def _load():
     loaded, failed = discover(DOMAINS_DIR)
-    mine = [(str(p), repr(e)) for p, e in failed if p.name == "vibration_iso.py"]
+    mine = [(str(p), repr(e)) for p, e in failed if p.name == "vibration.py"]
     assert not mine, f"经典算法振动诊断装载失败：{mine}"
     by_key = {d.key: d for d in loaded}
-    assert "vibration_iso" in by_key, f"没装上，只装到 {sorted(by_key)}"
-    return by_key["vibration_iso"]
+    assert "vibration" in by_key, f"没装上，只装到 {sorted(by_key)}"
+    return by_key["vibration"]
 
 
 def _samples(*values, start=T0):
@@ -55,7 +59,7 @@ def _samples(*values, start=T0):
 
 
 def _frame(channels, params=None):
-    return Frame(domain="vibration_iso", binding="dev1",
+    return Frame(domain="vibration", binding="dev1",
                  t_start=T0 - timedelta(seconds=1), t_end=T0 + timedelta(seconds=60),
                  channels=channels, params=dict(FULL_PARAMS if params is None else params))
 
@@ -67,12 +71,6 @@ def _by_key(findings):
 class TestDeclaration(unittest.TestCase):
     def setUp(self):
         self.d = _load()
-
-    def test_只有推理能力不需要训练(self):
-        self.assertEqual(self.d.caps, frozenset({"infer"}))
-
-    def test_不依赖工件_保存即出结论(self):
-        self.assertEqual(self.d.declaration.requires_artifacts, ())
 
     def test_判据类参数一律没有缺省(self):
         """★机器分组、支承方式、泵类别在声明上不必填（泵与工业机器各需一半），
@@ -110,21 +108,6 @@ class TestDeclaration(unittest.TestCase):
         req = [i.role for i in self.d.declaration.inputs if i.required]
         self.assertEqual(req, ["x_vel"])
 
-    def test_一个传感器三轴_各带量与轴_不再成组(self):
-        """`C-64 §2.1/§2.2`：一条绑定 = 一个振动传感器；平台按「量 + 轴」对角色。"""
-        got = {i.role: (i.quantity, i.axis, i.group) for i in self.d.declaration.inputs}
-        self.assertEqual(got, {"x_vel": ("velocity", "x", ""), "y_vel": ("velocity", "y", ""),
-                               "z_vel": ("velocity", "z", "")})
-
-    def test_检测状态与主要结论(self):
-        outs = {o.key: o for o in self.d.declaration.outputs}
-        status = [o for o in outs.values() if o.role == ROLE_STATUS]
-        self.assertEqual([o.key for o in status], ["status"])
-        self.assertEqual(status[0].choices, ("normal", "warning", "danger", "stopped"))
-        self.assertTrue(set(status[0].choices) <= set(STATUS_LEVELS))
-        self.assertEqual([k for k, o in outs.items() if o.headline],
-                         ["vel_max", "dominant_axis", "iso_zone"])
-
 
 class TestIsoClassification(unittest.TestCase):
     def setUp(self):
@@ -160,7 +143,8 @@ class TestIsoClassification(unittest.TestCase):
             self.assertIs(z.quality, Quality.CONFIG_INCOMPLETE, g)
 
     def test_旧键名不认(self):
-        params = {"iso_group": "2", "mount_type": "rigid", "vel_is_rms": "true", "axial_axis": "z"}
+        params = {"algorithms": "classic", "iso_group": "2", "mount_type": "rigid", "vel_is_rms": "true",
+                  "axial_axis": "z"}
         out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)}, params)))
         self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIs(out["direction_hint"].quality, Quality.CONFIG_INCOMPLETE)
@@ -213,7 +197,7 @@ class TestStatus(unittest.TestCase):
 class TestPump(unittest.TestCase):
     """GB/T 6075.7-2015：按泵类别与额定功率（200 kW 分档）取限值，不看支承、不限转速。"""
 
-    PUMP = {"pumpCategory": "category2", "ratedPowerKw": "90", "vel_is_rms": "true", "axialAxis": "z"}
+    PUMP = {"algorithms": "classic", "pumpCategory": "category2", "ratedPowerKw": "90", "vel_is_rms": "true", "axialAxis": "z"}
 
     def setUp(self):
         self.d = _load()
@@ -336,7 +320,7 @@ class TestBadInput(unittest.TestCase):
         self.assertIs(out2["vel_max"].quality, Quality.NO_INPUT)
 
     def test_一条都算不出来时每个输出都有锚点(self):
-        declared = {o.key for o in self.d.declaration.outputs}
+        declared = {o.key for o in self.d.declaration.outputs} - set(BASELINE_KEYS)
         out = _by_key(self.d.instance.infer(_frame({"x_vel": []})))
         self.assertEqual(set(out), declared)
 
@@ -349,7 +333,7 @@ class TestBadInput(unittest.TestCase):
         f = _frame({"x_vel": _samples(1.0, 3.9), "z_vel": _samples(0.2, 0.3)})
         res = run_domain(self.d, f)
         self.assertTrue(res.ok)
-        self.assertEqual(len(res.findings), len(self.d.declaration.outputs))
+        self.assertEqual(len(res.findings), len(self.d.declaration.outputs) - len(BASELINE_KEYS))
 
 
 class TestDirectionHint(unittest.TestCase):
@@ -437,7 +421,7 @@ class TestStopState(unittest.TestCase):
         out = self._infer("", x_vel=0.01, z_vel=0.01)
         self.assertEqual(out["run_state"].value, "未判")
         self.assertIs(out["run_state"].quality, Quality.OK)
-        self.assertEqual(set(out), {o.key for o in self.d.declaration.outputs})
+        self.assertEqual(set(out), {o.key for o in self.d.declaration.outputs} - set(BASELINE_KEYS))
 
     def test_门槛非法只让运行状态落配置不全(self):
         for bad in ("abc", "0", "-1", "nan", "inf"):

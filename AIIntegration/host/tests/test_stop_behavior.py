@@ -15,7 +15,7 @@
   ① 声明 `not_written` 的，停机那一帧**确实没出现在结论里**；
   ② 声明 `literal_stopped` 的，确实写了，且写的值**在 choices 里**；
   ③ 声明 `written` 的，停机时照样写；
-  ④ 两个振动域的 `run_state` 取值域自述与实际写出的值一致。
+  ④ 振动域的 `run_state` 取值域自述与实际写出的值一致。
 """
 
 import unittest
@@ -34,6 +34,7 @@ DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 
 #: 停机门槛远高于下面喂的速度值 ⇒ 必然判停机。
 STOPPED_PARAMS = {
+    "algorithms": "both",
     "stop_threshold": "100",
     "axialAxis": "x",
     "machineGroup": "group1",
@@ -101,8 +102,9 @@ class StopBehaviorBase(unittest.TestCase):
                         f"{key} 停机时写的值不在它自己声明的 choices 里")
 
 
-class TestVibrationIso(StopBehaviorBase):
-    key = "vibration_iso"
+class TestVibration(StopBehaviorBase):
+    """低频采集AI振动诊断，两种算法都启用（`STOPPED_PARAMS`），所以全部结论都在比对范围内。"""
+    key = "vibration"
 
     def test_停机时各结论点与stop_behavior逐条对得上(self):
         self.check()
@@ -117,57 +119,40 @@ class TestVibrationIso(StopBehaviorBase):
         self.assertEqual(self.stopped_findings()["iso_zone_code"].value, 0)
         self.assertIn("0", spec.choices, "iso_zone_code 加了取值 0 却没写进 choices")
 
-    def test_run_state取值域自述与实际一致(self):
-        spec = self.declared()["run_state"]
-        self.assertEqual(set(spec.choices), {"运行", "停机", "未判"})
-
-
-class TestVibrationBaseline(StopBehaviorBase):
-    key = "vibration_baseline"
-
-    def test_停机时各结论点与stop_behavior逐条对得上(self):
-        self.check()
-
-    def test_四条数值结论停机时都不写(self):
+    def test_自训四条数值结论停机时都不写(self):
         decl = self.declared()
         for k in ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score"):
             self.assertEqual(decl[k].stop_behavior, STOP_NOT_WRITTEN, k)
 
     def test_run_state取值域自述与实际一致(self):
-        self.assertEqual(set(self.declared()["run_state"].choices),
-                         {"运行", "停机", "未判"})
+        spec = self.declared()["run_state"]
+        self.assertEqual(set(spec.choices), {"运行", "停机", "未判"})
 
 
 class TestOneSensor(unittest.TestCase):
     """`C-64`：一条绑定 = 一个振动传感器。第二测点组（1.9 起，`C-45 §3.1`）随之撤掉；
-    平台按「量 + 轴」对角色、按台账键带参数 —— 两个振动域必须同一套。"""
+    平台按「量 + 轴」对角色、按台账键带参数。"""
 
-    def test_两个振动域都只有一组三轴且各带量与轴(self):
-        for key in ("vibration_iso", "vibration_baseline"):
-            with self.subTest(domain=key):
-                ins = _load(key).declaration.inputs
-                self.assertFalse([i.role for i in ins if i.group], "不该再有成组的角色")
-                vel = {i.axis: i.role for i in ins if i.quantity == "velocity"}
-                self.assertEqual(vel, {"x": "x_vel", "y": "y_vel", "z": "z_vel"})
+    def test_只有一组三轴且各带量与轴(self):
+        ins = _load("vibration").declaration.inputs
+        self.assertFalse([i.role for i in ins if i.group], "不该再有成组的角色")
+        vel = {i.axis: i.role for i in ins if i.quantity == "velocity"}
+        self.assertEqual(vel, {"x": "x_vel", "y": "y_vel", "z": "z_vel"})
 
-    def test_两个振动域的轴向参数同键同取值同归属(self):
-        specs = [{p.key: p for p in _load(k).declaration.params}["axialAxis"]
-                 for k in ("vibration_iso", "vibration_baseline")]
-        self.assertEqual({(s.choices, s.level) for s in specs}, {(("x", "y", "z"), "sensor")})
+    def test_轴向参数照平台台账键与归属(self):
+        s = {p.key: p for p in _load("vibration").declaration.params}["axialAxis"]
+        self.assertEqual((s.choices, s.level), (("x", "y", "z"), "sensor"))
 
 
 class TestStopThresholdSelfDescription(unittest.TestCase):
-    """`stop_threshold` 的三件自述（C-45 §3.2/§3.3）—— 两个域必须一致。"""
+    """`stop_threshold` 的三件自述（C-45 §3.2/§3.3）。"""
 
     def test_无缺省留空不评且下限为正(self):
-        for key in ("vibration_iso", "vibration_baseline"):
-            with self.subTest(domain=key):
-                p = {x.key: x for x in _load(key).declaration.params}["stop_threshold"]
-                self.assertFalse(p.has_default,
-                                 "★界面会据此替它预置一个值 —— 那会静默停止诊断")
-                self.assertEqual(p.default, "")
-                self.assertEqual(p.blank_meaning, "not_evaluated")
-                self.assertEqual(p.min, "0", "没有下限，界面拦不住 -1，要到采基线才失败")
+        p = {x.key: x for x in _load("vibration").declaration.params}["stop_threshold"]
+        self.assertFalse(p.has_default, "★界面会据此替它预置一个值 —— 那会静默停止诊断")
+        self.assertEqual(p.default, "")
+        self.assertEqual(p.blank_meaning, "not_evaluated")
+        self.assertEqual(p.min, "0", "没有下限，界面拦不住 -1，要到采基线才失败")
 
 
 class TestOutputSpecGuards(unittest.TestCase):

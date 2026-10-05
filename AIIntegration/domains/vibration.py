@@ -1,0 +1,937 @@
+"""低频采集AI振动诊断 —— 一个振动传感器上的「经典算法（国标判级）」与「AI 自训（基线偏离）」，可选其一或两者都用。
+
+> 2026-10-05 用户定：模块 1（`vibration_iso`）与模块 2（`vibration_baseline`）**合并为本模块**，
+> 界面只放一个选项「低频采集AI振动诊断」（用户 10-05 定名；高频那一路即模块 3「高频采集AI振动诊断」）。理由：两种算法的结论要合成一个检测状态，彼此不一致时要能解释，
+> 采基线时要先用国标查一遍所选时段 —— 这些**跨算法的判断**在一个模块里一次做完，不靠平台去拼。
+> 现役两条旧绑定的数据是仿真（AICloud `C-66 §3.3`），换新 key 造成的历史断档没有损失。
+> 两种算法各自的判据与取舍沿用原两模块（定案「模块 1、2 的内容」、契约 1.13），本文件只记合并带来的新东西。
+
+依据与定案：`AIIntegration/doc/诊断配置流程定案.md`。
+
+---
+
+## 0.1 做什么
+
+| 部分 | 结论 | 依据 |
+| --- | --- | --- |
+| 经典算法 | 速度最大值、最大值所在轴、烈度区（文字 / 数值）、距下一档余量、轴向/径向比、方向性提示 | 工业机器 GB/T 6075.3、泵 GB/T 6075.7；方向性是经验判据，只作提示 |
+| AI 自训 | 速度偏离、三轴比例漂移、温升、异常分 | 与这台设备自己采的基线比（中位数 + 四分位距） |
+| 共用 | **检测状态**、运行状态、判据摘要 | 见 §0.3 |
+
+## 0.2 启用哪种算法：参数 `algorithms`，必填、无缺省
+
+`classic` 经典 / `baseline` 自训 / `both` 两者。**没启用的那一半结论不写**（点上保持空），
+判据摘要注明「未启用」；本绑定要不要基线也随之而定（`required_artifacts`，契约 1.14 `Binding.requires_artifacts`）。
+没填或非法 ⇒ 整组落 `CONFIG_INCOMPLETE` —— 「没填」与「不想用」分得开，不猜。
+
+## 0.3 检测状态怎么合
+
+| 部分 | 会出的档 |
+| --- | --- |
+| 经典 | A、B → 正常；C → 警告；D → 危险（★B 区即「可长期运行」，不对「注意」） |
+| 自训 | 速度偏离 ≥ 3 → 注意，否则正常（★不出警告、危险：本部分门槛无标定依据，不该把设备说成危险） |
+
+合成规则（`_combine_status`）：
+1. 停机 ⇒ 停机；
+2. 已启用的部分里**算得出的取最高档**；只要高于「正常」就照报 —— 另一部分算不出不能把它压下去；
+3. 算得出的都是「正常」、却有已启用的部分算不出 ⇒ **落那部分的坏码，不报正常**（没采基线时不说「正常」）。
+
+两部分**不一致**时判据摘要写明怎么读（`_disagreement`）：国标偏大而相对自身没变 ⇒ 振动可能长期偏高、
+基线或采于异常状态、或判级参数需核对；国标正常而偏离自身常态 ⇒ 早期变化。
+
+## 0.4 采基线先用国标查一遍（`train`）
+
+判级参数齐全时，所选时段里**有任何一帧按国标落在 C / D 区就拒采**并说清：用偏大的那段作基线，
+等于把异常当常态，之后再大也显得「没变」。判级参数不全时不查，并在工件元数据里写明「未做国标核查」。
+
+## 0.5 不防抖
+
+每拍如实写。去抖交给实时库报警状态机（`OnDelaySec`），历史里留真实的每一拍（`AI-74 §4`）。
+
+## 0.6 纪律：缺什么落什么码，绝不猜缺省
+
+参数没填、口径没确认、没有基线、样本全是坏值 —— 每一种都对应一条特定的坏质量结论，
+而不是"给个看起来合理的数"。**猜错的烈度分级会把"该停机"说成"可长期运行"，而且从数值上看不出来。**
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+
+# ★域模块 import 骨架一律用**绝对包名**：装载器按文件路径 exec，相对 import 会当场炸。
+from aiintegration.domains import Domain
+from aiintegration.quality import Quality
+from aiintegration.types import (
+    ROLE_STATUS, STATUS_ATTENTION, STATUS_DANGER, STATUS_LEVELS, STATUS_NORMAL, STATUS_STOPPED,
+    STATUS_WARNING, STOP_LITERAL, STOP_NOT_WRITTEN, Dataset, Declaration, Finding, Frame,
+    InputSpec, OutputSpec, ParamSpec, ProgressSink, TrainedArtifact,
+)
+
+# ─────────────────────────────── 限值表 ───────────────────────────────
+#
+# 速度有效值 mm/s。三个边界依次是 A/B、B/C、C/D。
+#   A 新投运 │ B 可长期运行 │ C 不宜长期连续运行 │ D 足以造成损坏
+# ★这两张表是**判据本身**，不是可调参数：动它等于改国标结论。
+
+#: GB/T 6075.3-2011（等同 ISO 10816-3:2009）工业机器，(机器分组, 支承方式) → 边界。
+#: 数值与 ISO 20816-3:2022 表 A.1、A.2 相同（2026-09-17 核对原文）。
+#: ★键的取值逐字照平台台账（`C-64 §2.3`）：平台原样拷贝、不换算。
+_MACHINE_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
+    ("group1", "rigid"):    (2.3, 4.5, 7.1),
+    ("group1", "flexible"): (3.5, 7.1, 11.0),
+    ("group2", "rigid"):    (1.4, 2.8, 4.5),
+    ("group2", "flexible"): (2.3, 4.5, 7.1),
+}
+
+#: GB/T 6075.7-2015（等同 ISO 10816-7:2009）旋转动力泵，(泵类别, 功率档) → 边界。
+#: ★出处：AICloud `C-43 §4` 转引 Europump《Guidelines on Pump Vibration》（2013）对 ISO 10816-7 的摘录，
+#:   **标准原文尚未取得、未核对**（用户 2026-09-18 定：先按此实现）。取得原文后须逐值核对。
+_PUMP_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
+    ("category1", "le200"): (2.5, 4.0, 6.6),
+    ("category1", "gt200"): (3.5, 5.0, 7.6),
+    ("category2", "le200"): (3.2, 5.1, 8.5),
+    ("category2", "gt200"): (4.2, 6.1, 9.5),
+}
+PUMP_POWER_SPLIT_KW = 200.0
+
+_GROUPS = ("group1", "group2")
+_PUMPS = ("category1", "category2")
+_NA = "notApplicable"
+
+#: 平台台账的键（`C-64 §2.3`）。
+P_GROUP, P_SUPPORT, P_PUMP = "machineGroup", "supportClass", "pumpCategory"
+P_POWER, P_SPEED, P_AXIAL = "ratedPowerKw", "ratedSpeedRpm", "axialAxis"
+P_ALGOS = "algorithms"
+_MACHINE_STD = "GB/T 6075.3-2011"
+_PUMP_STD = "GB/T 6075.7-2015"
+
+#: 启用哪种算法（§0.2）。
+ALGO_CLASSIC, ALGO_BASELINE, ALGO_BOTH = "classic", "baseline", "both"
+
+#: 低速阈值（r/min）。工业机器低于它时，标准要求评价频带改为 2~1000 Hz 且应另看位移。
+LOW_SPEED_RPM = 600.0
+
+#: 运行状态的三个取值。
+RUNNING, STOPPED, UNJUDGED = "运行", "停机", "未判"
+
+#: 烈度区 → 检测状态（用户 2026-10-05 同意）。★B 区不对「注意」：国标 B 区即「可长期运行」。
+_ZONE_STATUS = {"A": STATUS_NORMAL, "B": STATUS_NORMAL, "C": STATUS_WARNING, "D": STATUS_DANGER}
+
+#: 档位高低（停机不参与比较）。
+_RANK = {STATUS_NORMAL: 0, STATUS_ATTENTION: 1, STATUS_WARNING: 2, STATUS_DANGER: 3}
+_LEVEL_TEXT = {STATUS_NORMAL: "正常", STATUS_ATTENTION: "注意", STATUS_WARNING: "警告", STATUS_DANGER: "危险"}
+
+_AXES = ("x", "y", "z")
+TEMP_ROLE = "temp"
+
+#: 方向性判据阈值。**经验值**，不是国标。
+#: ★出处要分清：判据**方向**（轴向偏高→不对中、径向主导→不平衡、三轴均衡→松动）出自改造方案 §3 轨A④
+#:   现象/倾向表；那张表只有「显著」「异常升高」等定性说法，**这两个数是 2026-09-11 落码时我方取的，
+#:   没有文献或实测标定**。★常被引的「单测点 0.767」**不是这条规则的成绩**：那是 MAFAULDA 上训练出来的
+#:   12 维标量小网络判「垂直 vs 水平不对中」（research/scalar-capability §5），只说明单测点标量有判别力但有限；
+#:   本规则本身从未上数据验过。
+_AXIAL_SIGNIFICANT = 0.5   # 轴向 / 径向 ≥ 此值 ⇒ 轴向占比异常
+_RADIAL_BALANCED = 0.8     # 径向两轴互比落在 [0.8, 1/0.8] ⇒ 视为各向同性
+
+#: 基线格式。**存进工件里**：格式一变，老工件要能被认出来而不是被误读。
+#: ★沿用 `vibration_baseline` 的格式号：内容一字未变，合并前采的基线照样能读。
+BASELINE_FORMAT = "vibration_baseline/baseline@1"
+
+#: 采基线至少要几帧（定案 2.2）。
+MIN_BASELINE_FRAMES = 5
+
+#: 稳健尺度的下限（mm/s，温度同用）。传感器分辨率决定它不可能真是 0；
+#: ★不设下限的后果是除零或天文数字的 z 分数，后者更坏，因为它看着像个结论。
+MIN_SCALE = 0.01
+
+#: 四分位距折算成与标准差同尺度的系数（正态分布下 IQR ≈ 1.349σ）。
+_IQR_TO_SIGMA = 1.349
+
+#: 认为"偏离显著"的 z 分数。经验值，用于检测状态（注意）、异常分与摘要措辞，**不是国标**。
+_Z_NOTABLE = 3.0
+
+DEFAULT_NORMAL_LABEL = "正常"
+
+#: 两部分各自的结论键。没启用的那一半不写。
+CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
+                "axial_ratio", "direction_hint")
+BASELINE_KEYS = ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score")
+
+
+def _vel_role(axis: str) -> str:
+    return f"{axis}_vel"
+
+
+class Vibration(Domain):
+    """振动诊断（经典 / 自训，可选其一或两者）。"""
+
+    key = "vibration"
+    display = "低频采集AI振动诊断"
+    version = "1.0.0"
+
+    # ── 声明 ──────────────────────────────────────────────────────────────
+    def declare(self) -> Declaration:
+        inputs = [
+            InputSpec(
+                role=_vel_role(axis), unit="mm/s", required=(axis == "x"),
+                # ★按字段绑到结构值点时（契约 1.11）：物理量须是速度；x/y/z 必须出自同一个点
+                #   （同一条记录），否则"同一时刻"的保证就没了。
+                quantity="velocity", axis=axis, record="point1",
+                display=f"{axis.upper()} 轴速度",
+                description=("速度有效值。至少选 X 轴速度" if axis == "x" else "速度有效值，可不选"))
+            for axis in _AXES]
+        inputs.append(InputSpec(
+            role=TEMP_ROLE, unit="℃", required=False, quantity="temperature",
+            display="温度", description="只有 AI 自训用：有就算温升，没有就不给温升"))
+        return Declaration(
+            inputs=tuple(inputs),
+            # ★「可能要」：只有启用了 AI 自训才真要，按绑定算的见 `required_artifacts`。
+            requires_artifacts=("baseline",),
+            params=(
+                ParamSpec(
+                    key=P_ALGOS, display="启用算法", value_type="enum",
+                    choices=(ALGO_CLASSIC, ALGO_BASELINE, ALGO_BOTH),
+                    choice_displays=("经典算法（国标判级）", "AI 自训（基线偏离）", "两者都用"),
+                    required=True, level="position",
+                    description="没有缺省。只启用经典即保存即出结论；启用 AI 自训须先采基线"),
+                ParamSpec(
+                    key=P_GROUP, display="机器分组（GB/T 6075.3）", value_type="enum",
+                    choices=(*_GROUPS, _NA),
+                    choice_displays=(
+                        "第 1 组：大型机器，额定功率 >300 kW；电动机轴中心高 H≥315 mm",
+                        "第 2 组：中型机器，额定功率 >15 kW 且 ≤300 kW；电动机轴中心高 160≤H<315 mm",
+                        "不适用：不在 GB/T 6075.3 范围内",
+                    ),
+                    required=False, level="machine",
+                    description="经典算法、工业机器必填（泵不填）。决定 A/B/C/D 边界值，没有缺省：选错会把该停机说成可长期运行。"
+                                "选「不适用」则不出烈度分级"),
+                ParamSpec(
+                    key=P_SUPPORT, display="支承方式", value_type="enum",
+                    choices=("rigid", "flexible"), choice_displays=("刚性", "柔性"),
+                    required=False, level="machine",
+                    description="经典算法、工业机器必填（泵不看支承）。机器与支承系统在测量方向上的最低固有频率比转频高 25% 以上为刚性，否则柔性"),
+                ParamSpec(
+                    key=P_PUMP, display="泵类别（GB/T 6075.7）", value_type="enum",
+                    choices=(*_PUMPS, _NA),
+                    choice_displays=(
+                        "第Ⅰ类：对可靠性、可用性或安全性要求高的泵",
+                        "第Ⅱ类：一般用途的泵",
+                        "不适用：不是泵，或不在 GB/T 6075.7 范围内",
+                    ),
+                    required=False, level="machine",
+                    description="经典算法、旋转动力泵必填（工业机器不填）。选第Ⅰ/Ⅱ类即按泵判级"),
+                ParamSpec(
+                    key=P_POWER, display="额定功率", value_type="float", unit="kW",
+                    required=False, level="machine",
+                    description="泵必填：按 200 kW 分两档取限值"),
+                ParamSpec(
+                    key=P_SPEED, display="额定转速", value_type="float", unit="r/min",
+                    required=False, level="machine",
+                    description="工业机器低于 600 r/min 时照常出分级，但判据摘要注明结果仅供参考（标准要求另看位移）"),
+                ParamSpec(
+                    key="vel_is_rms", display="速度口径确认为有效值", value_type="enum",
+                    choices=("true", "false"),
+                    choice_displays=("是，已确认为有效值", "否 / 未确认（峰值或手册未注明）"),
+                    required=True, level="position",
+                    description="烈度判级要求速度有效值。选「否」时不出烈度分级，只给数值"),
+                ParamSpec(
+                    key=P_AXIAL, display="轴向是哪一轴", value_type="enum",
+                    choices=("x", "y", "z"), choice_displays=("X 轴", "Y 轴", "Z 轴"),
+                    required=True, level="sensor",
+                    description="沿转轴方向的那一轴，在振动传感器上填。没有缺省：猜错会把不对中说成不平衡。"
+                                "缺它只影响方向性与比例漂移；★改了它，已采基线的比例那一项作废，须重采"),
+                ParamSpec(
+                    key="normal_label", display="采基线时认哪个标签算正常",
+                    value_type="string", default=DEFAULT_NORMAL_LABEL, has_default=True,
+                    required=False, level="position",
+                    description="AI 自训用。采基线只用被标成这个标签的样本。允许有缺省：猜错会当场可见"
+                                "（一条样本都匹配不上，采基线直接失败并说清）"),
+                ParamSpec(
+                    key="stop_threshold", display="停机门槛", value_type="float", unit="mm/s",
+                    required=False, level="position",
+                    # ★has_default=False（缺省即是）：界面**不要替它预置任何值** ——
+                    #   替它填一个"看起来合理"的数，会在某些设备上把运行判成停机 ⇒ 静默停止诊断。
+                    blank_meaning="not_evaluated", min="0",
+                    description="速度最大值低于它即判停机：停机时不判烈度与方向、不出偏离与异常分，采基线时剔除停机帧。"
+                                "不填不判；没有缺省，按设备自己定"),
+            ),
+            outputs=(
+                OutputSpec(key="status", display="检测状态", value_type="string",
+                           role=ROLE_STATUS, stop_behavior=STOP_LITERAL,
+                           description="经典：A、B → 正常，C → 警告，D → 危险；AI 自训：速度偏离 ≥ 3 → 注意，否则正常；"
+                                       "两者都用取较高档。停机 → 停机。算得出的都是正常、却有启用的部分算不出时落坏质量码，不报正常",
+                           choices=(STATUS_NORMAL, STATUS_ATTENTION, STATUS_WARNING, STATUS_DANGER,
+                                    STATUS_STOPPED),
+                           choice_displays=("正常", "注意", "警告", "危险", STOPPED)),
+                OutputSpec(key="vel_max", display="速度最大值", value_type="float", unit="mm/s",
+                           headline=True, description="经典。窗口内三轴速度的最大值"),
+                OutputSpec(key="dominant_axis", display="最大值所在轴", value_type="string",
+                           description="经典。x / y / z"),
+                OutputSpec(key="iso_zone", display="烈度区", value_type="string", headline=True,
+                           description="经典。A 新投运 / B 可长期运行 / C 不宜长期连续运行 / D 足以造成损坏；停机时为「停机」",
+                           stop_behavior=STOP_LITERAL,
+                           choices=("A", "B", "C", "D", STOPPED),
+                           choice_displays=("A 新投运", "B 可长期运行", "C 不宜长期连续运行",
+                                            "D 足以造成损坏", STOPPED)),
+                OutputSpec(key="iso_zone_code", display="烈度区(数值)", value_type="int",
+                           description="经典。1=A 2=B 3=C 4=D，0=停机，给趋势曲线与报警门限用",
+                           stop_behavior=STOP_LITERAL,
+                           choices=("0", "1", "2", "3", "4"),
+                           choice_displays=(STOPPED, "A", "B", "C", "D")),
+                OutputSpec(key="iso_margin", display="距下一档余量", value_type="float", unit="mm/s",
+                           description="经典。离更差一档的边界还有多远；已在 D 区时为负",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="axial_ratio", display="轴向/径向比", value_type="float",
+                           description="经典。轴向 ÷ 径向两轴较大者",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="direction_hint", display="方向性提示", value_type="string",
+                           description="经典。★提示，不是结论：无频谱数据，仅凭三轴比例判断倾向；停机时为「停机」",
+                           stop_behavior=STOP_LITERAL,
+                           choices=(STOPPED,)),
+                OutputSpec(key="vel_z_max", display="速度偏离", value_type="float",
+                           description="AI 自训。各速度通道 (当前−基线中位数)/(四分位距/1.349) 的最大值。≥3 视为显著偏离",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="ratio_drift", display="三轴比例漂移", value_type="float",
+                           description="AI 自训。轴向/径向比相对基线的变化量",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="temp_rise", display="温升", value_type="float", unit="℃",
+                           description="AI 自训。相对基线的温度变化",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="anomaly_score", display="异常分", value_type="float", headline=True,
+                           description="AI 自训。0~100，由上面几项合成。★不是概率，是排序用的分数",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="run_state", display="运行状态", value_type="string",
+                           description="运行 / 停机 / 未判（未填停机门槛）。停机时数值类结论不更新，界面据此置灰",
+                           choices=(RUNNING, STOPPED, UNJUDGED)),
+                OutputSpec(key="evidence", display="判据摘要", value_type="string",
+                           description="用了哪几路、判到哪一档、两种算法是否一致、为什么没给"),
+            ),
+        )
+
+    def required_artifacts(self, params: dict[str, str]) -> tuple[str, ...]:
+        """按绑定参数算：只有启用了 AI 自训才要基线（契约 1.14 `Binding.requires_artifacts`）。
+        `algorithms` 没填或非法时按「可能要」回 —— 不替没填的参数下结论说「不需要」。"""
+        algos = _algos(params)
+        if algos is None or ALGO_BASELINE in algos:
+            return ("baseline",)
+        return ()
+
+    # ── 训练（采基线）──────────────────────────────────────────────────────
+    def train(self, dataset: Dataset, report: ProgressSink) -> TrainedArtifact:
+        """采一条基线：这台设备正常运行时各通道的中位数与四分位距，以及三轴比例。
+
+        ★判级参数齐全时先用国标查所选时段：有一帧落 C / D 区就拒采（§0.4）。
+        """
+        wanted = DEFAULT_NORMAL_LABEL
+        params: dict[str, str] = {}
+        for it in dataset.items:            # 参数在帧上，各帧同一条诊断，取第一个
+            params = it.frame.params
+            wanted = params.get("normal_label", "").strip() or DEFAULT_NORMAL_LABEL
+            break
+        axial = (params.get(P_AXIAL, "") or "").strip().lower()
+
+        algos = _algos(params)
+        if algos is not None and ALGO_BASELINE not in algos:
+            raise ValueError(f"本诊断只启用了经典算法（{P_ALGOS}={params.get(P_ALGOS)!r}），不需要也不采基线")
+
+        # 定案 2.5：停机帧不进基线 —— 否则基线把"停着"当成常态，开机后每拍都显得偏高。
+        _state, state_q, state_note = run_state(params, 0.0)
+        if state_q is not Quality.OK:
+            raise ValueError(f"{state_note} —— 判不了哪些帧是停机，不采基线")
+        labeled = [it for it in dataset.items if it.label == wanted]
+        normals = [it for it in labeled if not _frame_stopped(it.frame, params)]
+        stopped = len(labeled) - len(normals)
+        if len(normals) < MIN_BASELINE_FRAMES:
+            raise ValueError(
+                f"基线样本不足：需要至少 {MIN_BASELINE_FRAMES} 帧标为 {wanted!r} 的运行样本，"
+                f"实际只有 {len(normals)} 帧（训练集共 {len(dataset)} 帧，"
+                f"标签分布 {dataset.label_counts()}"
+                + (f"，其中 {stopped} 帧判为停机已剔除" if stopped else "")
+                + "）—— 样本太少算出来的离散度没有意义")
+
+        # ★国标核查：用偏大的那段作基线，之后再大也显得「没变」。
+        limits, iso_bad, basis, _is_pump = _grading(params)
+        if iso_bad:
+            iso_check = f"未做国标核查：{iso_bad}"
+        else:
+            hot = []
+            for it in normals:
+                peak = max((p for p in (_window_peak(it.frame, _vel_role(a)) for a in _AXES)
+                            if p is not None), default=None)
+                if peak is not None and _classify(peak, limits)[0] in ("C", "D"):  # type: ignore[arg-type]
+                    hot.append((it.frame.t_end, peak))
+            if hot:
+                t_hot, v_hot = max(hot, key=lambda h: h[1])
+                raise ValueError(
+                    f"所选时段有 {len(hot)} 帧按 {basis} 已在 C / D 区（最大 {v_hot:.3f} mm/s，"
+                    f"{t_hot.isoformat()}）—— 用它作基线会把异常当常态，之后再大也显得「没变」。"
+                    "请另选一段国标判为 A / B 区的正常运行时段")
+            iso_check = f"已按 {basis} 核查，所选 {len(normals)} 帧均在 A / B 区"
+
+        report.report(0.2, f"用 {len(normals)} 帧 {wanted!r} 样本采基线"
+                           + (f"（剔除停机帧 {stopped}）" if stopped else "") + f"；{iso_check}")
+
+        channels: dict[str, dict[str, float]] = {}
+        for role in [_vel_role(a) for a in _AXES] + [TEMP_ROLE]:
+            vals = []
+            for it in normals:
+                v = (_window_mean(it.frame, role) if role == TEMP_ROLE
+                     else _window_peak(it.frame, role))
+                if v is not None:
+                    vals.append(v)
+            if len(vals) >= MIN_BASELINE_FRAMES:
+                med, iqr = _median_iqr(vals)
+                channels[role] = {"median": med, "iqr": iqr, "n": len(vals)}
+
+        if not any(k.endswith("_vel") for k in channels):
+            raise ValueError("一路速度都没能采到足够样本 —— 检查所选采集点与这段时间实时库里有没有数据")
+
+        report.report(0.8, "统计完成")
+
+        # 三轴比例进基线：不对中的抓手是"比例变了"，不是"值变大了"。
+        # ★格式沿用 `{"1": 比值}`（BASELINE_FORMAT 不变）。
+        ratios: dict[str, float] = {}
+        if axial in _AXES:
+            ax = channels.get(_vel_role(axial))
+            rad = [channels[_vel_role(a)]["median"] for a in _AXES
+                   if a != axial and _vel_role(a) in channels]
+            if ax and rad and max(rad) > 0:
+                ratios["1"] = ax["median"] / max(rad)
+
+        model = {
+            "format": BASELINE_FORMAT,
+            "label": wanted,
+            "frames": len(normals),
+            "stopped_excluded": stopped,
+            "t_from": min(it.frame.t_start for it in normals).isoformat(),
+            "t_to": max(it.frame.t_end for it in normals).isoformat(),
+            "axial_axis": axial,
+            "axial_ratios": ratios,
+            "iso_check": iso_check,
+            "channels": channels,
+        }
+        blob = json.dumps(model, ensure_ascii=False, indent=1).encode("utf-8")
+        return TrainedArtifact(
+            blob=blob, algo="基线统计（中位数/四分位距）", kind="baseline", suffix=".json",
+            # ★基线没有"准确率"这回事 —— 给 None，别拿 1.0 顶（界面会显示成 100%）。
+            accuracy=None, feature_count=len(channels),
+            meta={"format": BASELINE_FORMAT, "normal_label": wanted,
+                  "frames": str(len(normals)), "stopped_excluded": str(stopped),
+                  "t_from": model["t_from"], "t_to": model["t_to"], "iso_check": iso_check})
+
+    # ── 推理 ──────────────────────────────────────────────────────────────
+    def infer(self, frame: Frame) -> list[Finding]:
+        algos = _algos(frame.params)
+        if algos is None:
+            raw = frame.params.get(P_ALGOS, "")
+            return _bad_all(self, frame, None, Quality.CONFIG_INCOMPLETE,
+                            f"未出结论：启用算法 {P_ALGOS}={raw or '未填'} 非法 —— "
+                            f"须为 {ALGO_CLASSIC} / {ALGO_BASELINE} / {ALGO_BOTH}，不猜")
+        classic, baseline_on = ALGO_CLASSIC in algos, ALGO_BASELINE in algos
+
+        peaks, times, bad, empty = _peaks(frame)
+
+        # ① 一路好样本都没有 —— 区分"没数据"与"有数据但全是坏值"，两者处置相反。
+        if not peaks:
+            q = Quality.INPUT_BAD if bad else Quality.NO_INPUT
+            why = (f"{'/'.join(bad)} 有样本但质量码全不可信"
+                   if bad else f"{'/'.join(empty) or '所有已选通道'} 在本窗口内没有样本")
+            return _bad_all(self, frame, algos, q, f"未出结论：{why}")
+
+        dominant = max(peaks, key=lambda k: peaks[k])
+        vel_max = peaks[dominant]
+        t = times[dominant]                    # ★T 取那笔样本自己的时刻
+
+        out: list[Finding] = []
+        if classic:
+            out += [Finding(key="vel_max", value=round(vel_max, 4), quality=Quality.OK, t=t),
+                    Finding(key="dominant_axis", value=dominant, quality=Quality.OK, t=t)]
+
+        # 运行状态。停机 ⇒ 不判烈度与方向、不比基线；数值类这一拍不写（定案 1.6 / 2.5）。
+        state, state_q, state_note = run_state(frame.params, vel_max)
+        out.append(Finding(key="run_state", value=state, quality=state_q, t=t))
+        if state == STOPPED:
+            out.append(Finding(key="status", value=STATUS_STOPPED, quality=Quality.OK, t=t))
+            if classic:
+                out += [Finding(key="iso_zone", value=STOPPED, quality=Quality.OK, t=t),
+                        Finding(key="iso_zone_code", value=0, quality=Quality.OK, t=t),
+                        Finding(key="direction_hint", value=STOPPED, quality=Quality.OK, t=t)]
+            out.append(Finding(key="evidence", value=f"{state_note}；不判烈度与方向、不比基线",
+                               quality=Quality.OK, t=t))
+            return out
+
+        parts: list[str] = [f"取窗口内最大值：{'/'.join(f'{k}={peaks[k]:.3f}' for k in sorted(peaks))}"
+                            f"；最大在 {dominant} {vel_max:.3f} mm/s"]
+        c_level, c_bad = None, None          # 经典部分的档位 / 算不出的码
+        b_level, b_bad = None, None          # 自训部分的档位 / 算不出的码
+
+        # ② 经典：烈度分级 + 方向性
+        if classic:
+            c_level, c_bad = self._classic(frame, peaks, vel_max, t, out, parts)
+        else:
+            parts.append("经典算法未启用")
+
+        # ③ 自训：相对基线的偏离
+        if baseline_on:
+            b_level, b_bad = self._baseline(frame, peaks, t, out, parts)
+        else:
+            parts.append("AI 自训未启用")
+
+        # ④ 检测状态与两部分是否一致
+        level, q = _combine_status(c_level, c_bad, b_level, b_bad)
+        out.append(Finding(key="status", value=level, quality=q, t=t))
+        note = _disagreement(c_level, b_level)
+        if note:
+            parts.append(note)
+
+        parts.append(state_note)
+        if bad:
+            parts.append(f"降级：{'/'.join(bad)} 本窗口全是坏值，未参与判定")
+        if empty:
+            parts.append(f"降级：{'/'.join(empty)} 本窗口无样本")
+        out.append(Finding(key="evidence", value="；".join(p for p in parts if p),
+                           quality=Quality.OK, t=t))
+        return out
+
+    # ── 两部分各自 ────────────────────────────────────────────────────────
+    @staticmethod
+    def _classic(frame: Frame, peaks: dict[str, float], vel_max: float, t: datetime,
+                 out: list[Finding], parts: list[str]) -> tuple[str | None, Quality | None]:
+        """烈度分级 + 方向性。返回 `(档位, 算不出时的码)`。"""
+        limits, iso_bad, basis, is_pump = _grading(frame.params)
+        level: str | None = None
+        bad_q: Quality | None = None
+        if iso_bad:
+            out += _bad_group(("iso_zone", "iso_zone_code", "iso_margin"), Quality.CONFIG_INCOMPLETE, t)
+            parts.append(f"烈度分级未给：{iso_bad}")
+            bad_q = Quality.CONFIG_INCOMPLETE
+        else:
+            zone, code, margin = _classify(vel_max, limits)  # type: ignore[arg-type]
+            level = _ZONE_STATUS[zone]
+            out += [Finding(key="iso_zone", value=zone, quality=Quality.OK, t=t),
+                    Finding(key="iso_zone_code", value=code, quality=Quality.OK, t=t),
+                    Finding(key="iso_margin", value=round(margin, 4), quality=Quality.OK, t=t)]
+            parts.append(
+                f"{basis} 判为 {zone} 区，"
+                + (f"已超出 C/D 界 {-margin:.3f} mm/s" if margin < 0 else f"距下一档还有 {margin:.3f} mm/s"))
+            if not is_pump:                  # 低速规定出自 GB/T 6075.3；泵标准不限转速
+                parts.append(_speed_note(frame.params.get(P_SPEED, "")))
+
+        axial = frame.params.get(P_AXIAL, "").strip().lower()
+        dir_bad, dir_q, ratio, hint = _direction_check(peaks, axial)
+        if dir_bad:
+            out += _bad_group(("axial_ratio", "direction_hint"), dir_q, t)
+            parts.append(f"方向性提示未给：{dir_bad}")
+        else:
+            out += [Finding(key="axial_ratio", value=round(ratio, 4), quality=Quality.OK, t=t),
+                    Finding(key="direction_hint", value=hint, quality=Quality.OK, t=t)]
+            parts.append(f"方向性提示：{hint}")
+        parts.append("★无频谱数据，方向性仅为提示而非结论")
+        return level, bad_q
+
+    @staticmethod
+    def _baseline(frame: Frame, peaks: dict[str, float], t: datetime,
+                  out: list[Finding], parts: list[str]) -> tuple[str | None, Quality | None]:
+        """相对基线的偏离。返回 `(档位, 算不出时的码)`。"""
+        artifact = frame.artifacts.get("baseline")
+        if artifact is None:
+            out += _bad_group(BASELINE_KEYS, Quality.MODEL_NOT_LOADED, t)
+            parts.append("无可用基线（未采或未启用），偏离与异常分未给")
+            return None, Quality.MODEL_NOT_LOADED
+        try:
+            model = _parse_baseline(artifact.blob)
+        except Exception as exc:  # noqa: BLE001 —— 坏工件不许掀翻整拍推理
+            out += _bad_group(BASELINE_KEYS, Quality.MODEL_NOT_LOADED, t)
+            parts.append(f"基线工件读不懂（{type(exc).__name__}: {exc}），偏离与异常分未给")
+            return None, Quality.MODEL_NOT_LOADED
+        found, note = _deviation(model, peaks, frame, t)
+        out += found
+        parts.append(note)
+        z = next(f for f in found if f.key == "vel_z_max")
+        if z.value is None:
+            return None, z.quality
+        return (STATUS_ATTENTION if z.value >= _Z_NOTABLE else STATUS_NORMAL), None
+
+
+# ─────────────────────────────── 合成 ───────────────────────────────
+
+def _algos(params: dict[str, str]) -> frozenset[str] | None:
+    """`algorithms` → 启用的部分；没填或非法回 None。"""
+    raw = (params.get(P_ALGOS) or "").strip()
+    if raw == ALGO_BOTH:
+        return frozenset({ALGO_CLASSIC, ALGO_BASELINE})
+    if raw in (ALGO_CLASSIC, ALGO_BASELINE):
+        return frozenset({raw})
+    return None
+
+
+def _combine_status(c_level: str | None, c_bad: Quality | None,
+                    b_level: str | None, b_bad: Quality | None) -> tuple[str | None, Quality]:
+    """§0.3：算得出的取最高档；高于正常就照报；全是正常却有启用部分算不出 ⇒ 落那部分的码。"""
+    levels = [lv for lv in (c_level, b_level) if lv is not None]
+    top = max(levels, key=lambda lv: _RANK[lv]) if levels else None
+    if top is not None and _RANK[top] > _RANK[STATUS_NORMAL]:
+        return top, Quality.OK
+    missing = c_bad or b_bad                 # 经典的码优先：它不依赖工件，算不出多半是配置问题
+    if missing is not None:
+        return None, missing
+    return top, Quality.OK
+
+
+def _disagreement(c_level: str | None, b_level: str | None) -> str:
+    """两部分不一致时怎么读。只在两部分都算得出时说。"""
+    if c_level is None or b_level is None:
+        return ""
+    if _RANK[c_level] >= _RANK[STATUS_WARNING] and b_level == STATUS_NORMAL:
+        return (f"★国标判为{_LEVEL_TEXT[c_level]}、相对自身基线无明显变化：振动可能长期偏高"
+                "（基线或采于异常状态，不宜作健康参照），或判级参数需核对")
+    if c_level == STATUS_NORMAL and b_level == STATUS_ATTENTION:
+        return "★国标范围内、但已偏离自身常态：早期变化，宜关注"
+    return ""
+
+
+# ─────────────────────────────── 经典部分 ───────────────────────────────
+
+def _peaks(frame: Frame) -> tuple[dict[str, float], dict[str, datetime], list[str], list[str]]:
+    """逐轴取窗口内**可信样本**的最大值。键为 `x`/`y`/`z`。
+
+    返回 `(轴→峰值, 轴→该峰值样本时刻, 全是坏值的轴, 选了但无样本的轴)`。
+    ★只有 `Quality.OK` 的样本参与；全坏的通道单独记出来，不当作没发生。
+    ★没选的通道不记入"无样本" —— 那与"选了但没数据"不是一回事。
+    """
+    peaks: dict[str, float] = {}
+    times: dict[str, datetime] = {}
+    bad: list[str] = []
+    empty: list[str] = []
+    for axis in _AXES:
+        role = _vel_role(axis)
+        if role not in frame.channels:
+            continue
+        samples = list(frame.channels[role])
+        if not samples:
+            empty.append(axis)
+            continue
+        best_v: float | None = None
+        best_t: datetime | None = None
+        for s in samples:
+            if s.quality is not Quality.OK:
+                continue
+            v = _as_float(s.value)
+            if v is None:
+                continue
+            if best_v is None or v > best_v:
+                best_v, best_t = v, s.t
+        if best_v is None or best_t is None:
+            bad.append(axis)
+        else:
+            peaks[axis] = best_v
+            times[axis] = best_t
+    return peaks, times, bad, empty
+
+
+def run_state(params: dict[str, str], vel_max: float) -> tuple[str | None, Quality, str]:
+    """定案 1.6 / 2.5：返回 `(运行状态, 质量, 摘要)`。门槛非法落 CONFIG_INCOMPLETE，其余照常判。"""
+    raw = (params.get("stop_threshold") or "").strip()
+    if not raw:
+        return UNJUDGED, Quality.OK, ""
+    thr = _num(raw)
+    if thr is None or thr <= 0:
+        return None, Quality.CONFIG_INCOMPLETE, f"停机门槛 {raw!r} 不是正数，运行状态未判"
+    if vel_max < thr:
+        return STOPPED, Quality.OK, f"停机：速度最大值 {vel_max:.3f} < 停机门槛 {thr:g} mm/s"
+    return RUNNING, Quality.OK, ""
+
+
+def _as_float(value) -> float | None:
+    """★不用 `float(x) except: 0.0`：那会让坏值静默变成 0，而 0 在速度上是最好的读数。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return v if v == v and v not in (float("inf"), float("-inf")) else None
+    return None
+
+
+def _num(raw: str) -> float | None:
+    try:
+        v = float((raw or "").strip())
+    except ValueError:
+        return None
+    return v if v == v and v not in (float("inf"), float("-inf")) else None
+
+
+def _grading(params: dict[str, str]
+             ) -> tuple[tuple[float, float, float] | None, str, str, bool]:
+    """选判据、查边界。返回 `(边界, 未给原因, 判据说明, 是否按泵)`；原因为空表示可以判。
+
+    ★不适用 / 缺参数 / 自相矛盾，都属于「判据立不起来」—— 正是 CONFIG_INCOMPLETE 的定义，不另立新码。
+    """
+    group = params.get(P_GROUP, "").strip()
+    mount = params.get(P_SUPPORT, "").strip()
+    pump = params.get(P_PUMP, "").strip()
+    is_rms = params.get("vel_is_rms", "").strip().lower()
+
+    is_pump = pump in _PUMPS
+    if is_pump and group in _GROUPS:
+        return None, (f"参数自相矛盾：既填了泵类别（{pump}）又填了机器分组（{group}），"
+                      "不猜哪个对"), "", True
+    if is_rms != "true":
+        return None, (f"速度口径未确认为有效值（vel_is_rms={is_rms or '未填'}）"
+                      "—— 拿峰值套有效值判据会整档偏高，故不给分级"), "", is_pump
+
+    if is_pump:
+        power = _num(params.get(P_POWER, ""))
+        if power is None or power <= 0:
+            raw = params.get(P_POWER, "").strip()
+            return None, (f"泵按 {_PUMP_STD} 判级需要额定功率（{P_POWER}={raw or '未填'}），"
+                          "无法确定功率档"), "", True
+        band = "le200" if power <= PUMP_POWER_SPLIT_KW else "gt200"
+        roman = "Ⅰ" if pump == "category1" else "Ⅱ"
+        basis = (f"{_PUMP_STD}（第{roman}类 / 额定 {power:g} kW，"
+                 f"{'≤' if band == 'le200' else '>'}200 kW 档）")
+        return _PUMP_LIMITS[(pump, band)], "", basis, True
+
+    if group == _NA:
+        return None, f"机器分组为「不适用」：设备不在 {_MACHINE_STD} 范围内，不给分级", "", False
+    if pump == _NA and not group:
+        return None, "机器分组未填（泵类别为「不适用」，按工业机器判需要机器分组）", "", False
+    limits = _MACHINE_LIMITS.get((group, mount))
+    if limits is None:
+        return None, (f"参数不全或取值非法：{P_GROUP}={group or '未填'} "
+                      f"{P_SUPPORT}={mount or '未填'}，查不到 {_MACHINE_STD} 边界"), "", False
+    basis = (f"{_MACHINE_STD}（第 {group[-1]} 组 / "
+             f"{'刚性' if mount == 'rigid' else '柔性'}支承）")
+    return limits, "", basis, False
+
+
+def _classify(vel: float, limits: tuple[float, float, float]) -> tuple[str, int, float]:
+    """按边界表判区；边界值本身归好的那一档（≤）。D 区余量为负。"""
+    ab, bc, cd = limits
+    if vel <= ab:
+        return "A", 1, ab - vel
+    if vel <= bc:
+        return "B", 2, bc - vel
+    if vel <= cd:
+        return "C", 3, cd - vel
+    return "D", 4, cd - vel
+
+
+def _direction_check(peaks: dict[str, float], axial: str) -> tuple[str, Quality, float, str]:
+    """返回 `(未给原因, 坏质量码, 比值, 提示)`；原因为空表示算出来了。"""
+    if axial not in _AXES:
+        return (f"轴向 {P_AXIAL}={axial or '未填'} 非法 —— 不知道哪根是轴向就分不开不对中与不平衡",
+                Quality.CONFIG_INCOMPLETE, 0.0, "")
+    if axial not in peaks:
+        return f"轴向轴 {axial} 本窗口没有可信样本", Quality.INPUT_BAD, 0.0, ""
+    radial_keys = [a for a in _AXES if a != axial and a in peaks]
+    if not radial_keys:
+        return "只有轴向轴有数据，没有径向轴可比", Quality.INSUFFICIENT_SAMPLES, 0.0, ""
+    ratio, hint = _direction(peaks, axial, radial_keys)
+    return "", Quality.OK, ratio, hint
+
+
+def _direction(peaks: dict[str, float], ax_key: str, radial_keys: list[str]) -> tuple[float, str]:
+    """方向性倾向。经验判据，不是国标；阈值出处见 `_AXIAL_SIGNIFICANT` 处。"""
+    radial_max = max(peaks[k] for k in radial_keys)
+    if radial_max <= 0:
+        return 0.0, "径向读数为 0，比值无意义；仅轴向有振动，建议现场核对安装与接线"
+    ratio = peaks[ax_key] / radial_max
+    # ★均衡这一档必须先判：三轴均衡时轴向比同样 ≥ _AXIAL_SIGNIFICANT，先判轴向偏高会把
+    #   每一台各向同性的机器都说成不对中。
+    if len(radial_keys) == 2:
+        a, b = (peaks[k] for k in radial_keys)
+        lo, hi = (a, b) if a <= b else (b, a)
+        if hi > 0 and lo / hi >= _RADIAL_BALANCED and ratio >= _RADIAL_BALANCED:
+            return ratio, "三轴接近均衡、无明显方向性 —— 提示：可能是松动 / 基础问题"
+    if ratio >= _AXIAL_SIGNIFICANT:
+        return ratio, "轴向占比偏高 —— 提示：可能是不对中 / 联轴器问题"
+    return ratio, "径向主导且轴向较弱 —— 提示：可能是不平衡"
+
+
+def _speed_note(raw: str) -> str:
+    """定案 1.2：低速设备照常出分级，但注明仅供参考。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return "额定转速未填，无法判断是否低速设备（<600 r/min 时标准要求另看位移）"
+    try:
+        rpm = float(raw)
+    except ValueError:
+        return f"额定转速 {raw!r} 不是数，无法判断是否低速设备"
+    if rpm < LOW_SPEED_RPM:
+        return (f"低速设备（额定 {rpm:g} r/min < 600），标准要求另看位移，本结果仅供参考")
+    return ""
+
+
+# ─────────────────────────────── 自训部分 ───────────────────────────────
+
+def _frame_stopped(frame: Frame, params: dict[str, str]) -> bool:
+    """采基线用：这一帧按停机门槛算不算停机。一路可信速度都没有的帧不算停机（交给后面按通道缺样本处理）。"""
+    peaks = [p for p in (_window_peak(frame, _vel_role(a)) for a in _AXES) if p is not None]
+    return bool(peaks) and run_state(params, max(peaks))[0] == STOPPED
+
+
+def _window_peak(frame: Frame, role: str) -> float | None:
+    """窗口内可信样本的最大值 —— 与推理侧同口径。"""
+    best = None
+    for s in frame.channels.get(role, []):
+        if s.quality is not Quality.OK:
+            continue
+        v = _as_float(s.value)
+        if v is not None and (best is None or v > best):
+            best = v
+    return best
+
+
+def _window_mean(frame: Frame, role: str) -> float | None:
+    """窗口内可信样本的均值（温度用它，温度本来就慢）。"""
+    vals = [v for s in frame.channels.get(role, [])
+            if s.quality is Quality.OK and (v := _as_float(s.value)) is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _quantile(sorted_vals: list[float], q: float) -> float:
+    """线性插值分位数（与 numpy 缺省口径一致）。"""
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    pos = (n - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
+
+
+def _median_iqr(vals: list[float]) -> tuple[float, float]:
+    s = sorted(vals)
+    return _quantile(s, 0.5), _quantile(s, 0.75) - _quantile(s, 0.25)
+
+
+def _scale(chan: dict) -> float:
+    """四分位距折算成与标准差同尺度，并套下限。"""
+    return max(float(chan.get("iqr") or 0.0) / _IQR_TO_SIGMA, MIN_SCALE)
+
+
+def _parse_baseline(blob: bytes) -> dict:
+    """解析基线工件。**格式不认就抛** —— 拿不认识的结构去算，算出来的数没人看得出是错的。"""
+    model = json.loads(blob.decode("utf-8"))
+    if not isinstance(model, dict):
+        raise ValueError("基线工件不是一个对象")
+    fmt = model.get("format", "")
+    if fmt != BASELINE_FORMAT:
+        raise ValueError(f"基线格式是 {fmt!r}，本模块只认 {BASELINE_FORMAT!r}")
+    if not isinstance(model.get("channels"), dict) or not model["channels"]:
+        raise ValueError("基线里一路通道都没有")
+    return model
+
+
+def _deviation(model: dict, peaks: dict[str, float], frame: Frame,
+               t: datetime) -> tuple[list[Finding], str]:
+    """相对基线的偏离。逐条各判质量。"""
+    chans = model["channels"]
+    out: list[Finding] = []
+    notes: list[str] = []
+
+    # ① 速度偏离：只比基线里有的通道。
+    zs: dict[str, float] = {}
+    for axis, cur in peaks.items():
+        c = chans.get(_vel_role(axis))
+        if c:
+            zs[axis] = (cur - float(c["median"])) / _scale(c)
+    if zs:
+        worst = max(zs, key=lambda k: zs[k])
+        out.append(Finding(key="vel_z_max", value=round(zs[worst], 3), quality=Quality.OK, t=t))
+        if zs[worst] >= _Z_NOTABLE:
+            notes.append(f"{worst} 较基线偏高 {zs[worst]:.1f} 个尺度单位")
+    else:
+        out.append(Finding(key="vel_z_max", value=None, quality=Quality.INSUFFICIENT_SAMPLES, t=t))
+        notes.append("本帧没有与基线同通道的可信样本，速度偏离未给")
+
+    # ② 三轴比例漂移。
+    axial = frame.params.get(P_AXIAL, "").strip().lower()
+    base_ratio = (model.get("axial_ratios") or {}).get("1")
+    base_axial = str(model.get("axial_axis") or "")
+    if axial not in _AXES:
+        out.append(Finding(key="ratio_drift", value=None, quality=Quality.CONFIG_INCOMPLETE, t=t))
+        notes.append(f"轴向 {P_AXIAL}={axial or '未填'} 非法，比例漂移未给")
+    elif base_ratio is None:
+        out.append(Finding(key="ratio_drift", value=None, quality=Quality.CONFIG_INCOMPLETE, t=t))
+        notes.append("基线里没有三轴比例（采基线时轴向未填或径向无数据），比例漂移未给")
+    elif base_axial != axial:
+        # ★基线的比例是按采集时的轴向算的。轴向改了还照减，得出的漂移是两把尺子的差，且看不出错。
+        out.append(Finding(key="ratio_drift", value=None, quality=Quality.MODEL_NOT_LOADED, t=t))
+        notes.append(f"基线采集时轴向为 {base_axial}，现在为 {axial}：比例漂移未给，请重采基线")
+    else:
+        ax = peaks.get(axial)
+        rad = [peaks[a] for a in _AXES if a != axial and a in peaks]
+        if ax is None or not rad or max(rad) <= 0:
+            out.append(Finding(key="ratio_drift", value=None,
+                               quality=Quality.INSUFFICIENT_SAMPLES, t=t))
+        else:
+            drift = ax / max(rad) - float(base_ratio)
+            out.append(Finding(key="ratio_drift", value=round(drift, 4), quality=Quality.OK, t=t))
+            if abs(drift) >= 0.2:
+                notes.append(f"三轴比例较基线漂移 {drift:+.2f}"
+                             f"（{'轴向占比升高，提示：可能不对中' if drift > 0 else '轴向占比下降'}）")
+
+    # ③ 温升：没选温度 ⇒ NO_INPUT；选了但基线里没有 ⇒ MODEL_NOT_LOADED。
+    rise: float | None = None
+    temp_q = Quality.NO_INPUT
+    if TEMP_ROLE in frame.channels:
+        base = chans.get(TEMP_ROLE)
+        cur = _window_mean(frame, TEMP_ROLE)
+        if base is None:
+            temp_q = Quality.MODEL_NOT_LOADED
+        elif cur is not None:
+            rise = cur - float(base["median"])
+    if rise is not None:
+        out.append(Finding(key="temp_rise", value=round(rise, 3), quality=Quality.OK, t=t))
+        if rise >= 5.0:
+            notes.append(f"温度较基线高 {rise:.1f}℃")
+    else:
+        out.append(Finding(key="temp_rise", value=None, quality=temp_q, t=t))
+
+    # ④ 异常分：★不是概率、不是置信度，一个 0~100 的数最容易被当成概率读。
+    if not zs:
+        out.append(Finding(key="anomaly_score", value=None, quality=Quality.INSUFFICIENT_SAMPLES, t=t))
+    else:
+        z_part = min(1.0, max(0.0, max(zs.values())) / (2 * _Z_NOTABLE))
+        got_drift = next((f for f in out if f.key == "ratio_drift"), None)
+        d_part = (min(1.0, abs(got_drift.value) / 0.5)
+                  if got_drift is not None and got_drift.value is not None else 0.0)
+        got_temp = next((f for f in out if f.key == "temp_rise"), None)
+        t_part = (min(1.0, max(0.0, got_temp.value) / 10.0)
+                  if got_temp is not None and got_temp.value is not None else 0.0)
+        score = 100.0 * (0.6 * z_part + 0.25 * d_part + 0.15 * t_part)
+        out.append(Finding(key="anomaly_score", value=round(score, 1), quality=Quality.OK, t=t))
+
+    head = (f"基线采自 {str(model.get('t_from', '?'))[:16]}~{str(model.get('t_to', '?'))[:16]}"
+            f"（{model.get('frames', '?')} 帧）")
+    return out, "；".join([head] + notes)
+
+
+# ─────────────────────────────── 落码 ───────────────────────────────
+
+def _bad_group(keys: tuple[str, ...], q: Quality, t: datetime) -> list[Finding]:
+    """给一组结论落同一个坏质量码。**值为 None** —— 坏质量下不许有值。"""
+    return [Finding(key=k, value=None, quality=q, t=t) for k in keys]
+
+
+def _bad_all(domain: Domain, frame: Frame, algos: frozenset[str] | None,
+             q: Quality, why: str) -> list[Finding]:
+    """一条都算不出来时：**已启用部分**的每个输出各落一个坏值锚点，外加一句人话。
+    ★不是"什么都不发"：那在下游看来是"这段没数据"，而真相是"这段算不出来"。
+    ★没启用的那一半不落 —— 它本就不写；`algos=None`（启用算法本身没填）时全落。"""
+    t = frame.t_end
+    skip: set[str] = set()
+    if algos is not None:
+        if ALGO_CLASSIC not in algos:
+            skip.update(CLASSIC_KEYS)
+        if ALGO_BASELINE not in algos:
+            skip.update(BASELINE_KEYS)
+    keys = [o.key for o in domain.declare().outputs if o.key != "evidence" and o.key not in skip]
+    out = [Finding(key=k, value=None, quality=q, t=t) for k in keys]
+    out.append(Finding(key="evidence", value=why, quality=q, t=t))
+    return out
+
+
+assert set(_RANK) | {STATUS_STOPPED} == set(STATUS_LEVELS)   # 词表变了这里要跟着改

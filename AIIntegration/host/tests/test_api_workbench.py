@@ -359,7 +359,7 @@ class TestNoWorkbench(WbApiBase):
 
     def test_原有那几口照常(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
-        self.assertEqual(r.proto_version, "1.13")
+        self.assertEqual(r.proto_version, "1.14")
 
 
 if __name__ == "__main__":

@@ -121,15 +121,15 @@ class TestNoTrustedInput(unittest.TestCase):
 
 
 class TestRealDomainsAlreadyComply(unittest.TestCase):
-    def test_振动两个模块在无数据时本就守规(self):
+    def test_振动模块在无数据时本就守规(self):
         loaded, failed = discover(DOMAINS_DIR)
-        for name in ("vibration_iso", "vibration_baseline"):
+        for name in ("vibration",):
             mine = [(p, e) for p, e in failed if p.name == f"{name}.py"]
             assert not mine, mine
             vib = {d.key: d for d in loaded}[name]
             frame = Frame(domain=name, binding="dev1", t_start=T0 - timedelta(seconds=60),
                           t_end=T0, channels={"x_vel": []},
-                          params={"machineGroup": "group2", "supportClass": "rigid", "vel_is_rms": "true",
+                          params={"algorithms": "both", "machineGroup": "group2", "supportClass": "rigid", "vel_is_rms": "true",
                                   "axialAxis": "z"})
             res = run_domain(vib, frame)
             self.assertEqual(res.error, "", f"{name} 自己就落了坏质量，不该触发骨架修正")

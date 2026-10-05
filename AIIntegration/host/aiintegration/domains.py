@@ -97,6 +97,27 @@ class LoadedDomain:
     def key(self) -> str:
         return self.instance.key
 
+    def required_artifacts(self, params: dict[str, str]) -> tuple[str, ...]:
+        """**这条绑定**要哪几类工件（契约 1.14 `Binding.requires_artifacts`）。
+
+        域可实现 `required_artifacts(params)` 按参数细分（如只启用经典算法的振动诊断不要基线）；
+        不实现就是声明里的 `requires_artifacts`。★结果必须是声明的子集 —— 声明是「可能要」的全集，
+        平台据它预备界面；按绑定多出一类等于声明漏报。越界或域自己抛错 ⇒ 记日志、退回声明（宁可多提示不可少）。
+        """
+        declared = self.declaration.requires_artifacts
+        fn = getattr(self.instance, "required_artifacts", None)
+        if fn is None:
+            return declared
+        try:
+            got = tuple(fn(dict(params)))
+        except Exception:  # noqa: BLE001 —— 域的错不许让列绑定失败
+            logger.exception("域 %s 的 required_artifacts 抛错，按声明回", self.key)
+            return declared
+        if not set(got) <= set(declared):
+            logger.warning("域 %s 按绑定回的工件 %s 超出声明 %s，按声明回", self.key, got, declared)
+            return declared
+        return got
+
     def describe(self) -> dict:
         """给 `GET /api/ai/domains` 用。**前端按 `capabilities` 渲染，不按 `key` 分支。**"""
         return {
