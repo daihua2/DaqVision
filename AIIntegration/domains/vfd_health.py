@@ -299,6 +299,8 @@ class VfdHealth(Domain):
         outs.append(OutputSpec(key="evidence", display="判据摘要", value_type="string",
                                description="用了哪个工件、窗口取了多少点、为什么没给"))
         return Declaration(
+            # ★没有启用中的模型就一条结论都出不来（契约 1.13，AICloud C-65 §4：不能拿 train 推）。
+            requires_artifacts=("model",),
             inputs=tuple(
                 InputSpec(role=role, unit=unit, required=True, display=name,
                           description=f"{name}（变频器电气量，1 Hz）")

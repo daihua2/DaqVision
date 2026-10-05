@@ -270,6 +270,8 @@ class PressFit(Domain):
 
     def declare(self) -> Declaration:
         return Declaration(
+            # ★没有启用中的模型就一条结论都出不来（契约 1.13，AICloud C-65 §4：不能拿 train 推）。
+            requires_artifacts=("model",),
             structs=(press_curve_struct(),),
             inputs=(
                 InputSpec(role=ROLE, kind="struct", struct=STRUCT_NAME, required=True,

@@ -22,7 +22,8 @@
 - `vibration_iso` 2.0.0、`vibration_baseline` 2.0.0：去掉「第二测点」组；参数键改为平台台账键
   （`machineGroup` / `supportClass` / `pumpCategory` / `ratedPowerKw` / `ratedSpeedRpm` / `axialAxis`），取值同（`group1` / `category1` / `notApplicable`…）。
 - `vibration_iso` 新增结论 `status`（A/B→`normal`，C→`warning`，D→`danger`，停机→`stopped`）；`vibration_baseline` 暂不出。
-- `vibration_baseline` 声明 `requires_artifacts=["baseline"]`；轴向与采基线时不同 ⇒ 比例漂移落 `model_not_loaded`。
+- `vibration_baseline` 声明 `requires_artifacts=["baseline"]`；`servo_health` / `vfd_health` / `press_fit` / `vision_helmet` 声明 `["model"]`。
+- `vibration_baseline`：轴向与采基线时不同 ⇒ 比例漂移落 `model_not_loaded`。
 
 **兼容性**：
 - 字段全为新增，老客户端照常解析。

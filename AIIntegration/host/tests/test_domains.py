@@ -119,5 +119,25 @@ class TestDiscover(unittest.TestCase):
             self.assertTrue(doc.strip(), f"能力位 {name} 缺定义")
 
 
+class TestRequiresArtifacts(unittest.TestCase):
+    """契约 1.13（AICloud `C-65 §4`）：平台按 `requires_artifacts` 推「基线 / 模型」列。
+    ★漏声明的后果是平台显示「不需要」，而模块实际一条结论都出不来 —— 不报错。"""
+
+    def test_接受外部模型的域都声明要model_采基线的域都声明要baseline(self):
+        real = Path(__file__).resolve().parents[2] / "domains"
+        loaded, _failed = discover(real)          # 缺第三方包的视觉域在轻环境里装不上，属正常
+        self.assertTrue(loaded)
+        for d in loaded:
+            with self.subTest(domain=d.key):
+                need = set(d.declaration.requires_artifacts)
+                takes_model = hasattr(type(d.instance), "validate_artifact")   # 基类不定义它
+                if takes_model:
+                    self.assertIn("model", need)
+                if "train" in d.caps:
+                    self.assertIn("baseline", need)
+                if not takes_model and "train" not in d.caps:
+                    self.assertEqual(need, set(), "不吃工件的域不该声明要工件")
+
+
 if __name__ == "__main__":
     unittest.main()

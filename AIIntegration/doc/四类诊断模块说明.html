@@ -77,9 +77,9 @@ footer{color:#666; font-size:13px; margin-top:16px}
 <div class="tw">
 <table>
 <tr><th>算法</th><td>取窗口内三轴速度<b>最大值</b> → 按 GB/T 6075.3（一般机组）或 GB/T 6075.7（泵）查限值表 → 判烈度区 A/B/C/D；另出轴向/径向比与方向性提示。</td></tr>
-<tr><th>输入</th><td>测点 1 的 X/Y/Z 速度（X 必填）；可选第二测点 X/Y/Z 速度（三轴全配或全不配）。<b>不吃温度</b>（温度只有模块 2 用）。</td></tr>
-<tr><th>参数</th><td>机器分组、支承方式、泵类别、额定功率、额定转速、速度口径确认、轴向是哪一轴、停机门槛。</td></tr>
-<tr><th>结论点</th><td><code>vel_max</code> 速度最大值、<code>dominant_axis</code> 最大值所在轴、<code>iso_zone</code> 烈度区、<code>iso_zone_code</code> 烈度区(数值)、<code>iso_margin</code> 距下一档余量、<code>axial_ratio</code> 轴向/径向比、<code>direction_hint</code> 方向性提示、<code>run_state</code> 运行状态、<code>evidence</code> 判据摘要</td></tr>
+<tr><th>输入</th><td>一个振动传感器的 X/Y/Z 速度（X 必填）。<b>不吃温度</b>（温度只有模块 2 用）。</td></tr>
+<tr><th>参数</th><td>设备上：机器分组、支承方式、泵类别、额定功率、额定转速（键与取值照平台台账）；传感器上：轴向是哪一轴；随诊断：速度口径确认、停机门槛。</td></tr>
+<tr><th>结论点</th><td><code>status</code> 检测状态（A/B→正常，C→警告，D→危险，停机）、<code>vel_max</code> 速度最大值、<code>dominant_axis</code> 最大值所在轴、<code>iso_zone</code> 烈度区、<code>iso_zone_code</code> 烈度区(数值)、<code>iso_margin</code> 距下一档余量、<code>axial_ratio</code> 轴向/径向比、<code>direction_hint</code> 方向性提示、<code>run_state</code> 运行状态、<code>evidence</code> 判据摘要</td></tr>
 <tr><th>依赖</th><td>零第三方依赖（纯 Python 标准库）</td></tr>
 </table>
 </div>
@@ -199,7 +199,7 @@ footer{color:#666; font-size:13px; margin-top:16px}
 <p>振动诊断走五步；伺服 / VFD / 压装三类没有第 5 步，改为导入模型工件。</p>
 <ol>
   <li><b>在设备上加诊断</b> —— 一台设备同一种诊断只允许一条，多测点放进同一条里；依赖没装上的模块不在列表里显示。</li>
-  <li><b>选采集点</b> —— 支持第二测点（可选一组「第二测点 X/Y/Z 速度」，模块 2 另含温度；不配即单测点）。候选点只列本设备下的点。</li>
+  <li><b>选采集点</b> —— 一条诊断对应一个振动传感器的 X/Y/Z 速度（模块 2 另含温度）；第二个测点就是另一个传感器、另一条诊断（契约 1.13）。候选点只列本设备下的点。</li>
   <li><b>填参数</b> —— 取数节拍（间隔、窗长）默认均 60 秒、允许修改。</li>
   <li><b>保存生效</b> —— 必选采集点没配齐<b>也允许保存</b>，界面显示缺哪几项，结论带「配置不全」质量码；<b>保存即启用</b>，另给停用按钮。</li>
   <li><b>采基线</b> —— 只对「AI 模型自训振动诊断」适用：选一段正常运行时间 → 点「采集基线」→ 完成后自动启用。标注与建训练集由后台自动做。</li>
