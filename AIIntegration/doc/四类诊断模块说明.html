@@ -91,7 +91,7 @@ footer{color:#666; font-size:13px; margin-top:16px}
 <tr><th>算法</th><td>先采一条<b>基线</b>（这台设备正常运行时各通道的中位数与四分位距），之后每拍算偏离：<code>(当前 − 中位数) / (四分位距 / 1.349)</code>。<br>用中位数而不是均值：基线只有十来帧时，一两个离群值就能把标准差撑大，让之后的真偏离显得不显著。</td></tr>
 <tr><th>输入</th><td>同 4.1 的速度各路，另加每个测点一路温度（可选）。</td></tr>
 <tr><th>参数</th><td>轴向是哪一轴、采基线时认哪个标签算正常、停机门槛 —— <b>不用</b>机器分组、支承方式、泵类别等判级参数。</td></tr>
-<tr><th>结论点</th><td><code>vel_z_max</code> 速度偏离、<code>ratio_drift</code> 三轴比例漂移、<code>temp_rise</code> 温升、<code>anomaly_score</code> 异常分、<code>run_state</code> 运行状态、<code>evidence</code> 判据摘要</td></tr>
+<tr><th>结论点</th><td><code>status</code> 检测状态（速度偏离 ≥ 3 → 注意，否则正常；停机；不出警告、危险）、<code>vel_z_max</code> 速度偏离、<code>ratio_drift</code> 三轴比例漂移、<code>temp_rise</code> 温升、<code>anomaly_score</code> 异常分、<code>run_state</code> 运行状态、<code>evidence</code> 判据摘要</td></tr>
 <tr><th>依赖</th><td>零第三方依赖</td></tr>
 </table>
 </div>

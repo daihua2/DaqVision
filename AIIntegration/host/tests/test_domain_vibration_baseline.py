@@ -95,10 +95,12 @@ class TestDeclaration(unittest.TestCase):
         self.assertEqual(got, {"x_vel": ("velocity", "x", ""), "y_vel": ("velocity", "y", ""),
                                "z_vel": ("velocity", "z", ""), "temp": ("temperature", "", "")})
 
-    def test_要先有基线_暂不出检测状态(self):
-        """`C-65 §4`：不拿能力位 train 推；`§2`：异常分切档没有标定依据，用户 10-05 定先不出。"""
+    def test_要先有基线_检测状态只有正常与注意(self):
+        """`C-65 §4`：不拿能力位 train 推；`§2`：★不出警告、危险 —— 那两档只由国标给。"""
         self.assertEqual(self.d.declaration.requires_artifacts, ("baseline",))
-        self.assertFalse([o.key for o in self.d.declaration.outputs if o.role])
+        status = [o for o in self.d.declaration.outputs if o.role == "status"]
+        self.assertEqual([o.key for o in status], ["status"])
+        self.assertEqual(status[0].choices, ("normal", "attention", "stopped"))
         self.assertEqual([o.key for o in self.d.declaration.outputs if o.headline],
                          ["vel_z_max", "anomaly_score"])
 
@@ -269,6 +271,56 @@ class TestRobustness(unittest.TestCase):
         self.assertGreater(z, 3.0, f"1.5 相对正常的 1.0 是明显偏高，z={z}")
 
 
+class TestStatus(unittest.TestCase):
+    """检测状态：速度偏离 ≥ 3 → 注意，否则正常；算不出就落码、**不报正常**；不防抖。"""
+
+    def setUp(self):
+        self.d = _load().instance
+        rows = [{"x_vel": v} for v in (1.0, 2.0, 3.0, 4.0, 5.0)]     # 中位数 3、尺度 2/1.349
+        self.art = _artifact(self.d.train(_dataset(rows), ProgressSink()))
+        self.scale = 2.0 / 1.349
+
+    def _out(self, artifact=True, **vals):
+        f = _frame(_ch(**vals))
+        if artifact:
+            f = dataclasses.replace(f, artifacts={"baseline": self.art})
+        return _by_key(self.d.infer(f))
+
+    def test_偏离小为正常_偏离大为注意_3本身算注意(self):
+        for z, want in ((0.0, "normal"), (2.99, "normal"), (3.0, "attention"), (9.0, "attention")):
+            s = self._out(x_vel=3.0 + z * self.scale)["status"]
+            self.assertIs(s.quality, Quality.OK, z)
+            self.assertEqual(s.value, want, z)
+
+    def test_偏低不算注意(self):
+        """★z 远低于 −3 也是正常：振动比平时小不是异常征兆（停机由停机门槛管）。
+        用离散度很小的基线，让 z 真的落到 −3 以下 —— 否则这条用例分不出「取绝对值」的错。"""
+        tight = _artifact(self.d.train(_dataset([{"x_vel": v} for v in (1.0, 1.02, 0.98, 1.01, 0.99)]),
+                                       ProgressSink()))
+        out = _by_key(self.d.infer(dataclasses.replace(_frame(_ch(x_vel=0.5)),
+                                                       artifacts={"baseline": tight})))
+        self.assertLess(out["vel_z_max"].value, -3.0)
+        self.assertEqual(out["status"].value, "normal")
+
+    def test_没有基线不报正常(self):
+        s = self._out(artifact=False, x_vel=9.0)["status"]
+        self.assertIs(s.quality, Quality.MODEL_NOT_LOADED)
+        self.assertIsNone(s.value)
+
+    def test_速度偏离算不出时状态同码(self):
+        s = self._out(y_vel=1.0)["status"]          # 基线只采了 x
+        self.assertIs(s.quality, Quality.INSUFFICIENT_SAMPLES)
+        self.assertIsNone(s.value)
+
+    def test_走骨架校验结论齐全(self):
+        from aiintegration.runner import run_domain
+        loaded = _load()
+        f = dataclasses.replace(_frame(_ch(x_vel=9.0)), artifacts={"baseline": self.art})
+        res = run_domain(loaded, f)
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual({x.key for x in res.findings}, {o.key for o in loaded.declaration.outputs})
+
+
 _RUN_ROWS = [{"x_vel": x, "z_vel": z} for x, z in (
     (1.0, 0.5), (1.1, 0.52), (0.9, 0.48), (1.05, 0.51), (0.95, 0.49))]
 _STOP_ROWS = [{"x_vel": 0.05, "z_vel": 0.02}] * 3
@@ -287,16 +339,18 @@ class TestStopState(unittest.TestCase):
             f = dataclasses.replace(f, artifacts={"baseline": self.art})
         return _by_key(self.d.infer(f))
 
-    def test_停机时只写运行状态与摘要(self):
+    def test_停机时只写运行状态_检测状态与摘要(self):
         out = self._infer("0.3", x_vel=0.05, z_vel=0.02)
-        self.assertEqual(set(out), {"run_state", "evidence"})
+        self.assertEqual(set(out), {"run_state", "status", "evidence"})
         self.assertEqual(out["run_state"].value, "停机")
+        self.assertEqual(out["status"].value, "stopped")
         self.assertIs(out["run_state"].quality, Quality.OK)
         self.assertIn("停机", out["evidence"].value)
 
     def test_没有基线时停机也照判停机(self):
         out = self._infer("0.3", artifact=False, x_vel=0.05)
-        self.assertEqual(set(out), {"run_state", "evidence"})
+        self.assertEqual(set(out), {"run_state", "status", "evidence"})
+        self.assertEqual(out["status"].value, "stopped")
 
     def test_运行时照常出偏离并带运行状态(self):
         out = self._infer("0.3", x_vel=1.0, z_vel=0.5)

@@ -5,7 +5,10 @@
 >
 > ★2026-10-05 按 AICloud `C-64`（用户同意）改为 2.0：一条绑定 = 一个振动传感器，去掉「第二测点」组；
 > 「轴向是哪一轴」键改为平台台账的 `axialAxis`，由传感器给（`level="sensor"`）。
-> **本模块暂不出「检测状态」**（`C-65 §2`）：异常分切档的阈值没有标定依据，用户 10-05 定先不出，平台那列留空。
+> **检测状态只出「正常 / 注意」**（2.1.0，用户 10-05 同意）：速度偏离 ≥ 3 即「注意」。
+> ★不出警告、危险 —— 那两档只由国标给（`vibration_iso`）；本模块的门槛与合成权重都没有标定依据，
+>   一组没标定的数不该把设备说成危险。「注意」是最低一档，用来提前看到「偏离了自身常态」。
+> ★**不防抖**：每拍如实写，去抖交给实时库报警（`OnDelaySec`），历史里留真实的每一拍。
 > ★同日补一处缺陷：基线记下了采集时的轴向，推理时却不核 —— 平台一改轴向，比例漂移就拿新轴向的比值
 > 去减旧轴向的基线，错了也看不出。现在两者不一致即落 `MODEL_NOT_LOADED` 并提示重采（`_deviation` ②）。
 
@@ -51,6 +54,7 @@ from datetime import datetime
 from aiintegration.domains import Domain
 from aiintegration.quality import Quality
 from aiintegration.types import (
+    ROLE_STATUS, STATUS_ATTENTION, STATUS_NORMAL, STATUS_STOPPED, STOP_LITERAL,
     STOP_NOT_WRITTEN, Dataset, Declaration, Finding, Frame, InputSpec, OutputSpec,
     ParamSpec, ProgressSink, TrainedArtifact,
 )
@@ -92,7 +96,7 @@ class VibrationBaseline(Domain):
 
     key = "vibration_baseline"
     display = "AI 模型自训振动诊断"
-    version = "2.0.0"
+    version = "2.1.0"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -135,6 +139,12 @@ class VibrationBaseline(Domain):
                                 "不填不判；没有缺省，按设备自己定"),
             ),
             outputs=(
+                OutputSpec(key="status", display="检测状态", value_type="string",
+                           role=ROLE_STATUS, stop_behavior=STOP_LITERAL,
+                           description="速度偏离 ≥ 3 → 注意，否则正常；停机 → 停机。本模块不出警告、危险（只由国标给）。"
+                                       "没有基线或速度偏离算不出时同落坏质量码",
+                           choices=(STATUS_NORMAL, STATUS_ATTENTION, STATUS_STOPPED),
+                           choice_displays=("正常", "注意", STOPPED)),
                 OutputSpec(key="vel_z_max", display="速度偏离", value_type="float", headline=True,
                            description="各速度通道 (当前−基线中位数)/(四分位距/1.349) 的最大值。>3 视为显著偏离",
                            stop_behavior=STOP_NOT_WRITTEN),
@@ -244,14 +254,16 @@ class VibrationBaseline(Domain):
 
         dominant = max(peaks, key=lambda k: peaks[k])
         t = times[dominant]
-        keys = ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score")
+        keys = ("status", "vel_z_max", "ratio_drift", "temp_rise", "anomaly_score")
 
         # 运行状态先于基线判：停机就不比，与有没有基线无关（定案 2.5）。
         state, state_q, state_note = run_state(frame.params, peaks[dominant])
         state_f = Finding(key="run_state", value=state, quality=state_q, t=t)
         if state == STOPPED:
-            return [state_f, Finding(key="evidence", value=f"{state_note}；不出偏离与异常分",
-                                     quality=Quality.OK, t=t)]
+            return [state_f,
+                    Finding(key="status", value=STATUS_STOPPED, quality=Quality.OK, t=t),
+                    Finding(key="evidence", value=f"{state_note}；不出偏离与异常分",
+                            quality=Quality.OK, t=t)]
 
         baseline = frame.artifacts.get("baseline")
         if baseline is None:
@@ -269,6 +281,7 @@ class VibrationBaseline(Domain):
                                quality=Quality.MODEL_NOT_LOADED, t=t)])
 
         out, note = _deviation(model, peaks, frame, t)
+        out.append(_status(out, t))
         out.append(state_f)
         if state_note:
             note += f"；{state_note}"
@@ -281,6 +294,19 @@ class VibrationBaseline(Domain):
 
 
 # ─────────────────────────────── 内部函数 ───────────────────────────────
+
+def _status(out: list[Finding], t: datetime) -> Finding:
+    """检测状态只看速度偏离：≥ `_Z_NOTABLE` 即「注意」。偏离算不出 ⇒ 同码落坏，**不报正常**。
+
+    ★为什么只看速度偏离、不看比例漂移与温升：那两项的门槛（0.2、5℃）只用于摘要措辞，
+      比 z 分数更没有依据；状态是平台要拿去合成、去报警的，口径宁窄勿宽。
+    """
+    z = next(f for f in out if f.key == "vel_z_max")
+    if z.value is None:
+        return Finding(key="status", value=None, quality=z.quality, t=t)
+    level = STATUS_ATTENTION if z.value >= _Z_NOTABLE else STATUS_NORMAL
+    return Finding(key="status", value=level, quality=Quality.OK, t=t)
+
 
 def _peaks(frame: Frame) -> tuple[dict[str, float], dict[str, datetime], list[str], list[str]]:
     """逐速度通道取窗口内可信样本的最大值。键为 `x`/`y`/`z`。
