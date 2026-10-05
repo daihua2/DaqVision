@@ -154,6 +154,12 @@ message DomainInfo {
   // ★台账参数自述（1.1 新增）。贵方**按这张表渲染绑定表单**，不要按域名写死字段 ——
   //   与能力位同一条道理：新增域不改前端。取值都放在 `Binding.params` 里（字符串）。
   repeated ParamSpec  params   = 7;
+  // ★没有**启用中的**这几类工件，本域就有结论出不来（1.13，贵方 C-65 §4）。取值即工件 `kind`
+  //   （`baseline` / `model`…，不是封闭枚举）。空 = 不依赖工件，保存即出结论。
+  //   ★请用它推「基线 / 模型」一列，**不要拿能力位 `train` 推**：伺服、变频器、压装、视觉都没有 `train`，
+  //     却必须导入模型才出结论；按 `train` 推会把它们显示成「不需要」。
+  //   ★算一条绑定实际生效的是哪一件：**本绑定专用的优先，没有再用全域通用的**（`binding` 为空），按 kind 分别取。
+  repeated string requires_artifacts = 8;
 }
 // 一项台账参数的自述。**域定义它，骨架只搬运**。
 message ParamSpec {
@@ -171,8 +177,11 @@ message ParamSpec {
   // ★参数归属（1.8 新增，贵方 C-40 §3.2 请求、我方 AI-41 §2.1 已接受）：
   //   `machine`  = 设备固有属性（机组类别、支承方式、额定转速……），在设备上填一次，
   //                同一台设备的各条诊断共用；
-  //   `position` = 随这条诊断填（轴向是哪一轴、速度口径……，跟着传感器安装与型号走）。
+  //   `sensor`   = 振动传感器的属性（1.13，贵方 C-64 §2.3）：如轴向是哪一轴，由平台从传感器上取；
+  //   `position` = 随这条诊断填（速度口径、停机门槛……）。
   //   空 = 域未声明。★我方**不替空值猜归属**；贵方可按 `position` 渲染。
+  //   ★1.13 起 `machine` / `sensor` 两类的**键与取值逐字照平台台账**（`machineGroup=group1` 等）：
+  //     贵方原样拷贝、不换算；台账里没填的键就不带。
   //   ⇒ 贵方界面按层级分处填写，下发 `Binding.params` 时**合并成一份**；我方只收合并后的结果。
   string level       = 10;
 
@@ -232,6 +241,11 @@ message InputSpec {
   //   与 `group`（全配或全不配）是两件事，可同时给。空 = 不约束。
   //   ⇒ 贵方表单：组内一路选了结构值点，其余几路宜锁定为同一个点、只选字段。
   string record = 10;
+  // ★**方向**（1.13，贵方 C-64 §2.2）：`x` / `y` / `z`；无方向的量（温度）为空。
+  //   取值照 historystore `H-261 §2` 的 `StructField.attrs["axis"]`（贵方的 `none` 对本格的空）。
+  //   ★我方承诺：**同一域内凡声明了 `quantity` 的角色，`(quantity, axis)` 不重复**（骨架装载时强制）。
+  //     ⇒ 贵方可按传感器上采集点的「量 + 轴」唯一地对到角色，不必拆角色名。
+  string axis = 11;
 }
 
 // ───────────────────────── 外部工件导入（1.5，走 HTTP，不在本 service 里）─────────────────────────
@@ -294,6 +308,19 @@ message OutputSpec {
   //   取值域若只写在函里，每次变化都要发一次函 + 改一次前端。
   repeated string choices         = 7;
   repeated string choice_displays = 8;   // 同序对应；空则直接显示取值
+
+  // ── 1.13（贵方 C-65 §2/§3）──────────────────────────────────────────
+  // ★这一条结论的**标准角色**。空 = 普通结论。已定取值只有一个：
+  //   `status` = 本条诊断的「检测状态」。**请认这一格、不认键名**。取值**封闭**为五档词表：
+  //     `normal` 正常 / `attention` 注意 / `warning` 警告 / `danger` 危险 / `stopped` 停机
+  //     高低：正常 < 注意 < 警告 < 危险；停机单列、不参与比高低。
+  //   `choices` 给的是**本域会出的那几档**（不一定五档都出，如 ISO 不出 `attention`）；
+  //   各域对上五档的口径写在本条 `description` 里。算不出时照常落质量码，**不另造档位**。
+  //   含 `stopped` 的必为 `stop_behavior=literal_stopped`。一个域至多一条。骨架装载时强制以上几条。
+  //   ★域没有这一条 = 本模块暂不出检测状态，请显示为空，不要按别的结论推。
+  string role     = 9;
+  // ★「主要结论」：列表上该看的那几项，请按声明顺序显示。不标的照常写点。
+  bool   headline = 10;
 }
 
 // ───────────────────────── 绑定 ─────────────────────────
@@ -360,6 +387,10 @@ message ConclusionPoint {
 message ListBindingsRequest { string domain = 1; }   // 空 = 全部
 message ListBindingsReply   { repeated Binding bindings = 1; }
 message PutBindingRequest   { Binding binding = 1; }
+// ★1.13 起，`roles` / `params` 里有**模块声明里没有**的键 ⇒ `ok=false`，`message` 写明是哪几个（贵方 C-64 §3）。
+//   ★只改参数的 PutBinding（贵方改台账后逐条下发，C-64 §2.4）：不重置节拍、不推迟下一轮；不换结论点号；
+//     不让已启用的工件失效 —— 但工件**是在旧参数下采的**这件事由域自己核（如基线采集时的轴向与现在不同，
+//     比例漂移那一项落 `model_not_loaded` 并提示重采）。
 message PutBindingReply     { bool ok = 1; string message = 2; }
 message DeleteBindingRequest{ string domain = 1; string binding = 2; }
 // ★删绑定**只停算，不删已经写进实时库的结论点** —— 绑定是"要不要继续算"，

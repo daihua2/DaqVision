@@ -29,7 +29,7 @@ from . import structbind
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.12"
+PROTO_VERSION = "1.13"
 
 
 def _ts(dt: datetime) -> object:
@@ -48,6 +48,28 @@ def _dt(ts) -> datetime | None:
     if ts is None or (ts.seconds == 0 and ts.nanos == 0):
         return None
     return ts.ToDatetime().replace(tzinfo=timezone.utc)
+
+
+def _undeclared(b: Binding, loaded: LoadedDomain) -> str:
+    """绑定里有、模块声明里没有的角色与参数。全对得上回空串。
+
+    ★为什么拒而不是收下不用（AICloud `C-64 §3` 点破）：多带的东西被静默收下，就一直挂着没人知道 ——
+      现役 `vibration_iso` 绑定里挂着一路模块从不读的温度，`vibration_baseline` 绑定里挂着三个
+      它从不读的判级参数，都是从旧绑定迁移时带过来的。更坏的一种是**键名写错**（`axialaxis`）：
+      收下了，模块按"没填"落码，配置者以为填了。
+    """
+    roles = {i.role for i in loaded.declaration.inputs}
+    params = {p.key for p in loaded.declaration.params}
+    extra_roles = sorted(set(b.roles) - roles)
+    extra_params = sorted(set(b.params) - params)
+    if not extra_roles and not extra_params:
+        return ""
+    parts = []
+    if extra_roles:
+        parts.append(f"角色 {extra_roles} 不在模块声明里（已声明 {sorted(roles)}）")
+    if extra_params:
+        parts.append(f"参数 {extra_params} 不在模块声明里（已声明 {sorted(params)}）")
+    return f"绑定 {b.domain}/{b.binding} 未保存：" + "；".join(parts)
 
 
 class ApiService(WorkbenchApiMixin):
@@ -120,12 +142,13 @@ class ApiService(WorkbenchApiMixin):
                                 required=i.required, description=i.description,
                                 kind=i.kind, display=i.display,
                                 group=i.group, group_display=i.group_display,
-                                quantity=i.quantity, record=i.record)
+                                quantity=i.quantity, record=i.record, axis=i.axis)
+            info.requires_artifacts.extend(d.declaration.requires_artifacts)
             for o in d.declaration.outputs:
                 ospec = info.outputs.add(
                     key=o.key, display=o.display, value_type=o.value_type,
                     unit=o.unit, description=o.description,
-                    stop_behavior=o.stop_behavior)
+                    stop_behavior=o.stop_behavior, role=o.role, headline=o.headline)
                 ospec.choices.extend(o.choices)
                 ospec.choice_displays.extend(o.choice_displays)
             # 台账参数自述 —— 贵方**按这张表渲染绑定表单**，不按域名写死字段。
@@ -193,6 +216,9 @@ class ApiService(WorkbenchApiMixin):
             interval_sec=b.interval_sec or 60.0,
             window_sec=b.window_sec or 60.0,
             enabled=b.enabled, fields=dict(b.role_fields))
+        why = _undeclared(nb, loaded)
+        if why:
+            return pb.PutBindingReply(ok=False, message=why)
         if nb.fields:
             why = self._check_fields(nb, loaded)
             if why:

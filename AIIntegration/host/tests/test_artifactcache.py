@@ -28,8 +28,8 @@ UTC = timezone.utc
 T0 = datetime(2026, 9, 11, 8, 0, 0, tzinfo=UTC)
 DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 
-FULL_PARAMS = {"iso_group": "2", "mount_type": "rigid",
-               "vel_is_rms": "true", "axial_axis": "z"}
+FULL_PARAMS = {"machineGroup": "group2", "supportClass": "rigid",
+               "vel_is_rms": "true", "axialAxis": "z"}
 
 
 class TestActiveArtifacts(unittest.TestCase):

@@ -333,7 +333,7 @@ class _Dom(Domain):
 
 
 DECL = Declaration(
-    inputs=tuple(InputSpec(role=r, unit="mm/s", quantity="velocity", record="p1",
+    inputs=tuple(InputSpec(role=r, unit="mm/s", quantity="velocity", axis=r[0], record="p1",
                            required=(r == "x_vel")) for r in XYZ)
     + (InputSpec(role="temp", unit="℃", required=False),),
     outputs=(OutputSpec(key="h", display="h", value_type="float"),))
@@ -506,8 +506,8 @@ class D(Domain):
     version = "1"
     def declare(self):
         return Declaration(
-            inputs=tuple(InputSpec(role=a + "_vel", unit="mm/s", quantity="velocity", record="p1",
-                                   required=(a == "x")) for a in "xyz"),
+            inputs=tuple(InputSpec(role=a + "_vel", unit="mm/s", quantity="velocity", axis=a,
+                                   record="p1", required=(a == "x")) for a in "xyz"),
             outputs=(OutputSpec(key="h", display="h", value_type="float"),))
     def infer(self, frame):
         return []

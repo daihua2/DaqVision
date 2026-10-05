@@ -129,8 +129,8 @@ class TestRealDomainsAlreadyComply(unittest.TestCase):
             vib = {d.key: d for d in loaded}[name]
             frame = Frame(domain=name, binding="dev1", t_start=T0 - timedelta(seconds=60),
                           t_end=T0, channels={"x_vel": []},
-                          params={"iso_group": "2", "mount_type": "rigid", "vel_is_rms": "true",
-                                  "axial_axis": "z"})
+                          params={"machineGroup": "group2", "supportClass": "rigid", "vel_is_rms": "true",
+                                  "axialAxis": "z"})
             res = run_domain(vib, frame)
             self.assertEqual(res.error, "", f"{name} 自己就落了坏质量，不该触发骨架修正")
             self.assertFalse(any(f.quality.is_good() for f in res.findings), name)

@@ -403,18 +403,38 @@ class InputSpec:
     与 `group`（全配或全不配）是两件事，可以同时给。空 = 不约束。
     """
 
+    axis: str = ""
+    """★**方向**（契约 1.13，AICloud `C-64 §2.2`）：`x` / `y` / `z`；无方向的量（温度）留空。
+    取值照 historystore `H-261 §2` 的 `StructField.attrs["axis"]`。
+
+    由来：平台要按传感器上采集点的「量 + 轴」把点自动对到角色。只有 `quantity` 没有轴，
+    平台就只能拆角色名（`x_vel` 拆出 `x`）—— 那是按名字写死，新增一个域就可能对错。
+    ★同一域内 `(quantity, axis)` 不许重复（`Declaration` 强制），否则「量 + 轴」对不出唯一角色。
+    """
+
     #: `struct`（1.9，结构值点）：一个值就是一整条曲线/一帧，落在 `Frame.structs`。
     _KINDS = ("point", "image", "struct")
+    _AXES = ("", "x", "y", "z")
 
     def __post_init__(self) -> None:
         if self.kind not in InputSpec._KINDS:
             raise ValueError(f"InputSpec({self.role}).kind 只能是 {InputSpec._KINDS}，收到 {self.kind!r}")
+        if self.axis not in InputSpec._AXES:
+            raise ValueError(f"InputSpec({self.role}).axis 只能是 {InputSpec._AXES}，收到 {self.axis!r}")
 
 
 #: `OutputSpec.stop_behavior` 的三档（契约 1.9）。★不是封闭枚举，将来可加。
 STOP_WRITTEN = "written"
 STOP_LITERAL = "literal_stopped"
 STOP_NOT_WRITTEN = "not_written"
+
+#: 「检测状态」结论（`OutputSpec.role=ROLE_STATUS`）的五档词表（契约 1.13，AICloud `C-65 §2`）。
+#: ★**封闭**：平台只认这五个、按它们比高低（正常 < 注意 < 警告 < 危险；停机单列不比）。
+#:   各域对上五档的口径写在该结论的 `description` 里，算不出就落质量码，**不另造档位**。
+STATUS_NORMAL, STATUS_ATTENTION, STATUS_WARNING, STATUS_DANGER, STATUS_STOPPED = (
+    "normal", "attention", "warning", "danger", "stopped")
+STATUS_LEVELS = (STATUS_NORMAL, STATUS_ATTENTION, STATUS_WARNING, STATUS_DANGER, STATUS_STOPPED)
+ROLE_STATUS = "status"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -455,8 +475,22 @@ class OutputSpec:
     choice_displays: tuple[str, ...] = ()
     """与 `choices` **同序对应**的显示名；空则直接显示取值。"""
 
+    role: str = ""
+    """这一条结论的**标准角色**（契约 1.13）。空 = 普通结论。已定取值只有一个：
+
+    · `status` —— 本条诊断的「检测状态」（AICloud `C-65 §2`）。取值只能是 `STATUS_LEVELS` 里的词，
+      平台**认这一格、不认键名**，跨模块比高低合成设备状态。
+    ★状态只有模块知道得全（烈度区的分界随机组参数变、要几个结论合起来判），所以由模块算好写点，
+      平台不按声明自己合 —— 那就是平台上的第二份算法。
+    """
+
+    headline: bool = False
+    """★「主要结论」（契约 1.13，AICloud `C-65 §3`）：列表上该看的那几项，平台按声明顺序显示。
+    不标的照常写点，在展开后的全部结论里看。"""
+
     _ALLOWED = ("float", "int", "bool", "string")
     _STOP = (STOP_WRITTEN, STOP_LITERAL, STOP_NOT_WRITTEN)
+    _ROLES = ("", ROLE_STATUS)
 
     def __post_init__(self) -> None:
         if self.value_type not in OutputSpec._ALLOWED:
@@ -478,6 +512,20 @@ class OutputSpec:
             raise ValueError(
                 f"OutputSpec({self.key}).stop_behavior={STOP_LITERAL} 却没有 choices —— "
                 "界面无从知道哪个取值代表停机")
+        if self.role not in OutputSpec._ROLES:
+            raise ValueError(
+                f"OutputSpec({self.key}).role 只能是 {OutputSpec._ROLES}，收到 {self.role!r}")
+        if self.role == ROLE_STATUS:
+            # ★词表是契约、平台按它比高低：模块自造一个词，平台要么认不出、要么排错位，且不报错。
+            stray = [c for c in self.choices if c not in STATUS_LEVELS]
+            if self.value_type != "string" or not self.choices or stray:
+                raise ValueError(
+                    f"OutputSpec({self.key}) 是检测状态，须 value_type=string 且 choices 取自 "
+                    f"{STATUS_LEVELS}（收到 value_type={self.value_type!r}，不在词表里的 {stray}）")
+            if (STATUS_STOPPED in self.choices) != (self.stop_behavior == STOP_LITERAL):
+                raise ValueError(
+                    f"OutputSpec({self.key}) 是检测状态：取值里有 {STATUS_STOPPED!r} 当且仅当 "
+                    f"stop_behavior={STOP_LITERAL!r} —— 否则停机时平台看到的是上一拍的档位")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -511,7 +559,9 @@ class ParamSpec:
 
     level: str = ""
     """参数归属（契约 1.8）：`machine` = 设备固有属性，在设备上填一次、各诊断共用；
-    `position` = 随这条诊断填。空 = 未声明。★骨架只搬运，**合并由界面在下发前做**，模块只看合并后的 `params`。"""
+    `sensor` = 振动传感器的属性（如轴向是哪一轴，1.13，AICloud `C-64 §2.3`），由平台从传感器上取；
+    `position` = 随这条诊断填。空 = 未声明。★骨架只搬运，**合并由界面在下发前做**，模块只看合并后的 `params`。
+    ★`machine` / `sensor` 两类的**键与取值逐字照平台台账**（`C-64 §2.3`）：平台原样拷贝、不换算。"""
 
     has_default: bool = False
     """★这个参数**有没有缺省**（契约 1.9）。
@@ -539,7 +589,7 @@ class ParamSpec:
     """步长建议（空 = 不限）。界面可用它渲染数字输入框的增减粒度。"""
 
     _ALLOWED = ("float", "int", "bool", "string", "enum")
-    _LEVELS = ("", "machine", "position")
+    _LEVELS = ("", "machine", "sensor", "position")
 
     def __post_init__(self) -> None:
         if self.value_type not in ParamSpec._ALLOWED:
@@ -593,12 +643,36 @@ class Declaration:
     `ewma_trend` 这类要看很多天走向的（`README §11.3`）。
     """
 
+    requires_artifacts: tuple[str, ...] = ()
+    """★没有**启用中的**这几类工件，本域就有结论出不来（契约 1.13，AICloud `C-65 §4`）。
+
+    由来：平台想拿能力位 `train` 推「要不要采基线」，但伺服、变频器、压装、视觉都**没有** `train`
+    却**必须导入模型**才出结论 —— 按 `train` 推会把它们显示成「不需要」。⇒ 显式声明。
+    取值即工件种类（`model` / `baseline`…，不是封闭枚举）。空 = 不依赖工件，保存即出结论。
+    """
+
     def __post_init__(self) -> None:
         _reject_dup([i.role for i in self.inputs], "InputSpec.role")
         _reject_dup([o.key for o in self.outputs], "OutputSpec.key")
         _reject_dup([p.key for p in self.params], "ParamSpec.key")
         if not self.outputs:
             raise ValueError("Declaration.outputs 为空 —— 不产出结论的域没有意义")
+        if self.requires_artifacts:
+            _reject_dup(list(self.requires_artifacts), "Declaration.requires_artifacts")
+        # ★「量 + 轴」要能对出唯一角色（契约 1.13 我方对 C-64 §2.2 的承诺）。只看声明了量的。
+        seen: dict[tuple[str, str], str] = {}
+        for i in self.inputs:
+            if not i.quantity:
+                continue
+            k = (i.quantity, i.axis)
+            if k in seen:
+                raise ValueError(
+                    f"InputSpec({i.role}) 与 {seen[k]} 的 (quantity, axis)={k} 相同 —— "
+                    "平台按「量 + 轴」对角色时会对不出唯一一个")
+            seen[k] = i.role
+        statuses = [o.key for o in self.outputs if o.role == ROLE_STATUS]
+        if len(statuses) > 1:
+            raise ValueError(f"检测状态只能有一条，声明了 {statuses} —— 平台不知道该看哪一条")
         _reject_dup([st.name for st in self.structs], "StructSpec.name")
         # 声明了 kind="struct" 的输入，就必须有对应的结构自述 —— 否则骨架不知道拿什么去注册，
         # 更不知道拿什么描述去解值，而那会表现成"这个点永远没数据"。

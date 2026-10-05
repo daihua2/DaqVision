@@ -98,7 +98,7 @@ class TestInfoAndDomains(ApiTestBase):
     def test_GetInfo_带身份与契约版本(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
         self.assertEqual(r.guid, "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(r.proto_version, "1.12")
+        self.assertEqual(r.proto_version, "1.13")
         self.assertEqual(r.domain_count, 1)
 
     def test_装载失败不藏(self):
@@ -547,6 +547,87 @@ class TestRetirePoints(unittest.TestCase):
         # 落到"名下没有在用的点"也是 ok=false，但那句话会让人去查点 —— 要说的是参数没填。
         self.assertIn("必填", r.message)
         self.assertEqual(len(self.points.all()), 2)
+
+
+DOM113 = '''
+from aiintegration.domains import Domain
+from aiintegration.types import Declaration, InputSpec, OutputSpec, ParamSpec
+
+class D(Domain):
+    key = "vib"
+    display = "振动"
+    version = "1"
+    def declare(self):
+        return Declaration(
+            inputs=(InputSpec(role="x_vel", unit="mm/s", quantity="velocity", axis="x"),
+                    InputSpec(role="temp", unit="℃", required=False, quantity="temperature")),
+            outputs=(OutputSpec(key="status", display="检测状态", value_type="string",
+                                role="status", stop_behavior="literal_stopped",
+                                choices=("normal", "danger", "stopped")),
+                     OutputSpec(key="v", display="v", value_type="float", headline=True),
+                     OutputSpec(key="w", display="w", value_type="float")),
+            params=(ParamSpec(key="axialAxis", display="轴向", value_type="enum",
+                              choices=("x", "y", "z"), level="sensor"),),
+            requires_artifacts=("baseline",),
+        )
+    def infer(self, frame):
+        return []
+'''
+
+
+class TestContract113(unittest.TestCase):
+    """契约 1.13（AICloud `C-64` / `C-65`）。★测试域**真的声明了每一格**，否则翻译层漏搬也断言得过。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        dom_dir = root / "domains"; dom_dir.mkdir()
+        (dom_dir / "vib.py").write_text(DOM113, encoding="utf-8")
+        loaded, failed = discover(dom_dir)
+        assert not failed, failed
+        self.bindings = BindingStore(root / "b.db")
+        self.svc = ApiService(guid="g", version="0", logstore=LogStore(capacity=10),
+                              domains={d.key: d for d in loaded}, bindings=self.bindings)
+
+    def tearDown(self):
+        self.bindings.close(); self._tmp.cleanup()
+
+    def put(self, roles, params=None):
+        b = pb.Binding(domain="vib", binding="dev1", interval_sec=60, window_sec=60, enabled=True)
+        for k, v in roles.items():
+            b.roles[k] = v
+        for k, v in (params or {}).items():
+            b.params[k] = v
+        return self.svc.PutBinding(pb.PutBindingRequest(binding=b), None)
+
+    def test_ListDomains带出轴_标准角色_主要结论_所需工件(self):
+        d = self.svc.ListDomains(pb.DomainsRequest(), None).domains[0]
+        self.assertEqual({i.role: i.axis for i in d.inputs}, {"x_vel": "x", "temp": ""})
+        outs = {o.key: o for o in d.outputs}
+        self.assertEqual(outs["status"].role, "status")
+        self.assertEqual(outs["v"].role, "")
+        self.assertEqual([k for k, o in outs.items() if o.headline], ["v"])
+        self.assertEqual(list(d.requires_artifacts), ["baseline"])
+        self.assertEqual({p.key: p.level for p in d.params}, {"axialAxis": "sensor"})
+
+    def test_未声明的角色被拒且不存(self):
+        """★现场就是这样：ISO 绑定里挂着一路模块从不读的温度（C-64 §3）。"""
+        r = self.put({"x_vel": 810, "temp2": 806})
+        self.assertFalse(r.ok)
+        self.assertIn("temp2", r.message)
+        self.assertEqual(self.bindings.list(), [])
+
+    def test_未声明的参数被拒_键名写错也拦得住(self):
+        for bad in ("iso_group", "axialaxis"):
+            r = self.put({"x_vel": 810}, {"axialAxis": "z", bad: "2"})
+            self.assertFalse(r.ok, bad)
+            self.assertIn(bad, r.message)
+        self.assertEqual(self.bindings.list(), [])
+
+    def test_全在声明里的照存(self):
+        r = self.put({"x_vel": 810, "temp": 806}, {"axialAxis": "z"})
+        self.assertTrue(r.ok, r.message)
+        self.assertEqual(self.bindings.get("vib", "dev1").params, {"axialAxis": "z"})
 
 
 if __name__ == "__main__":

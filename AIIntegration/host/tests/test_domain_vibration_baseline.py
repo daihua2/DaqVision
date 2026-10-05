@@ -4,8 +4,8 @@
 1. **基线用中位数与四分位距**：少量离群值不能把尺度撑大；
 2. **只用正常样本**、**少于 5 帧不出基线**；
 3. **没有基线就说没有基线**：整组 `MODEL_NOT_LOADED`；
-4. 温升、比例漂移按测点各算，第二测点参与；
-5. 坏值不当成 0，没选的通道不硬比。
+4. ★**轴向改了不拿旧基线的比例去减**（2026-10-05 补的缺陷）；
+5. 坏值不当成 0，没选的通道不硬比；一条绑定只管一个传感器（`C-64 §2.1`）。
 """
 
 import dataclasses
@@ -20,7 +20,7 @@ from aiintegration.types import ArtifactBlob, Dataset, Frame, LabeledFrame, Prog
 
 DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 T0 = datetime(2026, 9, 17, 8, 0, 0, tzinfo=timezone.utc)
-PARAMS = {"axial_axis": "z"}
+PARAMS = {"axialAxis": "z"}
 
 
 def _load():
@@ -78,17 +78,29 @@ class TestDeclaration(unittest.TestCase):
 
     def test_参数归属与缺省(self):
         specs = {p.key: p for p in self.d.declaration.params}
-        self.assertEqual(set(specs), {"axial_axis", "normal_label", "stop_threshold"})
+        self.assertEqual(set(specs), {"axialAxis", "normal_label", "stop_threshold"})
         self.assertFalse(specs["stop_threshold"].required)
         self.assertEqual(specs["stop_threshold"].default, "")
-        self.assertEqual(specs["axial_axis"].level, "position")
-        self.assertTrue(specs["axial_axis"].required)
-        self.assertEqual(specs["axial_axis"].default, "")
+        self.assertEqual(specs["axialAxis"].level, "sensor", "轴向由振动传感器给（C-64 §2.3）")
+        self.assertTrue(specs["axialAxis"].required)
+        self.assertEqual(specs["axialAxis"].default, "")
         self.assertEqual(specs["normal_label"].default, "正常")
 
     def test_每个输入项都有显示名(self):
         for i in self.d.declaration.inputs:
             self.assertTrue(i.display, i.role)
+
+    def test_一个传感器三轴加一路温度_各带量与轴(self):
+        got = {i.role: (i.quantity, i.axis, i.group) for i in self.d.declaration.inputs}
+        self.assertEqual(got, {"x_vel": ("velocity", "x", ""), "y_vel": ("velocity", "y", ""),
+                               "z_vel": ("velocity", "z", ""), "temp": ("temperature", "", "")})
+
+    def test_要先有基线_暂不出检测状态(self):
+        """`C-65 §4`：不拿能力位 train 推；`§2`：异常分切档没有标定依据，用户 10-05 定先不出。"""
+        self.assertEqual(self.d.declaration.requires_artifacts, ("baseline",))
+        self.assertFalse([o.key for o in self.d.declaration.outputs if o.role])
+        self.assertEqual([o.key for o in self.d.declaration.outputs if o.headline],
+                         ["vel_z_max", "anomaly_score"])
 
     def test_不出ISO类结论(self):
         keys = {o.key for o in self.d.declaration.outputs}
@@ -143,11 +155,11 @@ class TestBaselineTraining(unittest.TestCase):
             self.d.train(_dataset([{"temp": 40.0}] * 5), ProgressSink())
         self.assertIn("一路速度都没能", str(c.exception))
 
-    def test_两个测点的三轴比例都进基线(self):
-        rows = [{"x_vel": 1.0, "z_vel": 0.5, "x2_vel": 2.0, "z2_vel": 2.0}] * 5
+    def test_三轴比例与采集时的轴向都进基线(self):
+        rows = [{"x_vel": 1.0, "z_vel": 0.5}] * 5
         model = json.loads(self.d.train(_dataset(rows), ProgressSink()).blob)
-        self.assertAlmostEqual(model["axial_ratios"]["1"], 0.5)
-        self.assertAlmostEqual(model["axial_ratios"]["2"], 1.0)
+        self.assertEqual(model["axial_ratios"], {"1": 0.5})
+        self.assertEqual(model["axial_axis"], "z")
 
 
 class TestDeviation(unittest.TestCase):
@@ -200,6 +212,25 @@ class TestDeviation(unittest.TestCase):
         self.assertIs(out["ratio_drift"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIs(out["vel_z_max"].quality, Quality.OK)
 
+    def test_轴向改了不拿旧基线的比例去减(self):
+        """★基线按 z 为轴向采；平台把轴向改成 x 后，x/z 与基线里的 z/x 是两把尺子。
+        照减出来的漂移看着像个结论（这里会是 1.0/1.0−0.5=+0.5，摘要还会说「可能不对中」）。"""
+        f = dataclasses.replace(_frame(_ch(x_vel=1.0, z_vel=1.0, temp=40.0), {"axialAxis": "x"}),
+                                artifacts={"baseline": self.art})
+        out = _by_key(self.d.infer(f))
+        self.assertIs(out["ratio_drift"].quality, Quality.MODEL_NOT_LOADED)
+        self.assertIsNone(out["ratio_drift"].value)
+        self.assertIn("请重采基线", out["evidence"].value)
+        self.assertNotIn("不对中", out["evidence"].value)
+        self.assertIs(out["vel_z_max"].quality, Quality.OK, "速度偏离与轴向无关，照出")
+        self.assertIs(out["temp_rise"].quality, Quality.OK)
+
+    def test_第二测点角色不再认(self):
+        """`C-64 §2.1`：第二测点就是另一个传感器 = 另一条绑定。帧里多出的通道本模块不读。"""
+        out = self._infer(x_vel=1.0, z_vel=0.5, x2_vel=99.0, temp2=99.0)
+        self.assertLess(out["vel_z_max"].value, 3.0)
+        self.assertIs(out["temp_rise"].quality, Quality.NO_INPUT)
+
     def test_基线工件读不懂时落坏码(self):
         bad = ArtifactBlob(id=9, kind="baseline", name="坏", blob=b"{not json")
         f = dataclasses.replace(_frame(_ch(x_vel=2.0)), artifacts={"baseline": bad})
@@ -236,32 +267,6 @@ class TestRobustness(unittest.TestCase):
         z = _by_key(d.infer(f))["vel_z_max"].value
         # 用均值/标准差：μ≈1.67、σ≈1.63 ⇒ z≈-0.1，1.5 会被判成"比平时还低"。
         self.assertGreater(z, 3.0, f"1.5 相对正常的 1.0 是明显偏高，z={z}")
-
-
-class TestSecondPoint(unittest.TestCase):
-    def setUp(self):
-        self.d = _load().instance
-        rows = [{"x_vel": 1.0, "z_vel": 0.5, "temp": 40.0,
-                 "x2_vel": v, "z2_vel": 0.5 * v, "temp2": 50.0}
-                for v in (2.0, 2.1, 1.9, 2.05, 1.95)]
-        self.art = _artifact(self.d.train(_dataset(rows), ProgressSink()))
-
-    def _infer(self, **vals):
-        f = dataclasses.replace(_frame(_ch(**vals)), artifacts={"baseline": self.art})
-        return _by_key(self.d.infer(f))
-
-    def test_第二测点偏离参与速度偏离(self):
-        out = self._infer(x_vel=1.0, z_vel=0.5, x2_vel=6.0, z2_vel=1.0)
-        self.assertGreater(out["vel_z_max"].value, 3.0)
-        self.assertIn("x2", out["evidence"].value)
-
-    def test_温升取升得最多的测点(self):
-        out = self._infer(x_vel=1.0, z_vel=0.5, temp=41.0, x2_vel=2.0, z2_vel=1.0, temp2=58.0)
-        self.assertAlmostEqual(out["temp_rise"].value, 8.0, places=1)
-
-    def test_比例漂移取变化最大的测点(self):
-        out = self._infer(x_vel=1.0, z_vel=0.5, x2_vel=2.0, z2_vel=2.0)
-        self.assertAlmostEqual(out["ratio_drift"].value, 0.5, places=2)
 
 
 _RUN_ROWS = [{"x_vel": x, "z_vel": z} for x, z in (

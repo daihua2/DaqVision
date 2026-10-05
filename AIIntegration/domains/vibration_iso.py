@@ -10,15 +10,23 @@
 
 依据与定案：`AIIntegration/doc/诊断配置流程定案.md`「模块 1、2 的内容」「判级改用国标与泵」。
 
+> ★2026-10-05 按 AICloud `C-64` / `C-65`（用户同意）改为 2.0：
+> - **一条绑定 = 一个振动传感器**，去掉「第二测点」组。国标「取所有测点最大值」那一步挪到平台
+>   （设备层取各传感器里最差的），本模块只管一个传感器的三轴。
+> - 设备参数的**键与取值逐字照平台台账**（`machineGroup=group1` 等），「轴向是哪一轴」由传感器给（`level="sensor"`）。
+> - 多出一条标准结论「检测状态」（`role="status"`）：A/B → 正常，C → 警告，D → 危险，停机 → 停机。
+>   ★A、B 都算正常：国标里 B 区的含义就是「可长期运行」，标成「注意」会让多数健康设备亮色（用户 10-05 同意）。
+
 ---
 
 ## 0.1 做什么
 
 | 结论 | 说明 |
 | --- | --- |
-| 速度最大值、最大值所在轴 | 窗口内全部已绑速度通道（含第二测点）的最大值 |
+| 速度最大值、最大值所在轴 | 窗口内三轴速度的最大值 |
 | 烈度区（文字 / 数值）、距下一档余量 | 工业机器按 GB/T 6075.3；泵按 GB/T 6075.7 |
-| 轴向/径向比、方向性提示 | ★**经验判据，只作提示，不是结论**（实测单测点判不对中方向 0.767，基线 0.607） |
+| 检测状态 | 由烈度区与运行状态合成，五档词表见契约 1.13 |
+| 轴向/径向比、方向性提示 | ★**经验判据，只作提示，不是结论**（阈值来历见 `_AXIAL_SIGNIFICANT` 处） |
 | 判据摘要 | 每一条"为什么没给"都写明 |
 
 **不需要训练、不需要历史状态、不需要第三方库** —— 保存即出结论。
@@ -61,8 +69,8 @@ from datetime import datetime
 from aiintegration.domains import Domain
 from aiintegration.quality import Quality
 from aiintegration.types import (
-    STOP_LITERAL, STOP_NOT_WRITTEN, Declaration, Finding, Frame, InputSpec,
-    OutputSpec, ParamSpec,
+    ROLE_STATUS, STATUS_DANGER, STATUS_NORMAL, STATUS_STOPPED, STATUS_WARNING, STOP_LITERAL,
+    STOP_NOT_WRITTEN, Declaration, Finding, Frame, InputSpec, OutputSpec, ParamSpec,
 )
 
 # ─────────────────────────────── 限值表 ───────────────────────────────
@@ -73,25 +81,32 @@ from aiintegration.types import (
 
 #: GB/T 6075.3-2011（等同 ISO 10816-3:2009）工业机器，(机器分组, 支承方式) → 边界。
 #: 数值与 ISO 20816-3:2022 表 A.1、A.2 相同（2026-09-17 核对原文）。
+#: ★键的取值逐字照平台台账（`C-64 §2.3`）：平台原样拷贝、不换算。
 _MACHINE_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
-    ("1", "rigid"):    (2.3, 4.5, 7.1),
-    ("1", "flexible"): (3.5, 7.1, 11.0),
-    ("2", "rigid"):    (1.4, 2.8, 4.5),
-    ("2", "flexible"): (2.3, 4.5, 7.1),
+    ("group1", "rigid"):    (2.3, 4.5, 7.1),
+    ("group1", "flexible"): (3.5, 7.1, 11.0),
+    ("group2", "rigid"):    (1.4, 2.8, 4.5),
+    ("group2", "flexible"): (2.3, 4.5, 7.1),
 }
 
 #: GB/T 6075.7-2015（等同 ISO 10816-7:2009）旋转动力泵，(泵类别, 功率档) → 边界。
 #: ★出处：AICloud `C-43 §4` 转引 Europump《Guidelines on Pump Vibration》（2013）对 ISO 10816-7 的摘录，
 #:   **标准原文尚未取得、未核对**（用户 2026-09-18 定：先按此实现）。取得原文后须逐值核对。
 _PUMP_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
-    ("1", "le200"): (2.5, 4.0, 6.6),
-    ("1", "gt200"): (3.5, 5.0, 7.6),
-    ("2", "le200"): (3.2, 5.1, 8.5),
-    ("2", "gt200"): (4.2, 6.1, 9.5),
+    ("category1", "le200"): (2.5, 4.0, 6.6),
+    ("category1", "gt200"): (3.5, 5.0, 7.6),
+    ("category2", "le200"): (3.2, 5.1, 8.5),
+    ("category2", "gt200"): (4.2, 6.1, 9.5),
 }
 PUMP_POWER_SPLIT_KW = 200.0
 
-_NA = "na"
+_GROUPS = ("group1", "group2")
+_PUMPS = ("category1", "category2")
+_NA = "notApplicable"
+
+#: 平台台账的键（`C-64 §2.3`）。
+P_GROUP, P_SUPPORT, P_PUMP = "machineGroup", "supportClass", "pumpCategory"
+P_POWER, P_SPEED, P_AXIAL = "ratedPowerKw", "ratedSpeedRpm", "axialAxis"
 _MACHINE_STD = "GB/T 6075.3-2011"
 _PUMP_STD = "GB/T 6075.7-2015"
 
@@ -101,9 +116,10 @@ LOW_SPEED_RPM = 600.0
 #: 运行状态的三个取值。
 RUNNING, STOPPED, UNJUDGED = "运行", "停机", "未判"
 
+#: 烈度区 → 检测状态（用户 2026-10-05 同意）。★B 区不对「注意」：国标 B 区即「可长期运行」。
+_ZONE_STATUS = {"A": STATUS_NORMAL, "B": STATUS_NORMAL, "C": STATUS_WARNING, "D": STATUS_DANGER}
+
 _AXES = ("x", "y", "z")
-#: 测点后缀：第一测点无后缀，第二测点为 "2"（定案 2.1）。
-_POINTS = ("", "2")
 
 #: 方向性判据阈值。**经验值**，不是国标。
 #: ★出处要分清：判据**方向**（轴向偏高→不对中、径向主导→不平衡、三轴均衡→松动）出自改造方案 §3 轨A④
@@ -115,8 +131,8 @@ _AXIAL_SIGNIFICANT = 0.5   # 轴向 / 径向 ≥ 此值 ⇒ 轴向占比异常
 _RADIAL_BALANCED = 0.8     # 径向两轴互比落在 [0.8, 1/0.8] ⇒ 视为各向同性
 
 
-def _vel_role(axis: str, point: str) -> str:
-    return f"{axis}{point}_vel"
+def _vel_role(axis: str) -> str:
+    return f"{axis}_vel"
 
 
 class VibrationIso(Domain):
@@ -124,34 +140,27 @@ class VibrationIso(Domain):
 
     key = "vibration_iso"
     display = "经典算法振动诊断"
-    version = "1.1.0"
+    version = "2.0.0"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
-        inputs = []
-        for point, name in (("", "测点 1"), ("2", "测点 2")):
-            for axis in _AXES:
-                inputs.append(InputSpec(
-                    role=_vel_role(axis, point), unit="mm/s",
-                    # 至少要有测点 1 的 X 轴；其余都可选。
-                    required=(point == "" and axis == "x"),
-                    # ★第二测点是**一组**：全配或全不配（契约 1.9）。
-                    #   只标 required=False 的话，界面拦不住"配了 X 漏了 Z"，
-                    #   我方拿到的是半组输入（AICloud C-45 §3.1）。
-                    group=("point2" if point else ""),
-                    group_display=("第二测点" if point else ""),
-                    # ★按字段绑到结构值点时（契约 1.11）：物理量须是速度；同一测点的 x/y/z
-                    #   必须出自同一个点（同一条记录），否则"同一时刻"的保证就没了。
-                    quantity="velocity", record=f"point{point or '1'}",
-                    display=f"{name} {axis.upper()} 轴速度",
-                    description=("速度有效值。至少选测点 1 的 X 轴速度；第二测点不配即按单测点判"
-                                 if point == "" and axis == "x" else "速度有效值，可不选")))
+        inputs = tuple(
+            InputSpec(
+                role=_vel_role(axis), unit="mm/s",
+                # 至少要有 X 轴；其余可选。
+                required=(axis == "x"),
+                # ★按字段绑到结构值点时（契约 1.11）：物理量须是速度；x/y/z 必须出自同一个点
+                #   （同一条记录），否则"同一时刻"的保证就没了。
+                quantity="velocity", axis=axis, record="point1",
+                display=f"{axis.upper()} 轴速度",
+                description=("速度有效值。至少选 X 轴速度" if axis == "x" else "速度有效值，可不选"))
+            for axis in _AXES)
         return Declaration(
-            inputs=tuple(inputs),
+            inputs=inputs,
             params=(
                 ParamSpec(
-                    key="iso_group", display="机器分组（GB/T 6075.3）", value_type="enum",
-                    choices=("1", "2", _NA),
+                    key=P_GROUP, display="机器分组（GB/T 6075.3）", value_type="enum",
+                    choices=(*_GROUPS, _NA),
                     choice_displays=(
                         "第 1 组：大型机器，额定功率 >300 kW；电动机轴中心高 H≥315 mm",
                         "第 2 组：中型机器，额定功率 >15 kW 且 ≤300 kW；电动机轴中心高 160≤H<315 mm",
@@ -161,13 +170,13 @@ class VibrationIso(Domain):
                     description="工业机器必填（泵不填）。决定 A/B/C/D 边界值，没有缺省：选错会把该停机说成可长期运行。"
                                 "选「不适用」则不出烈度分级"),
                 ParamSpec(
-                    key="mount_type", display="支承方式", value_type="enum",
+                    key=P_SUPPORT, display="支承方式", value_type="enum",
                     choices=("rigid", "flexible"), choice_displays=("刚性", "柔性"),
                     required=False, level="machine",
                     description="工业机器必填（泵不看支承）。机器与支承系统在测量方向上的最低固有频率比转频高 25% 以上为刚性，否则柔性"),
                 ParamSpec(
-                    key="pump_category", display="泵类别（GB/T 6075.7）", value_type="enum",
-                    choices=("1", "2", _NA),
+                    key=P_PUMP, display="泵类别（GB/T 6075.7）", value_type="enum",
+                    choices=(*_PUMPS, _NA),
                     choice_displays=(
                         "第Ⅰ类：对可靠性、可用性或安全性要求高的泵",
                         "第Ⅱ类：一般用途的泵",
@@ -176,11 +185,11 @@ class VibrationIso(Domain):
                     required=False, level="machine",
                     description="旋转动力泵必填（工业机器不填）。选第Ⅰ/Ⅱ类即按泵判级"),
                 ParamSpec(
-                    key="rated_power_kw", display="额定功率", value_type="float", unit="kW",
+                    key=P_POWER, display="额定功率", value_type="float", unit="kW",
                     required=False, level="machine",
                     description="泵必填：按 200 kW 分两档取限值"),
                 ParamSpec(
-                    key="rated_speed_rpm", display="额定转速", value_type="float", unit="r/min",
+                    key=P_SPEED, display="额定转速", value_type="float", unit="r/min",
                     required=False, level="machine",
                     description="工业机器低于 600 r/min 时照常出分级，但判据摘要注明结果仅供参考（标准要求另看位移）"),
                 ParamSpec(
@@ -190,19 +199,25 @@ class VibrationIso(Domain):
                     required=True, level="position",
                     description="烈度判级要求速度有效值。选「否」时不出烈度分级，只给数值"),
                 ParamSpec(
-                    key="axial_axis", display="轴向是哪一轴", value_type="enum",
+                    key=P_AXIAL, display="轴向是哪一轴", value_type="enum",
                     choices=("x", "y", "z"), choice_displays=("X 轴", "Y 轴", "Z 轴"),
-                    required=True, level="position",
-                    description="沿转轴方向的那一轴，两个测点按同一方向理解。没有缺省：猜错会把不对中说成不平衡。"
+                    required=True, level="sensor",
+                    description="沿转轴方向的那一轴，在振动传感器上填。没有缺省：猜错会把不对中说成不平衡。"
                                 "缺它只影响方向性两条，烈度分级照出"),
                 _stop_threshold_spec(),
             ),
             outputs=(
+                OutputSpec(key="status", display="检测状态", value_type="string",
+                           role=ROLE_STATUS, stop_behavior=STOP_LITERAL,
+                           description="A、B 区 → 正常；C 区 → 警告；D 区 → 危险；停机 → 停机。"
+                                       "本模块不出「注意」：国标 B 区即「可长期运行」。烈度分级给不出时同落坏质量码",
+                           choices=(STATUS_NORMAL, STATUS_WARNING, STATUS_DANGER, STATUS_STOPPED),
+                           choice_displays=("正常", "警告", "危险", STOPPED)),
                 OutputSpec(key="vel_max", display="速度最大值", value_type="float", unit="mm/s",
-                           description="窗口内全部已选速度通道的最大值"),
+                           headline=True, description="窗口内三轴速度的最大值"),
                 OutputSpec(key="dominant_axis", display="最大值所在轴", value_type="string",
-                           description="x / y / z；第二测点记为 x2 / y2 / z2"),
-                OutputSpec(key="iso_zone", display="烈度区", value_type="string",
+                           headline=True, description="x / y / z"),
+                OutputSpec(key="iso_zone", display="烈度区", value_type="string", headline=True,
                            description="A 新投运 / B 可长期运行 / C 不宜长期连续运行 / D 足以造成损坏；停机时为「停机」",
                            stop_behavior=STOP_LITERAL,
                            choices=("A", "B", "C", "D", STOPPED),
@@ -217,7 +232,7 @@ class VibrationIso(Domain):
                            description="离更差一档的边界还有多远；已在 D 区时为负",
                            stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="axial_ratio", display="轴向/径向比", value_type="float",
-                           description="轴向 ÷ 径向两轴较大者，取最大值所在测点",
+                           description="轴向 ÷ 径向两轴较大者",
                            stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="direction_hint", display="方向性提示", value_type="string",
                            description="★提示，不是结论：无频谱数据，仅凭三轴比例判断倾向；停机时为「停机」",
@@ -254,6 +269,7 @@ class VibrationIso(Domain):
         out.append(Finding(key="run_state", value=state, quality=state_q, t=t))
         if state == STOPPED:
             return out + [
+                Finding(key="status", value=STATUS_STOPPED, quality=Quality.OK, t=t),
                 Finding(key="iso_zone", value=STOPPED, quality=Quality.OK, t=t),
                 Finding(key="iso_zone_code", value=0, quality=Quality.OK, t=t),
                 Finding(key="direction_hint", value=STOPPED, quality=Quality.OK, t=t),
@@ -264,18 +280,21 @@ class VibrationIso(Domain):
         limits, iso_bad, basis, is_pump = _grading(frame.params)
 
         if iso_bad:
-            out += _bad_group(("iso_zone", "iso_zone_code", "iso_margin"), Quality.CONFIG_INCOMPLETE, t)
+            # ★检测状态跟着烈度分级一起落码：分级立不起来时报「正常」，等于替没填的参数下了结论。
+            out += _bad_group(("status", "iso_zone", "iso_zone_code", "iso_margin"),
+                              Quality.CONFIG_INCOMPLETE, t)
         else:
             zone, code, margin = _classify(vel_max, limits)  # type: ignore[arg-type]
             out += [
+                Finding(key="status", value=_ZONE_STATUS[zone], quality=Quality.OK, t=t),
                 Finding(key="iso_zone", value=zone, quality=Quality.OK, t=t),
                 Finding(key="iso_zone_code", value=code, quality=Quality.OK, t=t),
                 Finding(key="iso_margin", value=round(margin, 4), quality=Quality.OK, t=t),
             ]
 
-        # ③ 方向性提示：优先取最大值所在测点，算不出再看另一个测点。
-        axial = frame.params.get("axial_axis", "").strip().lower()
-        dir_bad, dir_q, ratio, hint, dir_point = _direction_any(peaks, axial, dominant)
+        # ③ 方向性提示
+        axial = frame.params.get(P_AXIAL, "").strip().lower()
+        dir_bad, dir_q, ratio, hint = _direction_check(peaks, axial)
         if dir_bad:
             out += _bad_group(("axial_ratio", "direction_hint"), dir_q, t)
         else:
@@ -295,11 +314,11 @@ class VibrationIso(Domain):
                 f"{basis} 判为 {zone} 区，"
                 + (f"已超出 C/D 界 {-margin:.3f} mm/s" if margin < 0 else f"距下一档还有 {margin:.3f} mm/s"))
             if not is_pump:                  # 低速规定出自 GB/T 6075.3；泵标准不限转速
-                parts.append(_speed_note(frame.params.get("rated_speed_rpm", "")))
+                parts.append(_speed_note(frame.params.get(P_SPEED, "")))
         if dir_bad:
             parts.append(f"方向性提示未给：{dir_bad}")
         else:
-            parts.append(f"方向性提示（测点{'2' if dir_point == '2' else '1'}）：{hint}")
+            parts.append(f"方向性提示：{hint}")
         parts.append("★无频谱数据，方向性仅为提示而非结论")
         parts.append(state_note)
         if bad:
@@ -314,9 +333,9 @@ class VibrationIso(Domain):
 # ─────────────────────────────── 内部函数 ───────────────────────────────
 
 def _peaks(frame: Frame) -> tuple[dict[str, float], dict[str, datetime], list[str], list[str]]:
-    """逐通道取窗口内**可信样本**的最大值。键为 `x`/`y`/`z`/`x2`/`y2`/`z2`。
+    """逐轴取窗口内**可信样本**的最大值。键为 `x`/`y`/`z`。
 
-    返回 `(通道→峰值, 通道→该峰值样本时刻, 全是坏值的通道, 选了但无样本的通道)`。
+    返回 `(轴→峰值, 轴→该峰值样本时刻, 全是坏值的轴, 选了但无样本的轴)`。
     ★只有 `Quality.OK` 的样本参与；全坏的通道单独记出来，不当作没发生。
     ★没选的通道不记入"无样本" —— 那与"选了但没数据"不是一回事。
     """
@@ -324,31 +343,29 @@ def _peaks(frame: Frame) -> tuple[dict[str, float], dict[str, datetime], list[st
     times: dict[str, datetime] = {}
     bad: list[str] = []
     empty: list[str] = []
-    for point in _POINTS:
-        for axis in _AXES:
-            role = _vel_role(axis, point)
-            if role not in frame.channels:
+    for axis in _AXES:
+        role = _vel_role(axis)
+        if role not in frame.channels:
+            continue
+        samples = list(frame.channels[role])
+        if not samples:
+            empty.append(axis)
+            continue
+        best_v: float | None = None
+        best_t: datetime | None = None
+        for s in samples:
+            if s.quality is not Quality.OK:
                 continue
-            key = f"{axis}{point}"
-            samples = list(frame.channels[role])
-            if not samples:
-                empty.append(key)
+            v = _as_float(s.value)
+            if v is None:
                 continue
-            best_v: float | None = None
-            best_t: datetime | None = None
-            for s in samples:
-                if s.quality is not Quality.OK:
-                    continue
-                v = _as_float(s.value)
-                if v is None:
-                    continue
-                if best_v is None or v > best_v:
-                    best_v, best_t = v, s.t
-            if best_v is None or best_t is None:
-                bad.append(key)
-            else:
-                peaks[key] = best_v
-                times[key] = best_t
+            if best_v is None or v > best_v:
+                best_v, best_t = v, s.t
+        if best_v is None or best_t is None:
+            bad.append(axis)
+        else:
+            peaks[axis] = best_v
+            times[axis] = best_t
     return peaks, times, bad, empty
 
 
@@ -407,27 +424,27 @@ def _grading(params: dict[str, str]
 
     ★不适用 / 缺参数 / 自相矛盾，都属于「判据立不起来」—— 正是 CONFIG_INCOMPLETE 的定义，不另立新码。
     """
-    group = params.get("iso_group", "").strip()
-    mount = params.get("mount_type", "").strip()
-    pump = params.get("pump_category", "").strip()
+    group = params.get(P_GROUP, "").strip()
+    mount = params.get(P_SUPPORT, "").strip()
+    pump = params.get(P_PUMP, "").strip()
     is_rms = params.get("vel_is_rms", "").strip().lower()
 
-    is_pump = pump in ("1", "2")
-    if is_pump and group in ("1", "2"):
-        return None, (f"参数自相矛盾：既填了泵类别（第 {pump} 类）又填了机器分组（第 {group} 组），"
+    is_pump = pump in _PUMPS
+    if is_pump and group in _GROUPS:
+        return None, (f"参数自相矛盾：既填了泵类别（{pump}）又填了机器分组（{group}），"
                       "不猜哪个对"), "", True
     if is_rms != "true":
         return None, (f"速度口径未确认为有效值（vel_is_rms={is_rms or '未填'}）"
                       "—— 拿峰值套有效值判据会整档偏高，故不给分级"), "", is_pump
 
     if is_pump:
-        power = _num(params.get("rated_power_kw", ""))
+        power = _num(params.get(P_POWER, ""))
         if power is None or power <= 0:
-            raw = params.get("rated_power_kw", "").strip()
-            return None, (f"泵按 {_PUMP_STD} 判级需要额定功率（rated_power_kw={raw or '未填'}），"
+            raw = params.get(P_POWER, "").strip()
+            return None, (f"泵按 {_PUMP_STD} 判级需要额定功率（{P_POWER}={raw or '未填'}），"
                           "无法确定功率档"), "", True
         band = "le200" if power <= PUMP_POWER_SPLIT_KW else "gt200"
-        roman = "Ⅰ" if pump == "1" else "Ⅱ"
+        roman = "Ⅰ" if pump == "category1" else "Ⅱ"
         basis = (f"{_PUMP_STD}（第{roman}类 / 额定 {power:g} kW，"
                  f"{'≤' if band == 'le200' else '>'}200 kW 档）")
         return _PUMP_LIMITS[(pump, band)], "", basis, True
@@ -438,9 +455,10 @@ def _grading(params: dict[str, str]
         return None, "机器分组未填（泵类别为「不适用」，按工业机器判需要机器分组）", "", False
     limits = _MACHINE_LIMITS.get((group, mount))
     if limits is None:
-        return None, (f"参数不全或取值非法：iso_group={group or '未填'} "
-                      f"mount_type={mount or '未填'}，查不到 {_MACHINE_STD} 边界"), "", False
-    basis = f"{_MACHINE_STD}（第 {group} 组 / {'刚性' if mount == 'rigid' else '柔性'}支承）"
+        return None, (f"参数不全或取值非法：{P_GROUP}={group or '未填'} "
+                      f"{P_SUPPORT}={mount or '未填'}，查不到 {_MACHINE_STD} 边界"), "", False
+    basis = (f"{_MACHINE_STD}（第 {group[-1]} 组 / "
+             f"{'刚性' if mount == 'rigid' else '柔性'}支承）")
     return limits, "", basis, False
 
 
@@ -456,31 +474,18 @@ def _classify(vel: float, limits: tuple[float, float, float]) -> tuple[str, int,
     return "D", 4, cd - vel
 
 
-def _direction_any(peaks: dict[str, float], axial: str, dominant: str
-                   ) -> tuple[str, Quality, float, str, str]:
-    """返回 `(未给原因, 坏质量码, 比值, 提示, 所用测点)`；原因为空表示算出来了。"""
+def _direction_check(peaks: dict[str, float], axial: str) -> tuple[str, Quality, float, str]:
+    """返回 `(未给原因, 坏质量码, 比值, 提示)`；原因为空表示算出来了。"""
     if axial not in _AXES:
-        return (f"轴向 axial_axis={axial or '未填'} 非法 —— 不知道哪根是轴向就分不开不对中与不平衡",
-                Quality.CONFIG_INCOMPLETE, 0.0, "", "")
-    dom_point = dominant[1:] if len(dominant) > 1 else ""
-    order = [dom_point] + [p for p in _POINTS if p != dom_point]
-    first_bad: tuple[str, Quality] | None = None
-    for point in order:
-        ax_key = f"{axial}{point}"
-        radial_keys = [f"{a}{point}" for a in _AXES if a != axial and f"{a}{point}" in peaks]
-        if ax_key not in peaks:
-            if any(f"{a}{point}" in peaks for a in _AXES):
-                first_bad = first_bad or (f"测点{point or '1'} 轴向轴 {axial} 本窗口没有可信样本",
-                                          Quality.INPUT_BAD)
-            continue
-        if not radial_keys:
-            first_bad = first_bad or (f"测点{point or '1'} 只有轴向轴有数据，没有径向轴可比",
-                                      Quality.INSUFFICIENT_SAMPLES)
-            continue
-        ratio, hint = _direction(peaks, ax_key, radial_keys)
-        return "", Quality.OK, ratio, hint, point
-    why, q = first_bad or ("没有可用于方向性判断的测点", Quality.INSUFFICIENT_SAMPLES)
-    return why, q, 0.0, "", ""
+        return (f"轴向 {P_AXIAL}={axial or '未填'} 非法 —— 不知道哪根是轴向就分不开不对中与不平衡",
+                Quality.CONFIG_INCOMPLETE, 0.0, "")
+    if axial not in peaks:
+        return f"轴向轴 {axial} 本窗口没有可信样本", Quality.INPUT_BAD, 0.0, ""
+    radial_keys = [a for a in _AXES if a != axial and a in peaks]
+    if not radial_keys:
+        return "只有轴向轴有数据，没有径向轴可比", Quality.INSUFFICIENT_SAMPLES, 0.0, ""
+    ratio, hint = _direction(peaks, axial, radial_keys)
+    return "", Quality.OK, ratio, hint
 
 
 def _direction(peaks: dict[str, float], ax_key: str, radial_keys: list[str]) -> tuple[float, str]:

@@ -4,6 +4,31 @@
 > 且**改即投分发点并发函**（AI-9 §2.3、C-9 §2.1）—— 不投就会出现"我方以为改了、贵方发版还是旧的"，
 > 而且不报错。
 
+## 1.13 —— 2026-10-05
+
+**动机**：AICloud `C-64`（用户定「以设备为核心、振动传感器为诊断单位」）与 `C-65`（列表要「检测状态」「主要结论」「基线」三列）。
+不加这几格，平台只能按模块写死：拆角色名对轴、按模块维护台账键对照表、按模块推状态。
+
+| 改动 | 说明 |
+| --- | --- |
+| `InputSpec.axis = 11` | `x` / `y` / `z` / 空（温度等无方向的量）。取值照 `H-261 §2`。★同一域内声明了 `quantity` 的角色 `(quantity, axis)` 不重复，骨架装载时强制 |
+| `OutputSpec.role = 9` | 结论的标准角色。已定取值只有 `status`（检测状态）：取值封闭为 `normal` / `attention` / `warning` / `danger` / `stopped`；含 `stopped` 的必为 `literal_stopped`；一个域至多一条。骨架装载时强制 |
+| `OutputSpec.headline = 10` | 主要结论，列表按声明顺序显示 |
+| `DomainInfo.requires_artifacts = 8` | 没有启用中的这几类工件就有结论出不来（`baseline` / `model`）。★请用它推「基线 / 模型」列，不要拿能力位 `train` 推 |
+| `ParamSpec.level` 新取值 `sensor` | 振动传感器的属性（如轴向）。★`machine` / `sensor` 两类的键与取值逐字照平台台账 |
+| `PutBinding` 行为 | `roles` / `params` 里有模块未声明的键 ⇒ `ok=false` 并写明是哪几个（`C-64 §3`） |
+
+**域的配套改动（不是契约字段，但改了自述）**：
+- `vibration_iso` 2.0.0、`vibration_baseline` 2.0.0：去掉「第二测点」组；参数键改为平台台账键
+  （`machineGroup` / `supportClass` / `pumpCategory` / `ratedPowerKw` / `ratedSpeedRpm` / `axialAxis`），取值同（`group1` / `category1` / `notApplicable`…）。
+- `vibration_iso` 新增结论 `status`（A/B→`normal`，C→`warning`，D→`danger`，停机→`stopped`）；`vibration_baseline` 暂不出。
+- `vibration_baseline` 声明 `requires_artifacts=["baseline"]`；轴向与采基线时不同 ⇒ 比例漂移落 `model_not_loaded`。
+
+**兼容性**：
+- 字段全为新增，老客户端照常解析。
+- ★**两个振动域的参数键与取值变了**：存着旧键的绑定（现役 `khb-f1-g1-v1` 两条），部署后判级参数读不到、落 `config_incomplete`，
+  直到按新键重下发。★部署时我方随即按新键重写这两条（同时清掉 `C-64 §3` 那两处遗留），中间不留空档。
+
 ## 1.12 —— 2026-10-03
 
 **动机**：AICloud `C-59 §5`。删绑定只停算、不删结论点（1.0 起的规矩，点是历史），于是旧绑定的点被每轮快照**永远推下去**，

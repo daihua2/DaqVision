@@ -4,11 +4,12 @@
 
 钉的东西按重要性排：
 1. **不猜缺省**：参数缺一项，对应那几条落 `CONFIG_INCOMPLETE`，其余照出；
-2. **机组类别只有第 1、2 组**（ISO 20816-3:2022），「不适用」不出分级；
+2. **机组类别只有第 1、2 组**，「不适用」不出分级；参数键与取值逐字照平台台账（`C-64 §2.3`）；
 3. **ISO 边界判在正确的一侧**；
 4. **坏值不当成 0**；
 5. **T 取样本自己的时刻**；
-6. 低速设备注明仅供参考；方向性只作提示；第二测点参与判定。
+6. **检测状态**：A/B 正常、C 警告、D 危险、停机；分级给不出时同落坏码（`C-65 §2`）；
+7. 低速设备注明仅供参考；方向性只作提示；一条绑定只管一个传感器的三轴（`C-64 §2.1`）。
 """
 
 import unittest
@@ -18,19 +19,19 @@ from pathlib import Path
 from aiintegration.domains import discover
 from aiintegration.quality import Quality
 from aiintegration.runner import run_domain
-from aiintegration.types import Frame, Sample
+from aiintegration.types import ROLE_STATUS, STATUS_LEVELS, Frame, Sample
 
 DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 T0 = datetime(2026, 9, 17, 8, 0, 0, tzinfo=timezone.utc)
 
 FULL_PARAMS = {
-    "iso_group": "2",
-    "mount_type": "rigid",        # ⇒ 边界 1.4 / 2.8 / 4.5
+    "machineGroup": "group2",
+    "supportClass": "rigid",      # ⇒ 边界 1.4 / 2.8 / 4.5
     "vel_is_rms": "true",
-    "axial_axis": "z",
-    "rated_speed_rpm": "1480",
+    "axialAxis": "z",
+    "ratedSpeedRpm": "1480",
 }
-JUDGMENT_PARAMS = {"iso_group", "mount_type", "vel_is_rms", "axial_axis"}
+JUDGMENT_PARAMS = {"machineGroup", "supportClass", "vel_is_rms", "axialAxis"}
 
 
 def _load():
@@ -70,41 +71,59 @@ class TestDeclaration(unittest.TestCase):
     def test_只有推理能力不需要训练(self):
         self.assertEqual(self.d.caps, frozenset({"infer"}))
 
+    def test_不依赖工件_保存即出结论(self):
+        self.assertEqual(self.d.declaration.requires_artifacts, ())
+
     def test_判据类参数一律没有缺省(self):
         """★机器分组、支承方式、泵类别在声明上不必填（泵与工业机器各需一半），
         但**都没有缺省**；必填性由推理时按所走判据检查（见 TestParamsMissing）。"""
         specs = {p.key: p for p in self.d.declaration.params}
-        for key in JUDGMENT_PARAMS | {"pump_category", "rated_power_kw"}:
+        for key in JUDGMENT_PARAMS | {"pumpCategory", "ratedPowerKw"}:
             self.assertIn(key, specs)
             self.assertEqual(specs[key].default, "", f"{key} 不该有缺省")
         self.assertTrue(specs["vel_is_rms"].required)
-        self.assertTrue(specs["axial_axis"].required)
+        self.assertTrue(specs["axialAxis"].required)
 
-    def test_机器分组只有第1第2组与不适用(self):
-        spec = {p.key: p for p in self.d.declaration.params}["iso_group"]
-        self.assertEqual(spec.choices, ("1", "2", "na"))
+    def test_机器分组只有第1第2组与不适用_取值照平台台账(self):
+        spec = {p.key: p for p in self.d.declaration.params}["machineGroup"]
+        self.assertEqual(spec.choices, ("group1", "group2", "notApplicable"))
         self.assertEqual(len(spec.choice_displays), 3)
         self.assertIn("GB/T 6075.3", spec.display)
 
-    def test_泵类别第1第2类与不适用(self):
-        spec = {p.key: p for p in self.d.declaration.params}["pump_category"]
-        self.assertEqual(spec.choices, ("1", "2", "na"))
+    def test_泵类别第1第2类与不适用_取值照平台台账(self):
+        spec = {p.key: p for p in self.d.declaration.params}["pumpCategory"]
+        self.assertEqual(spec.choices, ("category1", "category2", "notApplicable"))
         self.assertIn("GB/T 6075.7", spec.display)
 
     def test_参数归属(self):
         levels = {p.key: p.level for p in self.d.declaration.params}
-        for k in ("iso_group", "mount_type", "pump_category", "rated_power_kw", "rated_speed_rpm"):
+        for k in ("machineGroup", "supportClass", "pumpCategory", "ratedPowerKw", "ratedSpeedRpm"):
             self.assertEqual(levels[k], "machine", k)
+        self.assertEqual(levels["axialAxis"], "sensor", "轴向由振动传感器给（C-64 §2.3）")
         self.assertEqual(levels["vel_is_rms"], "position")
-        self.assertEqual(levels["axial_axis"], "position")
 
     def test_每个输入项都有显示名(self):
         for i in self.d.declaration.inputs:
             self.assertTrue(i.display, f"{i.role} 缺显示名")
 
-    def test_只有测点1的X轴必选(self):
+    def test_只有X轴必选(self):
         req = [i.role for i in self.d.declaration.inputs if i.required]
         self.assertEqual(req, ["x_vel"])
+
+    def test_一个传感器三轴_各带量与轴_不再成组(self):
+        """`C-64 §2.1/§2.2`：一条绑定 = 一个振动传感器；平台按「量 + 轴」对角色。"""
+        got = {i.role: (i.quantity, i.axis, i.group) for i in self.d.declaration.inputs}
+        self.assertEqual(got, {"x_vel": ("velocity", "x", ""), "y_vel": ("velocity", "y", ""),
+                               "z_vel": ("velocity", "z", "")})
+
+    def test_检测状态与主要结论(self):
+        outs = {o.key: o for o in self.d.declaration.outputs}
+        status = [o for o in outs.values() if o.role == ROLE_STATUS]
+        self.assertEqual([o.key for o in status], ["status"])
+        self.assertEqual(status[0].choices, ("normal", "warning", "danger", "stopped"))
+        self.assertTrue(set(status[0].choices) <= set(STATUS_LEVELS))
+        self.assertEqual([k for k, o in outs.items() if o.headline],
+                         ["vel_max", "dominant_axis", "iso_zone"])
 
 
 class TestIsoClassification(unittest.TestCase):
@@ -130,16 +149,24 @@ class TestIsoClassification(unittest.TestCase):
 
     def test_第1组柔性限值(self):
         # 第 1 组柔性 ⇒ 3.5/7.1/11.0，7.0 落 B
-        z, _c, _m = self._zone(7.0, {**FULL_PARAMS, "iso_group": "1", "mount_type": "flexible"})
+        z, _c, _m = self._zone(7.0, {**FULL_PARAMS, "machineGroup": "group1",
+                                     "supportClass": "flexible"})
         self.assertEqual(z.value, "B")
 
-    def test_旧版第3第4组不再认(self):
-        for g in ("3", "4"):
-            z, _c, _m = self._zone(3.0, {**FULL_PARAMS, "iso_group": g})
-            self.assertIs(z.quality, Quality.CONFIG_INCOMPLETE, f"第 {g} 组已被 ISO 20816-3:2022 删去")
+    def test_旧取值与旧版第3第4组都不认(self):
+        """★1.x 的取值 `1`/`2` 不再认：平台原样拷贝台账值，认旧值等于给两套写法开口子。"""
+        for g in ("1", "2", "3", "group3"):
+            z, _c, _m = self._zone(3.0, {**FULL_PARAMS, "machineGroup": g})
+            self.assertIs(z.quality, Quality.CONFIG_INCOMPLETE, g)
+
+    def test_旧键名不认(self):
+        params = {"iso_group": "2", "mount_type": "rigid", "vel_is_rms": "true", "axial_axis": "z"}
+        out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)}, params)))
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIs(out["direction_hint"].quality, Quality.CONFIG_INCOMPLETE)
 
     def test_不适用则不出分级且说明原因(self):
-        f = _frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "iso_group": "na"})
+        f = _frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "machineGroup": "notApplicable"})
         out = _by_key(self.d.instance.infer(f))
         for k in ("iso_zone", "iso_zone_code", "iso_margin"):
             self.assertIs(out[k].quality, Quality.CONFIG_INCOMPLETE, k)
@@ -149,14 +176,44 @@ class TestIsoClassification(unittest.TestCase):
 
     def test_判据摘要写明国标(self):
         ev = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)})))["evidence"].value
-        self.assertIn("GB/T 6075.3-2011", ev)
+        self.assertIn("GB/T 6075.3-2011（第 2 组 / 刚性支承）", ev)
         self.assertNotIn("ISO 20816", ev, "判级依据已改用国标")
+
+
+class TestStatus(unittest.TestCase):
+    """`C-65 §2`：检测状态五档词表。★A、B 都是正常（国标 B 区即「可长期运行」）。"""
+
+    def setUp(self):
+        self.d = _load()
+
+    def _status(self, vel, params=None):
+        return _by_key(self.d.instance.infer(_frame({"x_vel": _samples(vel)}, params)))["status"]
+
+    def test_烈度区对档位(self):
+        for vel, want in ((1.0, "normal"), (2.0, "normal"), (3.0, "warning"), (9.0, "danger")):
+            s = self._status(vel)
+            self.assertIs(s.quality, Quality.OK, vel)
+            self.assertEqual(s.value, want, vel)
+
+    def test_分级给不出时状态同落配置不全_不报正常(self):
+        s = self._status(1.0, {**FULL_PARAMS, "vel_is_rms": "false"})
+        self.assertIs(s.quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIsNone(s.value)
+
+    def test_停机写停机(self):
+        out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(0.1)},
+                                                   {**FULL_PARAMS, "stop_threshold": "0.3"})))
+        self.assertEqual(out["status"].value, "stopped")
+
+    def test_没数据时状态也落锚点(self):
+        s = _by_key(self.d.instance.infer(_frame({"x_vel": []})))["status"]
+        self.assertIs(s.quality, Quality.NO_INPUT)
 
 
 class TestPump(unittest.TestCase):
     """GB/T 6075.7-2015：按泵类别与额定功率（200 kW 分档）取限值，不看支承、不限转速。"""
 
-    PUMP = {"pump_category": "2", "rated_power_kw": "90", "vel_is_rms": "true", "axial_axis": "z"}
+    PUMP = {"pumpCategory": "category2", "ratedPowerKw": "90", "vel_is_rms": "true", "axialAxis": "z"}
 
     def setUp(self):
         self.d = _load()
@@ -170,43 +227,43 @@ class TestPump(unittest.TestCase):
             self.assertEqual(self._out(vel)["iso_zone"].value, zone, vel)
 
     def test_功率按200kW分档且200归小档(self):
-        self.assertEqual(self._out(3.3, rated_power_kw="200")["iso_zone"].value, "B")
+        self.assertEqual(self._out(3.3, ratedPowerKw="200")["iso_zone"].value, "B")
         # >200 kW ⇒ 4.2 / 6.1 / 9.5，3.3 落 A
-        self.assertEqual(self._out(3.3, rated_power_kw="201")["iso_zone"].value, "A")
+        self.assertEqual(self._out(3.3, ratedPowerKw="201")["iso_zone"].value, "A")
 
     def test_四档限值逐格(self):
         # 每档取 A/B、B/C、C/D 三个边界各自「刚过线」的值，四张子表任一格写错都会红
-        table = {("1", "90"): (2.5, 4.0, 6.6), ("1", "300"): (3.5, 5.0, 7.6),
-                 ("2", "90"): (3.2, 5.1, 8.5), ("2", "300"): (4.2, 6.1, 9.5)}
+        table = {("category1", "90"): (2.5, 4.0, 6.6), ("category1", "300"): (3.5, 5.0, 7.6),
+                 ("category2", "90"): (3.2, 5.1, 8.5), ("category2", "300"): (4.2, 6.1, 9.5)}
         for (cat, kw), bounds in table.items():
             for b, (at, over) in zip(bounds, (("A", "B"), ("B", "C"), ("C", "D"))):
-                self.assertEqual(self._out(b, pump_category=cat, rated_power_kw=kw)["iso_zone"].value,
+                self.assertEqual(self._out(b, pumpCategory=cat, ratedPowerKw=kw)["iso_zone"].value,
                                  at, (cat, kw, b))
-                self.assertEqual(self._out(round(b + 0.05, 2), pump_category=cat,
-                                           rated_power_kw=kw)["iso_zone"].value, over, (cat, kw, b))
+                self.assertEqual(self._out(round(b + 0.05, 2), pumpCategory=cat,
+                                           ratedPowerKw=kw)["iso_zone"].value, over, (cat, kw, b))
 
     def test_泵不看支承方式(self):
-        a = self._out(5.0, mount_type="rigid")["iso_zone"].value
-        b = self._out(5.0, mount_type="flexible")["iso_zone"].value
+        a = self._out(5.0, supportClass="rigid")["iso_zone"].value
+        b = self._out(5.0, supportClass="flexible")["iso_zone"].value
         self.assertEqual(a, b)
 
     def test_泵不加低速注释(self):
-        ev = self._out(3.0, rated_speed_rpm="300")["evidence"].value
-        self.assertIn("GB/T 6075.7-2015", ev)
+        ev = self._out(3.0, ratedSpeedRpm="300")["evidence"].value
+        self.assertIn("GB/T 6075.7-2015（第Ⅱ类", ev)
         self.assertNotIn("仅供参考", ev)
 
     def test_泵缺额定功率不出分级(self):
-        out = self._out(3.0, rated_power_kw="")
+        out = self._out(3.0, ratedPowerKw="")
         self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIn("额定功率", out["evidence"].value)
 
     def test_泵类别与机器分组都填是矛盾(self):
-        out = self._out(3.0, iso_group="2", mount_type="rigid")
+        out = self._out(3.0, machineGroup="group2", supportClass="rigid")
         self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIn("自相矛盾", out["evidence"].value)
 
     def test_泵类别选不适用时按工业机器判(self):
-        params = {**FULL_PARAMS, "pump_category": "na"}
+        params = {**FULL_PARAMS, "pumpCategory": "notApplicable"}
         out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)}, params)))
         self.assertEqual(out["iso_zone"].value, "C")
         self.assertIn("GB/T 6075.3-2011", out["evidence"].value)
@@ -217,7 +274,7 @@ class TestLowSpeed(unittest.TestCase):
         self.d = _load()
 
     def _ev(self, rpm):
-        params = {**FULL_PARAMS, "rated_speed_rpm": rpm}
+        params = {**FULL_PARAMS, "ratedSpeedRpm": rpm}
         out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(2.0)}, params)))
         return out
 
@@ -248,18 +305,19 @@ class TestParamsMissing(unittest.TestCase):
             self.assertAlmostEqual(out["vel_max"].value, 3.0)
 
     def test_工业机器缺机器分组或支承方式不出分级(self):
-        for missing in ("iso_group", "mount_type"):
+        for missing in ("machineGroup", "supportClass"):
             params = {k: v for k, v in FULL_PARAMS.items() if k != missing}
             out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)}, params)))
             self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, missing)
             self.assertIsNone(out["iso_zone"].value)
 
     def test_缺轴向只影响方向性两条ISO照出(self):
-        params = {k: v for k, v in FULL_PARAMS.items() if k != "axial_axis"}
+        params = {k: v for k, v in FULL_PARAMS.items() if k != "axialAxis"}
         out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0), "z_vel": _samples(0.5)}, params)))
         self.assertIs(out["direction_hint"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIs(out["iso_zone"].quality, Quality.OK)
         self.assertEqual(out["iso_zone"].value, "C")
+        self.assertEqual(out["status"].value, "warning")
 
 
 class TestBadInput(unittest.TestCase):
@@ -320,36 +378,19 @@ class TestDirectionHint(unittest.TestCase):
         self.assertEqual(ratio, 0.0)
         self.assertIn("无意义", hint)
 
+    def test_轴向轴没有可信样本(self):
+        f = _frame({"x_vel": _samples(2.0), "z_vel": _samples((1.0, Quality.INPUT_BAD))})
+        out = _by_key(self.d.instance.infer(f))
+        self.assertIs(out["direction_hint"].quality, Quality.INPUT_BAD)
+        self.assertEqual(out["iso_zone"].value, "B", "烈度分级照出")
+
+    def test_只有轴向轴没有径向可比(self):
+        out = _by_key(self.d.instance.infer(_frame({"x_vel": [], "z_vel": _samples(1.0)})))
+        self.assertIs(out["direction_hint"].quality, Quality.INSUFFICIENT_SAMPLES)
+
     def test_输出显示名为提示(self):
         spec = {o.key: o for o in self.d.declaration.outputs}["direction_hint"]
         self.assertIn("提示", spec.display)
-
-
-class TestSecondPoint(unittest.TestCase):
-    def setUp(self):
-        self.d = _load()
-
-    def test_第二测点的最大值参与判级(self):
-        f = _frame({"x_vel": _samples(1.0), "x2_vel": _samples(5.0)})
-        out = _by_key(self.d.instance.infer(f))
-        self.assertAlmostEqual(out["vel_max"].value, 5.0)
-        self.assertEqual(out["dominant_axis"].value, "x2")
-        self.assertEqual(out["iso_zone"].value, "D")
-
-    def test_方向性取最大值所在测点(self):
-        # 测点1 径向主导（不平衡）；测点2 更大且轴向偏高（不对中）⇒ 取测点2
-        f = _frame({"x_vel": _samples(1.0), "y_vel": _samples(0.9), "z_vel": _samples(0.1),
-                    "x2_vel": _samples(3.0), "y2_vel": _samples(1.0), "z2_vel": _samples(2.5)})
-        out = _by_key(self.d.instance.infer(f))
-        self.assertIn("不对中", out["direction_hint"].value)
-        self.assertAlmostEqual(out["axial_ratio"].value, 2.5 / 3.0, places=4)
-
-    def test_最大值测点算不出方向时退到另一个测点(self):
-        f = _frame({"x_vel": _samples(1.0), "y_vel": _samples(0.9), "z_vel": _samples(0.1),
-                    "x2_vel": _samples(5.0)})           # 测点2 没有轴向轴
-        out = _by_key(self.d.instance.infer(f))
-        self.assertIs(out["direction_hint"].quality, Quality.OK)
-        self.assertIn("不平衡", out["direction_hint"].value)
 
 
 class TestStopState(unittest.TestCase):
@@ -365,10 +406,12 @@ class TestStopState(unittest.TestCase):
     def test_低于门槛判停机_文字点写停机_数值点不写(self):
         out = self._infer("0.3", x_vel=0.1, y_vel=0.2, z_vel=0.05)
         self.assertEqual(out["run_state"].value, "停机")
+        self.assertEqual(out["status"].value, "stopped")
         self.assertEqual(out["iso_zone"].value, "停机")
         self.assertEqual(out["iso_zone_code"].value, 0)
         self.assertEqual(out["direction_hint"].value, "停机")
-        for k in ("run_state", "iso_zone", "iso_zone_code", "direction_hint", "vel_max", "evidence"):
+        for k in ("run_state", "status", "iso_zone", "iso_zone_code", "direction_hint",
+                  "vel_max", "evidence"):
             self.assertIs(out[k].quality, Quality.OK, k)
         self.assertNotIn("iso_margin", out)
         self.assertNotIn("axial_ratio", out)
@@ -402,6 +445,7 @@ class TestStopState(unittest.TestCase):
             self.assertIs(out["run_state"].quality, Quality.CONFIG_INCOMPLETE, bad)
             self.assertIsNone(out["run_state"].value)
             self.assertEqual(out["iso_zone"].value, "A", bad)
+            self.assertEqual(out["status"].value, "normal", bad)
 
     def test_门槛可选且没有缺省(self):
         spec = {p.key: p for p in self.d.declaration.params}["stop_threshold"]
@@ -415,8 +459,8 @@ class TestStopState(unittest.TestCase):
         self.assertTrue(res.ok)
         self.assertEqual(res.error, "")
         self.assertEqual({f.key for f in res.findings},
-                         {"vel_max", "dominant_axis", "run_state", "iso_zone", "iso_zone_code",
-                          "direction_hint", "evidence"})
+                         {"vel_max", "dominant_axis", "run_state", "status", "iso_zone",
+                          "iso_zone_code", "direction_hint", "evidence"})
 
 
 if __name__ == "__main__":

@@ -35,11 +35,11 @@ DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 #: 停机门槛远高于下面喂的速度值 ⇒ 必然判停机。
 STOPPED_PARAMS = {
     "stop_threshold": "100",
-    "axial_axis": "x",
-    "iso_group": "1",
-    "mount_type": "rigid",
-    "rated_power_kw": "100",
-    "rated_speed_rpm": "1500",
+    "axialAxis": "x",
+    "machineGroup": "group1",
+    "supportClass": "rigid",
+    "ratedPowerKw": "100",
+    "ratedSpeedRpm": "1500",
     "vel_is_rms": "yes",
 }
 
@@ -138,25 +138,22 @@ class TestVibrationBaseline(StopBehaviorBase):
                          {"运行", "停机", "未判"})
 
 
-class TestGrouping(unittest.TestCase):
-    """第二测点必须自述成一组，否则界面拦不住"配了 X 漏了 Z"（C-45 §3.1）。"""
+class TestOneSensor(unittest.TestCase):
+    """`C-64`：一条绑定 = 一个振动传感器。第二测点组（1.9 起，`C-45 §3.1`）随之撤掉；
+    平台按「量 + 轴」对角色、按台账键带参数 —— 两个振动域必须同一套。"""
 
-    def test_两个振动域的第二测点都成组(self):
+    def test_两个振动域都只有一组三轴且各带量与轴(self):
         for key in ("vibration_iso", "vibration_baseline"):
             with self.subTest(domain=key):
                 ins = _load(key).declaration.inputs
-                # 角色名形如 x_vel / x2_vel / temp / temp2 —— 第二测点的带 "2"
-                second = [i for i in ins if "2" in i.role]
-                self.assertTrue(second, "没找到第二测点的角色")
-                self.assertGreaterEqual(len(second), 3, f"第二测点只认出 {len(second)} 个角色")
-                for i in second:
-                    self.assertEqual(i.group, "point2", f"{i.role} 没标进第二测点组")
-                    self.assertEqual(i.group_display, "第二测点")
-                    self.assertFalse(i.required, f"{i.role} 成组可选却标了必填")
-                # 测点 1 不该被卷进组里
-                for i in ins:
-                    if "2" not in i.role:
-                        self.assertEqual(i.group, "", f"{i.role} 不该属于第二测点组")
+                self.assertFalse([i.role for i in ins if i.group], "不该再有成组的角色")
+                vel = {i.axis: i.role for i in ins if i.quantity == "velocity"}
+                self.assertEqual(vel, {"x": "x_vel", "y": "y_vel", "z": "z_vel"})
+
+    def test_两个振动域的轴向参数同键同取值同归属(self):
+        specs = [{p.key: p for p in _load(k).declaration.params}["axialAxis"]
+                 for k in ("vibration_iso", "vibration_baseline")]
+        self.assertEqual({(s.choices, s.level) for s in specs}, {(("x", "y", "z"), "sensor")})
 
 
 class TestStopThresholdSelfDescription(unittest.TestCase):
@@ -197,6 +194,68 @@ class TestOutputSpecGuards(unittest.TestCase):
         from aiintegration.types import ParamSpec
         with self.assertRaises(ValueError):
             ParamSpec(key="x", display="x", value_type="string", default="abc")
+
+
+class TestContract113Guards(unittest.TestCase):
+    """契约 1.13 的几道闸（`C-64 §2.2`、`C-65 §2`）：平台按这些格**比高低 / 对角色**，
+    声明错了平台不会报错，只会排错位、对错点 —— 所以在装载时当场炸。"""
+
+    def _status(self, **kw):
+        from aiintegration.types import OutputSpec
+        base = dict(key="s", display="s", value_type="string", role="status",
+                    stop_behavior="literal_stopped", choices=("normal", "stopped"))
+        return OutputSpec(**{**base, **kw})
+
+    def test_检测状态合法形状收下(self):
+        self._status()
+        self._status(stop_behavior="written", choices=("normal", "warning"))
+
+    def test_检测状态取值不在词表里当场拒(self):
+        for bad in (("normal", "严重"), ("ok",), ()):
+            with self.subTest(choices=bad), self.assertRaises(ValueError):
+                self._status(choices=bad, stop_behavior="written")
+
+    def test_检测状态不是字符串当场拒(self):
+        with self.assertRaises(ValueError):
+            self._status(value_type="int")
+
+    def test_检测状态含停机却不写停机档当场拒(self):
+        """反过来也拒：写了 literal_stopped 却没有 stopped 这一档，停机时写什么？"""
+        with self.assertRaises(ValueError):
+            self._status(stop_behavior="written")
+        with self.assertRaises(ValueError):
+            self._status(choices=("normal", "danger"))
+
+    def test_不认识的结论角色当场拒(self):
+        from aiintegration.types import OutputSpec
+        with self.assertRaises(ValueError):
+            OutputSpec(key="x", display="x", value_type="string", role="health")
+
+    def test_一个域两条检测状态当场拒(self):
+        from aiintegration.types import Declaration
+        with self.assertRaises(ValueError):
+            Declaration(inputs=(), outputs=(self._status(key="a"), self._status(key="b")))
+
+    def test_轴取值非法当场拒(self):
+        from aiintegration.types import InputSpec
+        with self.assertRaises(ValueError):
+            InputSpec(role="r", axis="X")
+
+    def test_同量同轴两路当场拒_没声明量的不管(self):
+        from aiintegration.types import Declaration, InputSpec, OutputSpec
+        out = (OutputSpec(key="o", display="o", value_type="float"),)
+        with self.assertRaises(ValueError):
+            Declaration(inputs=(InputSpec(role="a", quantity="velocity", axis="x"),
+                                InputSpec(role="b", quantity="velocity", axis="x")), outputs=out)
+        Declaration(inputs=(InputSpec(role="a", quantity="velocity", axis="x"),
+                            InputSpec(role="b", quantity="velocity", axis="y"),
+                            InputSpec(role="c"), InputSpec(role="d")), outputs=out)
+
+    def test_参数归属认sensor(self):
+        from aiintegration.types import ParamSpec
+        ParamSpec(key="axialAxis", display="轴向", value_type="enum", choices=("x",), level="sensor")
+        with self.assertRaises(ValueError):
+            ParamSpec(key="k", display="k", value_type="string", level="device")
 
 
 if __name__ == "__main__":

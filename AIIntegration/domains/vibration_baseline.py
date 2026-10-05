@@ -2,6 +2,12 @@
 
 > 2026-09-17 由 `vibration_lowfreq` 拆出（用户定）；另一半见 `vibration_iso.py`。
 > 配置与取舍定案见 `AIIntegration/doc/诊断配置流程定案.md`「模块 1、2 的内容」。
+>
+> ★2026-10-05 按 AICloud `C-64`（用户同意）改为 2.0：一条绑定 = 一个振动传感器，去掉「第二测点」组；
+> 「轴向是哪一轴」键改为平台台账的 `axialAxis`，由传感器给（`level="sensor"`）。
+> **本模块暂不出「检测状态」**（`C-65 §2`）：异常分切档的阈值没有标定依据，用户 10-05 定先不出，平台那列留空。
+> ★同日补一处缺陷：基线记下了采集时的轴向，推理时却不核 —— 平台一改轴向，比例漂移就拿新轴向的比值
+> 去减旧轴向的基线，错了也看不出。现在两者不一致即落 `MODEL_NOT_LOADED` 并提示重采（`_deviation` ②）。
 
 ---
 
@@ -12,8 +18,8 @@
 | 结论 | 说明 |
 | --- | --- |
 | 速度偏离 | 各速度通道相对基线的稳健 z 分数，取最大 |
-| 三轴比例漂移 | 轴向/径向比相对基线的变化，取变化最大的测点 |
-| 温升 | 相对基线的温度变化，取最大的测点 |
+| 三轴比例漂移 | 轴向/径向比相对基线的变化 |
+| 温升 | 相对基线的温度变化 |
 | 异常分 | 以上几项合成的 0~100 排序用分数，★不是概率 |
 | 判据摘要 | 每一条"为什么没给"都写明 |
 
@@ -50,7 +56,10 @@ from aiintegration.types import (
 )
 
 _AXES = ("x", "y", "z")
-_POINTS = ("", "2")
+
+#: 平台台账的键（`C-64 §2.3`），与 `vibration_iso` 同。
+P_AXIAL = "axialAxis"
+TEMP_ROLE = "temp"
 
 #: 基线格式。**存进工件里**：格式一变，老工件要能被认出来而不是被误读。
 BASELINE_FORMAT = "vibration_baseline/baseline@1"
@@ -74,12 +83,8 @@ DEFAULT_NORMAL_LABEL = "正常"
 RUNNING, STOPPED, UNJUDGED = "运行", "停机", "未判"
 
 
-def _vel_role(axis: str, point: str) -> str:
-    return f"{axis}{point}_vel"
-
-
-def _temp_role(point: str) -> str:
-    return f"temp{point}"
+def _vel_role(axis: str) -> str:
+    return f"{axis}_vel"
 
 
 class VibrationBaseline(Domain):
@@ -87,41 +92,33 @@ class VibrationBaseline(Domain):
 
     key = "vibration_baseline"
     display = "AI 模型自训振动诊断"
-    version = "1.1.0"
+    version = "2.0.0"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
-        inputs = []
-        for point, name in (("", "测点 1"), ("2", "测点 2")):
-            for axis in _AXES:
-                first = point == "" and axis == "x"
-                inputs.append(InputSpec(
-                    role=_vel_role(axis, point), unit="mm/s", required=first,
-                    # ★第二测点是一组：全配或全不配（契约 1.9，AICloud C-45 §3.1）。
-                    group=("point2" if point else ""),
-                    group_display=("第二测点" if point else ""),
-                    # ★按字段绑到结构值点时（契约 1.11）：物理量须是速度；同一测点的 x/y/z
-                    #   必须出自同一个点（同一条记录），否则"同一时刻"的保证就没了。
-                    quantity="velocity", record=f"point{point or '1'}",
-                    display=f"{name} {axis.upper()} 轴速度",
-                    description=("速度有效值。至少选测点 1 的 X 轴速度；第二测点不配即按单测点算"
-                                 if first else "速度有效值，可不选")))
-            inputs.append(InputSpec(
-                role=_temp_role(point), unit="℃", required=False,
-                quantity="temperature",
-                group=("point2" if point else ""),
-                group_display=("第二测点" if point else ""),
-                display=f"{name} 温度",
-                description="有就算温升，没有就不给温升"))
+        inputs = [
+            InputSpec(
+                role=_vel_role(axis), unit="mm/s", required=(axis == "x"),
+                # ★按字段绑到结构值点时（契约 1.11）：物理量须是速度；x/y/z 必须出自同一个点
+                #   （同一条记录），否则"同一时刻"的保证就没了。
+                quantity="velocity", axis=axis, record="point1",
+                display=f"{axis.upper()} 轴速度",
+                description=("速度有效值。至少选 X 轴速度" if axis == "x" else "速度有效值，可不选"))
+            for axis in _AXES]
+        inputs.append(InputSpec(
+            role=TEMP_ROLE, unit="℃", required=False, quantity="temperature",
+            display="温度", description="有就算温升，没有就不给温升"))
         return Declaration(
             inputs=tuple(inputs),
+            # ★没有启用中的基线，偏离与异常分就出不来（契约 1.13）。
+            requires_artifacts=("baseline",),
             params=(
                 ParamSpec(
-                    key="axial_axis", display="轴向是哪一轴", value_type="enum",
+                    key=P_AXIAL, display="轴向是哪一轴", value_type="enum",
                     choices=("x", "y", "z"), choice_displays=("X 轴", "Y 轴", "Z 轴"),
-                    required=True, level="position",
-                    description="沿转轴方向的那一轴，两个测点按同一方向理解。没有缺省；"
-                                "缺它只影响三轴比例漂移一条"),
+                    required=True, level="sensor",
+                    description="沿转轴方向的那一轴，在振动传感器上填。没有缺省；"
+                                "缺它只影响三轴比例漂移一条。★改了它，已采的基线的比例那一项作废，须重采"),
                 ParamSpec(
                     key="normal_label", display="采基线时认哪个标签算正常",
                     value_type="string", default=DEFAULT_NORMAL_LABEL, has_default=True,
@@ -138,16 +135,16 @@ class VibrationBaseline(Domain):
                                 "不填不判；没有缺省，按设备自己定"),
             ),
             outputs=(
-                OutputSpec(key="vel_z_max", display="速度偏离", value_type="float",
+                OutputSpec(key="vel_z_max", display="速度偏离", value_type="float", headline=True,
                            description="各速度通道 (当前−基线中位数)/(四分位距/1.349) 的最大值。>3 视为显著偏离",
                            stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="ratio_drift", display="三轴比例漂移", value_type="float",
-                           description="轴向/径向比相对基线的变化量，取变化最大的测点",
+                           description="轴向/径向比相对基线的变化量",
                            stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="temp_rise", display="温升", value_type="float", unit="℃",
-                           description="相对基线的温度变化，取最大的测点",
+                           description="相对基线的温度变化",
                            stop_behavior=STOP_NOT_WRITTEN),
-                OutputSpec(key="anomaly_score", display="异常分", value_type="float",
+                OutputSpec(key="anomaly_score", display="异常分", value_type="float", headline=True,
                            description="0~100，由上面几项合成。★不是概率，是排序用的分数",
                            stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="run_state", display="运行状态", value_type="string",
@@ -167,7 +164,7 @@ class VibrationBaseline(Domain):
         for it in dataset.items:            # 参数在帧上，各帧同一条诊断，取第一个
             params = it.frame.params
             wanted = params.get("normal_label", "").strip() or DEFAULT_NORMAL_LABEL
-            axial = (params.get("axial_axis", "") or "").strip().lower()
+            axial = (params.get(P_AXIAL, "") or "").strip().lower()
             break
 
         # 定案 2.5：停机帧不进基线 —— 否则基线把"停着"当成常态，开机后每拍都显得偏高。
@@ -189,11 +186,11 @@ class VibrationBaseline(Domain):
                            + (f"（剔除停机帧 {stopped}）" if stopped else ""))
 
         channels: dict[str, dict[str, float]] = {}
-        roles = [_vel_role(a, p) for p in _POINTS for a in _AXES] + [_temp_role(p) for p in _POINTS]
+        roles = [_vel_role(a) for a in _AXES] + [TEMP_ROLE]
         for role in roles:
             vals = []
             for it in normals:
-                v = (_window_mean(it.frame, role) if role.startswith("temp")
+                v = (_window_mean(it.frame, role) if role == TEMP_ROLE
                      else _window_peak(it.frame, role))
                 if v is not None:
                     vals.append(v)
@@ -207,14 +204,14 @@ class VibrationBaseline(Domain):
         report.report(0.8, "统计完成")
 
         # 三轴比例进基线：不对中的抓手是"比例变了"，不是"值变大了"。
+        # ★格式沿用 `{"1": 比值}`（BASELINE_FORMAT 不变）：1.x 时代按测点存，现在只有一个传感器。
         ratios: dict[str, float] = {}
         if axial in _AXES:
-            for point in _POINTS:
-                ax = channels.get(_vel_role(axial, point))
-                rad = [channels[_vel_role(a, point)]["median"] for a in _AXES
-                       if a != axial and _vel_role(a, point) in channels]
-                if ax and rad and max(rad) > 0:
-                    ratios[point or "1"] = ax["median"] / max(rad)
+            ax = channels.get(_vel_role(axial))
+            rad = [channels[_vel_role(a)]["median"] for a in _AXES
+                   if a != axial and _vel_role(a) in channels]
+            if ax and rad and max(rad) > 0:
+                ratios["1"] = ax["median"] / max(rad)
 
         model = {
             "format": BASELINE_FORMAT,
@@ -286,35 +283,33 @@ class VibrationBaseline(Domain):
 # ─────────────────────────────── 内部函数 ───────────────────────────────
 
 def _peaks(frame: Frame) -> tuple[dict[str, float], dict[str, datetime], list[str], list[str]]:
-    """逐速度通道取窗口内可信样本的最大值。键为 `x`/`y`/`z`/`x2`/`y2`/`z2`。
+    """逐速度通道取窗口内可信样本的最大值。键为 `x`/`y`/`z`。
     没选的通道不记入"无样本"。"""
     peaks: dict[str, float] = {}
     times: dict[str, datetime] = {}
     bad: list[str] = []
     empty: list[str] = []
-    for point in _POINTS:
-        for axis in _AXES:
-            role = _vel_role(axis, point)
-            if role not in frame.channels:
+    for axis in _AXES:
+        role = _vel_role(axis)
+        if role not in frame.channels:
+            continue
+        samples = list(frame.channels[role])
+        if not samples:
+            empty.append(axis)
+            continue
+        best_v: float | None = None
+        best_t: datetime | None = None
+        for s in samples:
+            if s.quality is not Quality.OK:
                 continue
-            key = f"{axis}{point}"
-            samples = list(frame.channels[role])
-            if not samples:
-                empty.append(key)
-                continue
-            best_v: float | None = None
-            best_t: datetime | None = None
-            for s in samples:
-                if s.quality is not Quality.OK:
-                    continue
-                v = _as_float(s.value)
-                if v is not None and (best_v is None or v > best_v):
-                    best_v, best_t = v, s.t
-            if best_v is None or best_t is None:
-                bad.append(key)
-            else:
-                peaks[key] = best_v
-                times[key] = best_t
+            v = _as_float(s.value)
+            if v is not None and (best_v is None or v > best_v):
+                best_v, best_t = v, s.t
+        if best_v is None or best_t is None:
+            bad.append(axis)
+        else:
+            peaks[axis] = best_v
+            times[axis] = best_t
     return peaks, times, bad, empty
 
 
@@ -336,8 +331,7 @@ def run_state(params: dict[str, str], vel_max: float) -> tuple[str | None, Quali
 
 def _frame_stopped(frame: Frame, params: dict[str, str]) -> bool:
     """采基线用：这一帧按停机门槛算不算停机。一路可信速度都没有的帧不算停机（交给后面按通道缺样本处理）。"""
-    peaks = [p for p in (_window_peak(frame, _vel_role(a, pt)) for pt in _POINTS for a in _AXES)
-             if p is not None]
+    peaks = [p for p in (_window_peak(frame, _vel_role(a)) for a in _AXES) if p is not None]
     return bool(peaks) and run_state(params, max(peaks))[0] == STOPPED
 
 
@@ -413,11 +407,10 @@ def _deviation(model: dict, peaks: dict[str, float], frame: Frame,
 
     # ① 速度偏离：只比基线里有的通道。
     zs: dict[str, float] = {}
-    for key, cur in peaks.items():
-        point = key[1:]
-        c = chans.get(_vel_role(key[0], point))
+    for axis, cur in peaks.items():
+        c = chans.get(_vel_role(axis))
         if c:
-            zs[key] = (cur - float(c["median"])) / _scale(c)
+            zs[axis] = (cur - float(c["median"])) / _scale(c)
     if zs:
         worst = max(zs, key=lambda k: zs[k])
         out.append(Finding(key="vel_z_max", value=round(zs[worst], 3), quality=Quality.OK, t=t))
@@ -428,59 +421,48 @@ def _deviation(model: dict, peaks: dict[str, float], frame: Frame,
         notes.append("本帧没有与基线同通道的可信样本，速度偏离未给")
 
     # ② 三轴比例漂移。
-    axial = frame.params.get("axial_axis", "").strip().lower()
-    base_ratios: dict = model.get("axial_ratios") or {}
+    axial = frame.params.get(P_AXIAL, "").strip().lower()
+    base_ratio = (model.get("axial_ratios") or {}).get("1")
+    base_axial = str(model.get("axial_axis") or "")
     if axial not in _AXES:
         out.append(Finding(key="ratio_drift", value=None, quality=Quality.CONFIG_INCOMPLETE, t=t))
-        notes.append(f"轴向 axial_axis={axial or '未填'} 非法，比例漂移未给")
-    elif not base_ratios:
+        notes.append(f"轴向 {P_AXIAL}={axial or '未填'} 非法，比例漂移未给")
+    elif base_ratio is None:
         out.append(Finding(key="ratio_drift", value=None, quality=Quality.CONFIG_INCOMPLETE, t=t))
         notes.append("基线里没有三轴比例（采基线时轴向未填或径向无数据），比例漂移未给")
+    elif base_axial != axial:
+        # ★基线的比例是按采集时的轴向算的。轴向改了还照减，得出的漂移是两把尺子的差，且看不出错。
+        out.append(Finding(key="ratio_drift", value=None, quality=Quality.MODEL_NOT_LOADED, t=t))
+        notes.append(f"基线采集时轴向为 {base_axial}，现在为 {axial}：比例漂移未给，请重采基线")
     else:
-        drifts: dict[str, float] = {}
-        for point in _POINTS:
-            base = base_ratios.get(point or "1")
-            ax = peaks.get(f"{axial}{point}")
-            rad = [peaks[f"{a}{point}"] for a in _AXES if a != axial and f"{a}{point}" in peaks]
-            if base is None or ax is None or not rad or max(rad) <= 0:
-                continue
-            drifts[point or "1"] = ax / max(rad) - float(base)
-        if not drifts:
+        ax = peaks.get(axial)
+        rad = [peaks[a] for a in _AXES if a != axial and a in peaks]
+        if ax is None or not rad or max(rad) <= 0:
             out.append(Finding(key="ratio_drift", value=None,
                                quality=Quality.INSUFFICIENT_SAMPLES, t=t))
         else:
-            p = max(drifts, key=lambda k: abs(drifts[k]))
-            drift = drifts[p]
+            drift = ax / max(rad) - float(base_ratio)
             out.append(Finding(key="ratio_drift", value=round(drift, 4), quality=Quality.OK, t=t))
             if abs(drift) >= 0.2:
-                notes.append(f"测点{p} 三轴比例较基线漂移 {drift:+.2f}"
+                notes.append(f"三轴比例较基线漂移 {drift:+.2f}"
                              f"（{'轴向占比升高，提示：可能不对中' if drift > 0 else '轴向占比下降'}）")
 
     # ③ 温升：没选温度 ⇒ NO_INPUT；选了但基线里没有 ⇒ MODEL_NOT_LOADED。
-    rises: dict[str, float] = {}
-    any_temp_bound = False
-    any_base_missing = False
-    for point in _POINTS:
-        role = _temp_role(point)
-        if role not in frame.channels:
-            continue
-        any_temp_bound = True
-        cur = _window_mean(frame, role)
-        base = chans.get(role)
+    rise: float | None = None
+    temp_q = Quality.NO_INPUT
+    if TEMP_ROLE in frame.channels:
+        base = chans.get(TEMP_ROLE)
+        cur = _window_mean(frame, TEMP_ROLE)
         if base is None:
-            any_base_missing = True
-            continue
-        if cur is not None:
-            rises[point or "1"] = cur - float(base["median"])
-    if rises:
-        p = max(rises, key=lambda k: rises[k])
-        out.append(Finding(key="temp_rise", value=round(rises[p], 3), quality=Quality.OK, t=t))
-        if rises[p] >= 5.0:
-            notes.append(f"测点{p} 温度较基线高 {rises[p]:.1f}℃")
+            temp_q = Quality.MODEL_NOT_LOADED
+        elif cur is not None:
+            rise = cur - float(base["median"])
+    if rise is not None:
+        out.append(Finding(key="temp_rise", value=round(rise, 3), quality=Quality.OK, t=t))
+        if rise >= 5.0:
+            notes.append(f"温度较基线高 {rise:.1f}℃")
     else:
-        q = (Quality.NO_INPUT if not any_temp_bound
-             else Quality.MODEL_NOT_LOADED if any_base_missing else Quality.NO_INPUT)
-        out.append(Finding(key="temp_rise", value=None, quality=q, t=t))
+        out.append(Finding(key="temp_rise", value=None, quality=temp_q, t=t))
 
     # ④ 异常分：★不是概率、不是置信度，一个 0~100 的数最容易被当成概率读。
     if not zs:
