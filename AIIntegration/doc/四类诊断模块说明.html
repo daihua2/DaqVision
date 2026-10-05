@@ -63,8 +63,8 @@ footer{color:#666; font-size:13px; margin-top:16px}
 <div class="tw">
 <table>
 <tr><th>界面选项</th><th>代码</th><th>输入</th><th>算法</th><th>训练</th><th>现状</th></tr>
-<tr><td>经典算法振动诊断</td><td><code>vibration_iso</code></td><td>三轴速度有效值 + 温度</td><td>国标判级（规则）</td><td>不要</td><td>现场在跑</td></tr>
-<tr><td>AI 模型自训振动诊断</td><td><code>vibration_baseline</code></td><td>同上</td><td>自身基线偏离</td><td>要采基线</td><td>现场在跑</td></tr>
+<tr><td>经典算法振动诊断</td><td><code>vibration_iso</code></td><td>三轴速度有效值</td><td>国标判级（规则）</td><td>不要</td><td>现场在跑</td></tr>
+<tr><td>AI 模型自训振动诊断</td><td><code>vibration_baseline</code></td><td>三轴速度有效值 + 温度</td><td>自身基线偏离</td><td>要采基线</td><td>现场在跑</td></tr>
 <tr><td>AI 伺服/机械臂运行监测</td><td><code>servo_health</code></td><td>驱动器 9 路遥测</td><td>CNN-LSTM（工件）</td><td>导入工件</td><td>代码就绪</td></tr>
 <tr><td>AI 变频器（VFD）运行监测</td><td><code>vfd_health</code></td><td>15 路电气量</td><td>TCN 三头（工件）</td><td>导入工件</td><td>代码就绪</td></tr>
 <tr><td>AI 压装机运行监测</td><td>未落码</td><td>位移 / 速度 / 力曲线</td><td>CNN-LSTM / SVM</td><td>导入工件</td><td>等结构值点</td></tr>
@@ -77,7 +77,7 @@ footer{color:#666; font-size:13px; margin-top:16px}
 <div class="tw">
 <table>
 <tr><th>算法</th><td>取窗口内三轴速度<b>最大值</b> → 按 GB/T 6075.3（一般机组）或 GB/T 6075.7（泵）查限值表 → 判烈度区 A/B/C/D；另出轴向/径向比与方向性提示。</td></tr>
-<tr><th>输入</th><td>测点 1 的 X/Y/Z 速度（X 必填）+ 温度；可选第二测点同样五路。</td></tr>
+<tr><th>输入</th><td>测点 1 的 X/Y/Z 速度（X 必填）；可选第二测点 X/Y/Z 速度（三轴全配或全不配）。<b>不吃温度</b>（温度只有模块 2 用）。</td></tr>
 <tr><th>参数</th><td>机器分组、支承方式、泵类别、额定功率、额定转速、速度口径确认、轴向是哪一轴、停机门槛。</td></tr>
 <tr><th>结论点</th><td><code>vel_max</code> 速度最大值、<code>dominant_axis</code> 最大值所在轴、<code>iso_zone</code> 烈度区、<code>iso_zone_code</code> 烈度区(数值)、<code>iso_margin</code> 距下一档余量、<code>axial_ratio</code> 轴向/径向比、<code>direction_hint</code> 方向性提示、<code>run_state</code> 运行状态、<code>evidence</code> 判据摘要</td></tr>
 <tr><th>依赖</th><td>零第三方依赖（纯 Python 标准库）</td></tr>
@@ -89,7 +89,8 @@ footer{color:#666; font-size:13px; margin-top:16px}
 <div class="tw">
 <table>
 <tr><th>算法</th><td>先采一条<b>基线</b>（这台设备正常运行时各通道的中位数与四分位距），之后每拍算偏离：<code>(当前 − 中位数) / (四分位距 / 1.349)</code>。<br>用中位数而不是均值：基线只有十来帧时，一两个离群值就能把标准差撑大，让之后的真偏离显得不显著。</td></tr>
-<tr><th>输入 / 参数</th><td>同 4.1；参数另有「采基线时认哪个标签算正常」。</td></tr>
+<tr><th>输入</th><td>同 4.1 的速度各路，另加每个测点一路温度（可选）。</td></tr>
+<tr><th>参数</th><td>轴向是哪一轴、采基线时认哪个标签算正常、停机门槛 —— <b>不用</b>机器分组、支承方式、泵类别等判级参数。</td></tr>
 <tr><th>结论点</th><td><code>vel_z_max</code> 速度偏离、<code>ratio_drift</code> 三轴比例漂移、<code>temp_rise</code> 温升、<code>anomaly_score</code> 异常分、<code>run_state</code> 运行状态、<code>evidence</code> 判据摘要</td></tr>
 <tr><th>依赖</th><td>零第三方依赖</td></tr>
 </table>
@@ -198,7 +199,7 @@ footer{color:#666; font-size:13px; margin-top:16px}
 <p>振动诊断走五步；伺服 / VFD / 压装三类没有第 5 步，改为导入模型工件。</p>
 <ol>
   <li><b>在设备上加诊断</b> —— 一台设备同一种诊断只允许一条，多测点放进同一条里；依赖没装上的模块不在列表里显示。</li>
-  <li><b>选采集点</b> —— 支持第二测点（可选一组「第二测点 X/Y/Z 速度、温度」，不配即单测点）。候选点只列本设备下的点。</li>
+  <li><b>选采集点</b> —— 支持第二测点（可选一组「第二测点 X/Y/Z 速度」，模块 2 另含温度；不配即单测点）。候选点只列本设备下的点。</li>
   <li><b>填参数</b> —— 取数节拍（间隔、窗长）默认均 60 秒、允许修改。</li>
   <li><b>保存生效</b> —— 必选采集点没配齐<b>也允许保存</b>，界面显示缺哪几项，结论带「配置不全」质量码；<b>保存即启用</b>，另给停用按钮。</li>
   <li><b>采基线</b> —— 只对「AI 模型自训振动诊断」适用：选一段正常运行时间 → 点「采集基线」→ 完成后自动启用。标注与建训练集由后台自动做。</li>

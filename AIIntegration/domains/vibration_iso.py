@@ -105,7 +105,12 @@ _AXES = ("x", "y", "z")
 #: 测点后缀：第一测点无后缀，第二测点为 "2"（定案 2.1）。
 _POINTS = ("", "2")
 
-#: 方向性判据阈值。**经验值**（改造方案 §3 轨A④ 现象/倾向表），不是国标。
+#: 方向性判据阈值。**经验值**，不是国标。
+#: ★出处要分清：判据**方向**（轴向偏高→不对中、径向主导→不平衡、三轴均衡→松动）出自改造方案 §3 轨A④
+#:   现象/倾向表；那张表只有「显著」「异常升高」等定性说法，**这两个数是 2026-09-11 落码时我方取的，
+#:   没有文献或实测标定**。★常被引的「单测点 0.767」**不是这条规则的成绩**：那是 MAFAULDA 上训练出来的
+#:   12 维标量小网络判「垂直 vs 水平不对中」（research/scalar-capability §5），只说明单测点标量有判别力但有限；
+#:   本规则本身从未上数据验过。
 _AXIAL_SIGNIFICANT = 0.5   # 轴向 / 径向 ≥ 此值 ⇒ 轴向占比异常
 _RADIAL_BALANCED = 0.8     # 径向两轴互比落在 [0.8, 1/0.8] ⇒ 视为各向同性
 
@@ -479,7 +484,7 @@ def _direction_any(peaks: dict[str, float], axial: str, dominant: str
 
 
 def _direction(peaks: dict[str, float], ax_key: str, radial_keys: list[str]) -> tuple[float, str]:
-    """方向性倾向。经验判据，不是国标。"""
+    """方向性倾向。经验判据，不是国标；阈值出处见 `_AXIAL_SIGNIFICANT` 处。"""
     radial_max = max(peaks[k] for k in radial_keys)
     if radial_max <= 0:
         return 0.0, "径向读数为 0，比值无意义；仅轴向有振动，建议现场核对安装与接线"
