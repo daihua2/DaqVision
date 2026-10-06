@@ -462,11 +462,13 @@ class TestSnapshotExtras(unittest.TestCase):
         self.assertEqual(set(e.alarms), {self.lid("status")})
         self.assertEqual(e.alarms[self.lid("status")].State.OnDelaySec, 30)
 
-    def test_显示名进绑定实体与状态点说明(self):
+    def test_显示名进绑定实体与每个结论点说明(self):
+        """`C-68 §3.3`：不只状态点 —— 实时库点表等平台以外的入口看到的是点自己的 Des。"""
         self.put(display_name=" 1#泵 驱动端 ")
         e = self.extras()
         self.assertEqual(e.binding_des, {("vib", "dev1"): "1#泵 驱动端"})
-        self.assertEqual(e.point_des, {self.lid("status"): "1#泵 驱动端·检测状态"})
+        self.assertEqual(e.point_des, {self.lid("status"): "1#泵 驱动端·检测状态",
+                                       self.lid("health_score"): "1#泵 驱动端·健康分"})
 
     def test_没显示名就不带说明_报警照挂(self):
         self.put()

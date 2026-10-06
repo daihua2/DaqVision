@@ -174,18 +174,19 @@ class Scheduler:
             if loaded is None:
                 continue
             for o in loaded.declaration.outputs:
-                if o.role != ROLE_STATUS:
-                    continue
                 lid = self._points.local_id_of(b.domain, b.binding, o.key)
                 if lid is None:
+                    continue
+                if name:
+                    # 每个结论点都带（`C-68 §3.3`）：实时库点表、报警描述等平台以外的入口看到的是点自己的 Des。
+                    point_des[lid] = f"{name}·{o.display}"
+                if o.role != ROLE_STATUS:
                     continue
                 alarm = build_status_alarm(o.choices, b.status_on_delay_sec)
                 if alarm is not None:
                     alarms[lid] = alarm
                     if b.enabled:
                         intervals.append(b.interval_sec)
-                if name:
-                    point_des[lid] = f"{name}·{o.display}"
         if intervals and min(intervals) >= HS_OUTAGE_SEC:
             # ★不拒、只吵：间隔是按设备定的，拦下来不对；但后果（每周期每个状态点一条 BAD）要让现场看见。
             logger.warning("所有带检测状态报警的绑定写入间隔都 ≥ %.0f 秒（最短 %.0f 秒）—— 实时库会判我方失联、"
