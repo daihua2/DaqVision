@@ -142,11 +142,13 @@ class _FakeClient:
     def __init__(self, fail=False):
         self.posted = []
         self.snapshots = []
+        self.extras = []
         self.fail = fail
         self.degraded = 0
 
-    def push_snapshot(self, rows, timeout=60.0):
+    def push_snapshot(self, rows, timeout=60.0, *, extras=None):
         self.snapshots.append(list(rows))
+        self.extras.append(extras)
         return len(rows) + 2
 
     def post_vqt(self, items, timeout=15.0):
@@ -419,3 +421,75 @@ class TestSyncOnChange(unittest.TestCase):
     def test_停用的绑定不起线程(self):
         self.bindings.put(Binding("vib", "dev1", {"x_acc": 101}, enabled=False))
         self.assertEqual(self.sched.sync(), 0)
+
+
+class TestSnapshotExtras(unittest.TestCase):
+    """契约 1.15：快照里的说明与检测状态报警由调度按绑定与域声明算（`AI-74 §5.2`、`H-282`）。"""
+
+    DECL_S = Declaration(
+        inputs=(InputSpec(role="x_acc"),),
+        outputs=(OutputSpec(key="status", display="检测状态", value_type="string", role="status",
+                            choices=("normal", "attention", "warning", "danger")),
+                 OutputSpec(key="health_score", display="健康分", value_type="float")))
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        d = Path(self._tmp.name)
+        self.points = PointMap(d / "p.db")
+        self.bindings = BindingStore(d / "b.db")
+        self.client = _FakeClient()
+        self.sched = Scheduler(
+            client=self.client, fetcher=_FakeFetcher(),
+            domains={"vib": LoadedDomain(_Dom(), self.DECL_S, frozenset({"infer"}), Path("s.py"))},
+            bindings=self.bindings, points=self.points)
+
+    def tearDown(self):
+        self.points.close(); self.bindings.close(); self._tmp.cleanup()
+
+    def put(self, binding="dev1", **kw):
+        self.bindings.put(Binding("vib", binding, {"x_acc": 101}, **kw))
+
+    def extras(self):
+        self.sched.ensure_points()
+        return self.client.extras[-1]
+
+    def lid(self, key, binding="dev1"):
+        return self.points.local_id_of("vib", binding, key)
+
+    def test_状态点挂报警_去抖取自绑定_别的点不挂(self):
+        self.put(status_on_delay_sec=30)
+        e = self.extras()
+        self.assertEqual(set(e.alarms), {self.lid("status")})
+        self.assertEqual(e.alarms[self.lid("status")].State.OnDelaySec, 30)
+
+    def test_显示名进绑定实体与状态点说明(self):
+        self.put(display_name=" 1#泵 驱动端 ")
+        e = self.extras()
+        self.assertEqual(e.binding_des, {("vib", "dev1"): "1#泵 驱动端"})
+        self.assertEqual(e.point_des, {self.lid("status"): "1#泵 驱动端·检测状态"})
+
+    def test_没显示名就不带说明_报警照挂(self):
+        self.put()
+        e = self.extras()
+        self.assertEqual((e.binding_des, e.point_des), ({}, {}))
+        self.assertIn(self.lid("status"), e.alarms)
+
+    def test_停用的绑定报警不卸_删了的卸(self):
+        self.put(); self.put("dev2")
+        self.extras()
+        self.put("dev2", enabled=False)
+        self.assertIn(self.lid("status", "dev2"), self.extras().alarms, "启停不该让报警条件卸了又装")
+        self.bindings.delete("vib", "dev2")
+        self.assertNotIn(self.lid("status", "dev2"), self.extras().alarms)
+
+    def test_所有间隔都不短于5分钟就吵(self):
+        """★实时库 5 分钟没收到 VQT 判失联、每个状态点报一条 BAD（`H-282 §2.3`）。"""
+        self.put(interval_sec=300)
+        with self.assertLogs("aiintegration.scheduler", "WARNING") as cm:
+            self.extras()
+        self.assertTrue(any("H-282" in m for m in cm.output))
+
+    def test_有一条短于5分钟就不吵(self):
+        self.put(interval_sec=300); self.put("dev2", interval_sec=60)
+        with self.assertNoLogs("aiintegration.scheduler", "WARNING"):
+            self.extras()

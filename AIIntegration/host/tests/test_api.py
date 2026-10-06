@@ -98,7 +98,7 @@ class TestInfoAndDomains(ApiTestBase):
     def test_GetInfo_带身份与契约版本(self):
         r = self.call("GetInfo", pb.InfoRequest(), pb.InfoReply)
         self.assertEqual(r.guid, "11111111-2222-3333-4444-555555555555")
-        self.assertEqual(r.proto_version, "1.14")
+        self.assertEqual(r.proto_version, "1.15")
         self.assertEqual(r.domain_count, 1)
 
     def test_装载失败不藏(self):
@@ -628,6 +628,66 @@ class TestContract113(unittest.TestCase):
         r = self.put({"x_vel": 810, "temp": 806}, {"axialAxis": "z"})
         self.assertTrue(r.ok, r.message)
         self.assertEqual(self.bindings.get("vib", "dev1").params, {"axialAxis": "z"})
+
+
+class TestContract115(ApiTestBase):
+    """契约 1.15：绑定的显示名与检测状态去抖时长（`H-282 §5`、`C-67 §3.1`）。"""
+
+    def put(self, **kw):
+        b = pb.Binding(domain="vib", binding="dev1", interval_sec=60, window_sec=60, enabled=True, **kw)
+        b.roles["x_acc"] = 101
+        return self.call("PutBinding", pb.PutBindingRequest(binding=b), pb.PutBindingReply)
+
+    def test_显示名往返(self):
+        self.assertTrue(self.put(display_name="1#泵 驱动端").ok)
+        got = self.call("ListBindings", pb.ListBindingsRequest(), pb.ListBindingsReply).bindings[0]
+        self.assertEqual((got.display_name, got.status_on_delay_sec), ("1#泵 驱动端", 0))
+
+    def test_模块没有检测状态_去抖非0拒(self):
+        r = self.put(status_on_delay_sec=30)
+        self.assertFalse(r.ok)
+        self.assertIn("没有检测状态", r.message)
+        self.assertIsNone(self.bindings.get("vib", "dev1"))
+
+    def test_去抖0照收(self):
+        self.assertTrue(self.put(status_on_delay_sec=0).ok)
+
+
+class TestBindingStore115(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self._tmp.name) / "b.db"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_去抖非法拒(self):
+        s = BindingStore(self.db)
+        try:
+            for bad in (-1, 2 ** 32, 1.5, True):
+                with self.assertRaisesRegex(ValueError, "去抖时长", msg=repr(bad)):
+                    s.put(Binding("vib", "dev1", {"x_acc": 9}, status_on_delay_sec=bad))
+        finally:
+            s.close()
+
+    def test_老库补列_老绑定无显示名且不去抖(self):
+        import sqlite3
+        con = sqlite3.connect(str(self.db))
+        con.execute("CREATE TABLE bindings (domain TEXT NOT NULL, binding TEXT NOT NULL,"
+                    " roles_json TEXT NOT NULL, interval_sec REAL NOT NULL, window_sec REAL NOT NULL,"
+                    " enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT, PRIMARY KEY (domain, binding))")
+        con.execute("INSERT INTO bindings(domain,binding,roles_json,interval_sec,window_sec)"
+                    " VALUES('vib','dev1','{\"x_acc\": 9}',60,60)")
+        con.commit(); con.close()
+        s = BindingStore(self.db)
+        try:
+            b = s.get("vib", "dev1")
+            self.assertEqual((b.display_name, b.status_on_delay_sec), ("", 0))
+            s.put(Binding("vib", "dev1", {"x_acc": 9}, display_name="甲", status_on_delay_sec=60))
+            b = s.get("vib", "dev1")
+            self.assertEqual((b.display_name, b.status_on_delay_sec), ("甲", 60))
+        finally:
+            s.close()
 
 
 if __name__ == "__main__":

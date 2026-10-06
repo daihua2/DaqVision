@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS bindings (
     data_origin  TEXT NOT NULL DEFAULT '',
     -- 角色 → 结构值点的字段名（契约 1.11）。老库由 _migrate 补列。
     fields_json  TEXT NOT NULL DEFAULT '{}',
+    -- 显示名、检测状态去抖时长（契约 1.15）。老库由 _migrate 补列。
+    display_name        TEXT NOT NULL DEFAULT '',
+    status_on_delay_sec INTEGER NOT NULL DEFAULT 0,
     interval_sec REAL NOT NULL,
     window_sec   REAL NOT NULL,
     enabled      INTEGER NOT NULL DEFAULT 1,
@@ -85,6 +88,13 @@ class Binding:
     fields: dict[str, str] = field(default_factory=dict)
     """角色 → 结构值点的**字段名**（契约 1.11）。不在表里的角色 = 整点标量。"""
 
+    display_name: str = ""
+    """可读显示名（契约 1.15，`H-282 §5`）。**可改、不进三元组** —— 推实时库时只进 `Paras.Des`，
+    点名仍是稳定键（实时库按点名精确查点，名字一改查询方就断）。空 = 不带说明。"""
+
+    status_on_delay_sec: int = 0
+    """检测状态报警的去抖时长（秒，契约 1.15，`C-67 §3.1`）。**0 = 不去抖**，不给缺省。"""
+
     def missing_required(self, required_roles: list[str]) -> list[str]:
         """声明里必填、而绑定里没给的那些角色。"""
         return [r for r in required_roles if r not in self.roles]
@@ -126,6 +136,15 @@ class BindingStore:
             self._conn.execute(
                 "ALTER TABLE bindings ADD COLUMN fields_json TEXT NOT NULL DEFAULT '{}'")
             logger.info("绑定表已补列 fields_json（老库升级；老绑定一律整点标量）")
+        if "display_name" not in have:
+            self._conn.execute(
+                "ALTER TABLE bindings ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+            logger.info("绑定表已补列 display_name（老库升级；老绑定一律无显示名）")
+        if "status_on_delay_sec" not in have:
+            # 补 0 = 不去抖：1.15 之前根本没有报警，0 就是它们一直以来的样子，不是替谁选了时长。
+            self._conn.execute(
+                "ALTER TABLE bindings ADD COLUMN status_on_delay_sec INTEGER NOT NULL DEFAULT 0")
+            logger.info("绑定表已补列 status_on_delay_sec（老库升级；老绑定一律不去抖）")
 
     def close(self) -> None:
         with self._lock:
@@ -157,6 +176,13 @@ class BindingStore:
                 raise ValueError(
                     f"绑定 {b.domain}/{b.binding} 的角色 {role} 字段名为空"
                     "（整点标量请不要放进 fields，空串不等于「不按字段」）")
+        delay = b.status_on_delay_sec
+        if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 0xFFFFFFFF:
+            # 上界是实时库 `OnDelaySec` 的 uint32；负数或越界传过去会被截成别的数，且不报错。
+            raise ValueError(
+                f"绑定 {b.domain}/{b.binding} 的去抖时长 {delay!r} 非法（须为 0~4294967295 的整数秒）")
+        if not isinstance(b.display_name, str):
+            raise ValueError(f"绑定 {b.domain}/{b.binding} 的显示名须为字符串")
         for k, v in b.params.items():
             # 只管形状（键非空、值是字符串），**语义一律不碰** —— 那是域的事。
             if not k or not isinstance(k, str):
@@ -168,18 +194,21 @@ class BindingStore:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO bindings(domain,binding,roles_json,params_json,data_origin,"
-                "interval_sec,window_sec,enabled,fields_json) "
-                "VALUES(?,?,?,?,?,?,?,?,?) "
+                "interval_sec,window_sec,enabled,fields_json,display_name,status_on_delay_sec) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(domain,binding) DO UPDATE SET "
                 "roles_json=excluded.roles_json, params_json=excluded.params_json, "
                 "fields_json=excluded.fields_json, "
                 "data_origin=excluded.data_origin, interval_sec=excluded.interval_sec, "
                 "window_sec=excluded.window_sec, enabled=excluded.enabled, "
+                "display_name=excluded.display_name, "
+                "status_on_delay_sec=excluded.status_on_delay_sec, "
                 "updated_at=datetime('now')",
                 (b.domain, b.binding, json.dumps(b.roles, ensure_ascii=False),
                  json.dumps(b.params, ensure_ascii=False), dataorigin.normalize(b.data_origin),
                  float(b.interval_sec), float(b.window_sec), 1 if b.enabled else 0,
-                 json.dumps(b.fields, ensure_ascii=False)),
+                 json.dumps(b.fields, ensure_ascii=False), b.display_name.strip(),
+                 b.status_on_delay_sec),
             )
             self._conn.commit()
 
@@ -231,4 +260,6 @@ def _to_binding(row: sqlite3.Row) -> Binding:
         window_sec=float(row["window_sec"]),
         enabled=bool(row["enabled"]),
         fields={k: str(v) for k, v in json.loads(row["fields_json"] or "{}").items()},
+        display_name=row["display_name"] or "",
+        status_on_delay_sec=int(row["status_on_delay_sec"] or 0),
     )

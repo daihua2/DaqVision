@@ -54,7 +54,7 @@ import logging
 import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -64,7 +64,7 @@ from .hsproto import daqcontract_pb2 as daq
 from .hsproto import historystore_pb2 as hs
 from .pointmap import PointRow, container_name
 from .quality import Quality
-from .types import Finding
+from .types import STATUS_ATTENTION, STATUS_DANGER, STATUS_WARNING, Finding
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,17 @@ FEATURE_SOURCE_IDENTITY = "identity-source-kind"
 CATEGORY_POINT = 12
 CATEGORY_LINK = 15      # 域
 CATEGORY_CHANNEL = 17   # 绑定
+
+#: 检测状态点的报警行：(词表词, 显示, 严重度)。严重度用实时库现成量表（OPC UA 1~1000），`AI-74 §4` 定；
+#: 「正常」「停机」不点名 ⇒ 不命中即 NR（`H-282 §3`：只打一条日志、不进事件流）。
+#: ★词表是契约（1.13），所有模块共用这一张表 —— 不是替模块发明语义。改严重度就是改对外约定，要发函。
+STATUS_ALARM_ROWS: tuple[tuple[str, str, int], ...] = (
+    (STATUS_ATTENTION, "注意", 300),     # Warn
+    (STATUS_WARNING, "警告", 600),       # MeAlarm
+    (STATUS_DANGER, "危险", 800),        # HiAlarm
+)
+#: 恢复态显示文本。空着的话界面上恢复那一行没有文字（`H-282 §3`）。
+STATUS_ALARM_NR_LABEL = "正常"
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,18 +150,61 @@ def value_type_to_varenum(value_type: str) -> int:
     return _VARENUM[value_type]
 
 
-def build_entity(row: PointRow, *, description: str = "") -> daq.EntityConfig:
+@dataclass(frozen=True, slots=True)
+class SnapshotExtras:
+    """快照里点行带不出来的东西：说明（`Paras.Des`）与报警配置（契约 1.15）。
+
+    由调度按绑定与域声明算好交来 —— 本模块不认识绑定表与域声明，只管摆进实体。
+    ★报警配置**每轮都要带**：整条去掉 `Alarm`（字段 14）会卸载该点的报警条件（`H-282 §4`）；
+      内容相同的重推按字节比、不重置当前态，所以每轮无脑带上是安全的。
+    """
+
+    binding_des: dict[tuple[str, str], str] = field(default_factory=dict)
+    """(域, 绑定) → 绑定实体的说明（显示名）。"""
+    point_des: dict[int, str] = field(default_factory=dict)
+    """localId → 点的说明。实时库报警描述取**点自己的** `Des`，不取绑定实体的（`H-282 §5`）。"""
+    alarms: dict[int, daq.AlarmConfig] = field(default_factory=dict)
+    """localId → 报警配置。"""
+
+
+def build_status_alarm(choices, on_delay_sec: int = 0) -> daq.AlarmConfig | None:
+    """检测状态点（`OutputSpec.role=status`）的状态报警（`AI-74 §5.2`）。本域不出任何报警档 ⇒ None。
+
+    ★字符串状态行按**逐字节相等**命中（`H-282 §1`），Lo 与 Hi 写同一个词 —— 写成不同的词，
+      后写的 Hi 会覆盖 Lo 且不报错。
+    ★`on_delay_sec=0` 不写这一格：未设置与设为 0 在实时库等价（都是不去抖）。
+    ★坏质量不经状态表、一律落 BAD（严重度 500、不去抖，`H-282 §2.1`）—— 这里管不着，由各域只在确实判不了时落码。
+    """
+    rows = [r for r in STATUS_ALARM_ROWS if r[0] in choices]
+    if not rows:
+        return None
+    alarm = daq.AlarmConfig()
+    st = alarm.State
+    st.NRLabel = STATUS_ALARM_NR_LABEL
+    for word, label, severity in rows:
+        item = st.States.add(StateKey=word, StateLabel=label, StateSeverity=severity)
+        item.StateLo.String = word
+        item.StateHi.String = word
+    if on_delay_sec:
+        st.OnDelaySec = on_delay_sec
+    return alarm
+
+
+def build_entity(row: PointRow, *, description: str = "",
+                 alarm: daq.AlarmConfig | None = None) -> daq.EntityConfig:
     """把一个结论点变成 hs 认得的实体配置。
 
     ★`CategoryId` 用 12（采集点）。真正让 hs 判定"这是采集标签点"的是 `Paras` 里的 `Acc`，
       不是类别号 —— 见 hs 侧 `parseEntity`。两处都给，是为了让点表里的类别列也对。
+    ★`Name` 恒为稳定键，**不放显示名**：实时库 8086 查询口按点名逐字节精确匹配，
+      报警事件的点名也取它（`H-282 §5`）。显示名只进 `Des`。
     """
     paras = {PARAS_ACC: value_type_to_varenum(row.value_type)}
     if row.unit:
         paras["Unit"] = row.unit
     if description:
         paras["Des"] = description
-    return daq.EntityConfig(
+    ent = daq.EntityConfig(
         Id=row.local_id,
         Name=row.name,
         CategoryId=CATEGORY_POINT,
@@ -159,9 +213,14 @@ def build_entity(row: PointRow, *, description: str = "") -> daq.EntityConfig:
         Paras=json.dumps(paras, ensure_ascii=False),
         Version="1",
     )
+    if alarm is not None:
+        ent.Alarm.CopyFrom(alarm)
+    return ent
 
 
-def build_container_entities(rows: list[PointRow]) -> list[tuple[int, daq.EntityConfig]]:
+def build_container_entities(rows: list[PointRow], *,
+                             binding_des: dict[tuple[str, str], str] | None = None,
+                             ) -> list[tuple[int, daq.EntityConfig]]:
     """由点行归纳出上级实体：每个域一个（族根 15），每个 (域, 绑定) 一个（族根 17）。
 
     → `[(categoryRootId, entity)]`，域在前、绑定在后，各按 localId 排。
@@ -169,7 +228,10 @@ def build_container_entities(rows: list[PointRow]) -> list[tuple[int, daq.Entity
       出自同一次读，不会出现"点指向一个本轮没推的上级"。没挂上级的行（号为 0）不产生实体。
     ★绑定实体 `ContainerId` = 域实体号：hs 由通道的 containerId 走到连接（`normalizedParentOf` ②）；
       域实体 `ContainerId` = 0，hs 由族根 15 合成最后一跳到我方身份 gid（同 ③）。
+    ★`binding_des` 里有的绑定实体带 `Paras={"Des": 显示名}`（契约 1.15，`H-282 §5`）；没有的不带 `Paras`，
+      与 1.14 逐字节相同。改 `Des` 只产生一次点表增量：号不变、历史不受影响。
     """
+    binding_des = binding_des or {}
     domains: dict[int, str] = {}
     bindings: dict[int, tuple[str, str, int]] = {}
     for r in rows:
@@ -180,9 +242,12 @@ def build_container_entities(rows: list[PointRow]) -> list[tuple[int, daq.Entity
     out = [(CATEGORY_LINK, daq.EntityConfig(
         Id=i, Name=container_name(d), CategoryId=CATEGORY_LINK, Version="1"))
         for i, d in sorted(domains.items())]
-    out += [(CATEGORY_CHANNEL, daq.EntityConfig(
-        Id=i, Name=container_name(d, b), CategoryId=CATEGORY_CHANNEL, ContainerId=did, Version="1"))
-        for i, (d, b, did) in sorted(bindings.items())]
+    for i, (d, b, did) in sorted(bindings.items()):
+        ent = daq.EntityConfig(
+            Id=i, Name=container_name(d, b), CategoryId=CATEGORY_CHANNEL, ContainerId=did, Version="1")
+        if binding_des.get((d, b)):
+            ent.Paras = json.dumps({"Des": binding_des[(d, b)]}, ensure_ascii=False)
+        out.append((CATEGORY_CHANNEL, ent))
     return out
 
 
@@ -205,7 +270,8 @@ def build_source_identity_frame(info: SourceIdentityInfo, *,
 
 
 def build_snapshot_frames(rows: list[PointRow], *,
-                          identity: SourceIdentityInfo | None = None) -> list[hs.EntityConfigPush]:
+                          identity: SourceIdentityInfo | None = None,
+                          extras: SnapshotExtras | None = None) -> list[hs.EntityConfigPush]:
     """一整轮快照的帧序列（一条流的全部内容）。
 
     ★**必须全量**：`SNAPSHOT_END` 是原子提交，**本轮未出现的旧实体一律删除** ——
@@ -218,14 +284,17 @@ def build_snapshot_frames(rows: list[PointRow], *,
     ★每帧 PUT 都带 `categoryRootId`（present）：hs 按它判这一跳是通道还是连接，
       AICloud 按 presence 决定要不要退回自己的判据（`historystore.proto` 该字段注释）。
     """
+    extras = extras or SnapshotExtras()
     frames = [build_source_identity_frame(identity)] if identity is not None else []
     frames.append(hs.EntityConfigPush(op=hs.EntityConfigPush.SNAPSHOT_BEGIN))
-    for root, ent in build_container_entities(rows):
+    for root, ent in build_container_entities(rows, binding_des=extras.binding_des):
         frames.append(hs.EntityConfigPush(
             op=hs.EntityConfigPush.PUT, id=ent.Id, entity=ent, categoryRootId=root))
     for row in rows:
+        ent = build_entity(row, description=extras.point_des.get(row.local_id, ""),
+                           alarm=extras.alarms.get(row.local_id))
         frames.append(hs.EntityConfigPush(
-            op=hs.EntityConfigPush.PUT, id=row.local_id, entity=build_entity(row),
+            op=hs.EntityConfigPush.PUT, id=row.local_id, entity=ent,
             categoryRootId=CATEGORY_POINT))
     frames.append(hs.EntityConfigPush(op=hs.EntityConfigPush.SNAPSHOT_END))
     return frames
@@ -430,16 +499,18 @@ class HsClient:
             return None
         return info
 
-    def snapshot_frames(self, rows: list[PointRow]) -> list[hs.EntityConfigPush]:
+    def snapshot_frames(self, rows: list[PointRow], *,
+                        extras: SnapshotExtras | None = None) -> list[hs.EntityConfigPush]:
         """本次推送的完整帧序列：闸门判完的身份帧（可能没有）+ 全量快照。"""
-        return build_snapshot_frames(rows, identity=self.source_identity_to_send())
+        return build_snapshot_frames(rows, identity=self.source_identity_to_send(), extras=extras)
 
-    def push_snapshot(self, rows: list[PointRow], timeout: float = 60.0) -> int:
+    def push_snapshot(self, rows: list[PointRow], timeout: float = 60.0, *,
+                      extras: SnapshotExtras | None = None) -> int:
         """把**全部**结论点作为一份快照推上去。返回被接收的帧数。
 
         串行化：同一 guid 同一时刻只允许一条流（并发会互相踢，见模块头）。
         """
-        frames = self.snapshot_frames(rows)
+        frames = self.snapshot_frames(rows, extras=extras)
         with self._push_lock:
             res = self._write_channel().stream_unary(
                 f"{SERVICE}/PushEntityConfigs",
@@ -447,8 +518,10 @@ class HsClient:
                 response_deserializer=hs.PushEntityConfigsRes.FromString,
             )(iter(frames), timeout=timeout)
         with_identity = bool(frames) and frames[0].op == hs.EntityConfigPush.SOURCE_IDENTITY
-        logger.info("结论点快照已推送：%d 个点（另 %d 个上级实体），accepted=%d%s", len(rows),
-                    sum(f.op == hs.EntityConfigPush.PUT for f in frames) - len(rows), res.accepted,
+        logger.info("结论点快照已推送：%d 个点（另 %d 个上级实体，%d 个点带报警配置），accepted=%d%s",
+                    len(rows), sum(f.op == hs.EntityConfigPush.PUT for f in frames) - len(rows),
+                    sum(f.op == hs.EntityConfigPush.PUT and f.entity.HasField("Alarm") for f in frames),
+                    res.accepted,
                     "（含自报身份 SOURCE_IDENTITY）" if with_identity else "")
         return res.accepted
 

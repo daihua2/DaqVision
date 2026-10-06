@@ -24,12 +24,13 @@ from .domains import LoadedDomain
 from .logstore import LogFilter, LogLevel, LogStore
 from .pointmap import default_point_name
 from .quality import Quality
+from .types import ROLE_STATUS
 from . import structbind
 
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.14"
+PROTO_VERSION = "1.15"
 
 
 def _ts(dt: datetime) -> object:
@@ -167,7 +168,8 @@ class ApiService(WorkbenchApiMixin):
     def _to_pb_binding(self, b: Binding) -> pb.Binding:
         out = pb.Binding(domain=b.domain, binding=b.binding,
                          interval_sec=b.interval_sec, window_sec=b.window_sec,
-                         enabled=b.enabled, data_origin=b.data_origin)
+                         enabled=b.enabled, data_origin=b.data_origin,
+                         display_name=b.display_name, status_on_delay_sec=b.status_on_delay_sec)
         for role, gid in b.roles.items():
             out.roles[role] = gid
         for role, fname in b.fields.items():
@@ -217,10 +219,16 @@ class ApiService(WorkbenchApiMixin):
             data_origin=b.data_origin,
             interval_sec=b.interval_sec or 60.0,
             window_sec=b.window_sec or 60.0,
-            enabled=b.enabled, fields=dict(b.role_fields))
+            enabled=b.enabled, fields=dict(b.role_fields),
+            display_name=b.display_name, status_on_delay_sec=b.status_on_delay_sec)
         why = _undeclared(nb, loaded)
         if why:
             return pb.PutBindingReply(ok=False, message=why)
+        if nb.status_on_delay_sec and not any(o.role == ROLE_STATUS for o in loaded.declaration.outputs):
+            # 同 `_undeclared`：收下不用，配置者以为去抖配上了。
+            return pb.PutBindingReply(
+                ok=False, message=f"绑定 {nb.domain}/{nb.binding} 未保存：模块没有检测状态，"
+                                  f"去抖时长 {nb.status_on_delay_sec} 秒无处可用（请留空）")
         if nb.fields:
             why = self._check_fields(nb, loaded)
             if why:

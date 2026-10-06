@@ -11,7 +11,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from aiintegration.hsclient import (
-    PARAS_ACC, build_entity, build_snapshot_frames, build_vqt, value_type_to_varenum,
+    PARAS_ACC, SnapshotExtras, build_entity, build_snapshot_frames, build_status_alarm, build_vqt,
+    value_type_to_varenum,
 )
 from aiintegration.hsproto import historystore_pb2 as hs
 from aiintegration.pointmap import PointRow
@@ -328,3 +329,76 @@ class TestSourceIdentity(unittest.TestCase):
             self.assertEqual(c.snapshot_frames([row()])[0].op,
                              hs.EntityConfigPush.SOURCE_IDENTITY)
         self.assertEqual(self.pings, 3)
+
+
+class TestStatusAlarm(unittest.TestCase):
+    """契约 1.15：检测状态点的状态报警与说明（`AI-74 §5.2`、`H-282`）。"""
+
+    VIB = ("normal", "attention", "warning", "danger", "stopped")
+
+    def test_三档各一行_词即上下界_严重度照AI74(self):
+        a = build_status_alarm(self.VIB)
+        rows = [(i.StateKey, i.StateLo.String, i.StateHi.String, i.StateLabel, i.StateSeverity)
+                for i in a.State.States]
+        self.assertEqual(rows, [("attention", "attention", "attention", "注意", 300),
+                                ("warning", "warning", "warning", "警告", 600),
+                                ("danger", "danger", "danger", "危险", 800)])
+        self.assertEqual(a.State.NRLabel, "正常", "空着则界面恢复那一行没有文字（H-282 §3）")
+        self.assertFalse(a.HasField("Limit"), "两支都给实时库判 NC、不求值")
+
+    def test_正常与停机不点名(self):
+        keys = {i.StateKey for i in build_status_alarm(self.VIB).State.States}
+        self.assertFalse(keys & {"normal", "stopped"}, "点名正常 = 正常运行变成一条持续报警")
+
+    def test_只列本域会出的档(self):
+        a = build_status_alarm(("normal", "warning", "danger"))
+        self.assertEqual([i.StateKey for i in a.State.States], ["warning", "danger"])
+
+    def test_一档都不出就不配(self):
+        self.assertIsNone(build_status_alarm(("normal", "stopped")))
+
+    def test_去抖0不写_非0照写(self):
+        self.assertFalse(build_status_alarm(self.VIB).State.HasField("OnDelaySec"))
+        self.assertEqual(build_status_alarm(self.VIB, 30).State.OnDelaySec, 30)
+        self.assertFalse(build_status_alarm(self.VIB, 30).State.HasField("OffDelaySec"))
+
+    def test_同内容两次构造字节相同(self):
+        """★实时库按序列化字节比，相同才不重置当前态（`H-282 §4`）。"""
+        self.assertEqual(build_status_alarm(self.VIB, 30).SerializeToString(),
+                         build_status_alarm(self.VIB, 30).SerializeToString())
+
+
+class TestSnapshotExtras(unittest.TestCase):
+    ROWS = [PointRow("vibration", "s1", "status", 1000, "AI.vibration.s1.status", "", "string", 2002, 2001),
+            PointRow("vibration", "s1", "vel_max", 1001, "AI.vibration.s1.vel_max", "mm/s", "float", 2002, 2001)]
+
+    def puts(self, extras=None):
+        return {x.id: x.entity for x in build_snapshot_frames(self.ROWS, extras=extras)
+                if x.op == hs.EntityConfigPush.PUT}
+
+    def extras(self):
+        return SnapshotExtras(binding_des={("vibration", "s1"): "1#泵 驱动端"},
+                              point_des={1000: "1#泵 驱动端·检测状态"},
+                              alarms={1000: build_status_alarm(TestStatusAlarm.VIB, 30)})
+
+    def test_报警只挂在给了的点上(self):
+        p = self.puts(self.extras())
+        self.assertEqual(p[1000].Alarm.State.OnDelaySec, 30)
+        self.assertFalse(p[1001].HasField("Alarm"))
+        self.assertFalse(p[2002].HasField("Alarm"))
+
+    def test_显示名进Des_点名不动(self):
+        import json
+        p = self.puts(self.extras())
+        self.assertEqual(json.loads(p[2002].Paras), {"Des": "1#泵 驱动端"})
+        self.assertEqual(json.loads(p[1000].Paras)["Des"], "1#泵 驱动端·检测状态")
+        self.assertNotIn("Des", json.loads(p[1001].Paras))
+        self.assertEqual((p[2002].Name, p[1000].Name), ("AI.vibration.s1", "AI.vibration.s1.status"),
+                         "实时库 8086 按点名精确查点，名字随显示名变查询方就断（H-282 §5）")
+        self.assertEqual(p[2001].Paras, "", "域实体不带说明")
+
+    def test_不给extras与1点14逐字节相同(self):
+        self.assertEqual(build_snapshot_frames(self.ROWS),
+                         build_snapshot_frames(self.ROWS, extras=SnapshotExtras()))
+        self.assertEqual(self.puts()[2002].Paras, "")
+        self.assertFalse(self.puts()[1000].HasField("Alarm"))

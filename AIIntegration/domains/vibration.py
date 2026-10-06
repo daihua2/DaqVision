@@ -34,7 +34,13 @@
 合成规则（`_combine_status`）：
 1. 停机 ⇒ 停机；
 2. 已启用的部分里**算得出的取最高档**；只要高于「正常」就照报 —— 另一部分算不出不能把它压下去；
-3. 算得出的都是「正常」、却有已启用的部分算不出 ⇒ **落那部分的坏码，不报正常**（没采基线时不说「正常」）。
+3. ★**自训算不出（没采基线、基线读不懂、本帧与基线不可比）⇒ 按经典判级出状态**，好质量，判据摘要写明
+   「只按经典判」；采到基线后自动回到第 2 条。只启用自训的绑定同样借经典判级，但要求判级参数齐全
+   （借来的只是状态，经典那几个结论点仍不写）。
+   由来：实时库对**任何**坏码都落 BAD 报警（严重度 500、不去抖，`H-282 §2.1`）；按原第 3 条「没基线就落坏码」，
+   采到基线之前会一直挂着一条报警。经典算出来的是真结论、只是少了自训那一半，且已写明 ——
+   这不是写一个假的「正常」（2026-10-06 hs 用户定、AICloud `C-67 §4` 同意、我方用户同日接受）；
+4. 经典也算不出（判级参数不全、没取到数）⇒ 落经典的坏码，**不报正常** —— 这时确实判不了，挂报警是对的。
 
 两部分**不一致**时判据摘要写明怎么读（`_disagreement`）：国标偏大而相对自身没变 ⇒ 振动可能长期偏高、
 基线或采于异常状态、或判级参数需核对；国标正常而偏离自身常态 ⇒ 早期变化。
@@ -168,7 +174,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.0.0"
+    version = "1.1.0"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -260,7 +266,8 @@ class Vibration(Domain):
                 OutputSpec(key="status", display="检测状态", value_type="string",
                            role=ROLE_STATUS, stop_behavior=STOP_LITERAL,
                            description="经典：A、B → 正常，C → 警告，D → 危险；AI 自训：速度偏离 ≥ 3 → 注意，否则正常；"
-                                       "两者都用取较高档。停机 → 停机。算得出的都是正常、却有启用的部分算不出时落坏质量码，不报正常",
+                                       "两者都用取较高档。停机 → 停机。自训算不出（如未采基线）时按经典判、判据摘要注明；"
+                                       "经典也算不出时落坏质量码，不报正常",
                            choices=(STATUS_NORMAL, STATUS_ATTENTION, STATUS_WARNING, STATUS_DANGER,
                                     STATUS_STOPPED),
                            choice_displays=("正常", "注意", "警告", "危险", STOPPED)),
@@ -478,6 +485,14 @@ class Vibration(Domain):
         else:
             parts.append("AI 自训未启用")
 
+        # ③' 自训算不出 ⇒ 状态按经典判（§0.3 第 3 条，`H-282 §2.2`）
+        if baseline_on and b_level is None:
+            if not classic:
+                c_level, c_bad, note = _classic_fallback(frame.params, vel_max)
+                parts.append(note)
+            elif c_level is not None:
+                parts.append("★AI 自训部分本次算不出，检测状态只按经典算法判；采到可用基线后自动按两者合成")
+
         # ④ 检测状态与两部分是否一致
         level, q = _combine_status(c_level, c_bad, b_level, b_bad)
         out.append(Finding(key="status", value=level, quality=q, t=t))
@@ -568,15 +583,33 @@ def _algos(params: dict[str, str]) -> frozenset[str] | None:
 
 def _combine_status(c_level: str | None, c_bad: Quality | None,
                     b_level: str | None, b_bad: Quality | None) -> tuple[str | None, Quality]:
-    """§0.3：算得出的取最高档；高于正常就照报；全是正常却有启用部分算不出 ⇒ 落那部分的码。"""
+    """§0.3：算得出的取最高档、高于正常就照报；经典算不出 ⇒ 落经典的码；
+    经典算得出（含只启用自训时借来的判级）⇒ 自训算不出不拦它（`H-282 §2.2`）。"""
     levels = [lv for lv in (c_level, b_level) if lv is not None]
     top = max(levels, key=lambda lv: _RANK[lv]) if levels else None
     if top is not None and _RANK[top] > _RANK[STATUS_NORMAL]:
         return top, Quality.OK
-    missing = c_bad or b_bad                 # 经典的码优先：它不依赖工件，算不出多半是配置问题
-    if missing is not None:
-        return None, missing
-    return top, Quality.OK
+    if c_bad is not None:                    # 经典的码优先：它不依赖工件，算不出多半是配置问题
+        return None, c_bad
+    if top is not None:
+        return top, Quality.OK
+    assert b_bad is not None, "两部分都没给档位，算不出的那部分必须给码"
+    return None, b_bad
+
+
+def _classic_fallback(params: dict[str, str], vel_max: float
+                      ) -> tuple[str | None, Quality | None, str]:
+    """只启用自训、自训又算不出时，借经典判级出状态。返回 `(档位, 算不出时的码, 判据摘要)`。
+
+    ★借的只是状态：经典那几个结论点**没启用就不写**（§0.2）。判级参数不全就不借 ——
+      码返回 None，让状态落自训那部分的码（那才是这条绑定缺的东西）。
+    """
+    limits, why, basis, _ = _grading(params)
+    if why:
+        return None, None, f"无可用基线，判级参数也不全（{why}），检测状态无从借经典判"
+    zone, _, _ = _classify(vel_max, limits)
+    return _ZONE_STATUS[zone], None, (f"★无可用基线：检测状态暂借经典算法判（{basis} 判为 {zone} 区；"
+                                      "经典未启用，其结论点不写）；采到基线后自动改按 AI 自训")
 
 
 def _disagreement(c_level: str | None, b_level: str | None) -> str:

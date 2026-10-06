@@ -2,7 +2,8 @@
 
 两部分各自的判据在 `test_domain_vibration_classic.py` / `test_domain_vibration_selftrained.py`。这里钉：
 1. **启用算法**必填、无缺省；没填整组落 `CONFIG_INCOMPLETE`，不猜；
-2. **检测状态怎么合**：高于正常就照报，另一部分算不出压不下去；全是正常却有启用部分算不出 ⇒ 不报正常；
+2. **检测状态怎么合**：高于正常就照报，另一部分算不出压不下去；★自训算不出（没采基线）⇒ 按经典出状态、
+   摘要写明（`H-282 §2.2`：坏码在实时库一律落 BAD 报警）；经典也算不出 ⇒ 落码，不报正常；
 3. **两部分不一致时**判据摘要写明怎么读；
 4. ★**采基线先用国标查**：所选时段有 C / D 区的帧就拒采 —— 否则把异常当常态；
 5. **按绑定算要不要基线**（契约 1.14 `Binding.requires_artifacts`）。
@@ -106,6 +107,24 @@ class TestRequiredArtifacts(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_去抖与显示名经PutBinding存得下(self):
+        """契约 1.15：本模块有检测状态，去抖非 0 照收（没有检测状态的模块拒，见 `test_api`）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BindingStore(Path(tmp) / "b.db")
+            try:
+                svc = ApiService(guid="g", version="0", logstore=LogStore(capacity=10),
+                                 domains={"vibration": _load()}, bindings=store)
+                b = pb.Binding(domain="vibration", binding="s1", enabled=True,
+                               display_name="1#泵 驱动端", status_on_delay_sec=120)
+                b.roles["x_vel"] = 810
+                b.params["algorithms"] = "classic"
+                r = svc.PutBinding(pb.PutBindingRequest(binding=b), None)
+                self.assertTrue(r.ok, r.message)
+                got = store.get("vibration", "s1")
+                self.assertEqual((got.display_name, got.status_on_delay_sec), ("1#泵 驱动端", 120))
+            finally:
+                store.close()
+
     def test_域按绑定回的超出声明就退回声明(self):
         class D(Domain):
             key, display, version = "d", "d", "1"
@@ -178,10 +197,27 @@ class TestCombinedStatus(unittest.TestCase):
         s = self._out(3.0, artifact=False)["status"]
         self.assertEqual((s.value, s.quality), ("warning", Quality.OK))
 
-    def test_没基线时国标正常_不报正常(self):
-        s = self._out(1.0, artifact=False)["status"]
-        self.assertIs(s.quality, Quality.MODEL_NOT_LOADED)
+    def test_没基线时按经典出状态_摘要写明(self):
+        """★`H-282 §2.2`：落坏码 ⇒ 实时库挂一条严重度 500 的 BAD 报警，直到采到基线。"""
+        out = self._out(1.0, artifact=False)
+        s = out["status"]
+        self.assertEqual((s.value, s.quality), ("normal", Quality.OK))
+        self.assertIs(out["vel_z_max"].quality, Quality.MODEL_NOT_LOADED, "自训那几个点照旧落码")
+        self.assertIn("只按经典算法判", out["evidence"].value)
+
+    def test_基线与本帧不可比时同样按经典(self):
+        out = _by_key(self.d.infer(dataclasses.replace(
+            _frame(BOTH, y_vel=1.0), artifacts={"baseline": self.art})))   # 基线只采了 x
+        self.assertIs(out["vel_z_max"].quality, Quality.INSUFFICIENT_SAMPLES)
+        self.assertEqual((out["status"].value, out["status"].quality), ("normal", Quality.OK))
+
+    def test_没基线且国标配置不全_落经典的码(self):
+        s = self._out(1.0, params={**BOTH, "vel_is_rms": "false"}, artifact=False)["status"]
+        self.assertIs(s.quality, Quality.CONFIG_INCOMPLETE)
         self.assertIsNone(s.value)
+
+    def test_有基线时摘要不说只按经典(self):
+        self.assertNotIn("只按经典", self._out(1.0)["evidence"].value)
 
     def test_国标配置不全时自训注意照报(self):
         s = self._out(1.35, params={**BOTH, "vel_is_rms": "false"})["status"]
@@ -195,6 +231,46 @@ class TestCombinedStatus(unittest.TestCase):
     def test_停机写停机(self):
         out = self._out(0.1, params={**BOTH, "stop_threshold": "0.3"})
         self.assertEqual(out["status"].value, "stopped")
+
+
+class TestBaselineOnlyFallback(unittest.TestCase):
+    """只启用自训、还没有基线：判级参数齐就借经典出状态，经典的结论点仍不写（`H-282 §2.2`，我方用户 10-06 定）。"""
+
+    ONLY = {**BOTH, "algorithms": "baseline"}
+    CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
+                    "axial_ratio", "direction_hint")
+
+    def setUp(self):
+        self.d = _load().instance
+
+    def _out(self, vel, params=None):
+        return _by_key(self.d.infer(_frame(params or self.ONLY, x_vel=vel)))
+
+    def test_参数齐_借经典出状态(self):
+        for vel, want in ((1.0, "normal"), (3.0, "warning"), (5.0, "danger")):
+            s = self._out(vel)["status"]
+            self.assertEqual((s.value, s.quality), (want, Quality.OK), vel)
+
+    def test_借来的只是状态_经典结论点不写(self):
+        out = self._out(3.0)
+        for k in self.CLASSIC_KEYS:
+            self.assertNotIn(k, out, k)
+        self.assertIn("暂借经典算法判", out["evidence"].value)
+        self.assertIn("C 区", out["evidence"].value)
+
+    def test_参数不全_落自训的码(self):
+        out = self._out(3.0, {"algorithms": "baseline", "axialAxis": "z"})
+        s = out["status"]
+        self.assertIs(s.quality, Quality.MODEL_NOT_LOADED)
+        self.assertIsNone(s.value)
+        self.assertIn("判级参数也不全", out["evidence"].value)
+
+    def test_有基线就按自训_不借经典(self):
+        art = _baseline(self.d, self.ONLY, (0.9, 1.0, 1.1, 1.05, 0.95))
+        out = _by_key(self.d.infer(dataclasses.replace(_frame(self.ONLY, x_vel=3.0),
+                                                       artifacts={"baseline": art})))
+        self.assertEqual(out["status"].value, "attention", "国标 C 区不该进只启用自训的状态")
+        self.assertNotIn("借经典", out["evidence"].value)
 
 
 class TestDisagreement(unittest.TestCase):

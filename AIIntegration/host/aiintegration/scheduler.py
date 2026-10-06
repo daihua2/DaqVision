@@ -27,10 +27,10 @@ from datetime import datetime, timedelta, timezone
 from .bindings import Binding, BindingStore
 from .domains import LoadedDomain
 from .fetch import Fetcher
-from .hsclient import HsClient
+from .hsclient import HsClient, SnapshotExtras, build_status_alarm
 from .pointmap import PointMap, default_point_name
 from .runner import run_domain
-from .types import Finding
+from .types import ROLE_STATUS, Finding
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,11 @@ MAX_BACKOFF_SEC = 60.0
 #:   右端那几秒会"少一块"，看着像丢样。**不丢数据**，只是取早了。
 #: 只用于在线节拍：回溯判别与训练取的是早已落盘的历史片段，不平移。
 STRUCT_RIGHT_MARGIN_SEC = 5.0
+
+#: 实时库判来源失联的静默时长（秒，`H-282 §2.3`）：配置流没连着（我方推完即关）、且这么久没收到任何 VQT
+#: ⇒ 给本来源**每个点**落一笔「服务退出」坏值，挂了报警的检测状态点各报一条 BAD。
+#: ⇒ 约束：来源下至少一条绑定的写入间隔要小于它，否则每个周期误判一次失联。
+HS_OUTAGE_SEC = 300.0
 
 
 def aligned_tick(now: datetime, interval_sec: float) -> datetime:
@@ -147,9 +152,46 @@ class Scheduler:
                     name=default_point_name(b.domain, b.binding, o.key),
                     unit=o.unit, value_type=o.value_type)
         rows = self._points.all()
-        self._client.push_snapshot(rows)
+        self._client.push_snapshot(rows, extras=self._snapshot_extras())
         self._last_snapshot_mono = time.monotonic()
         return len(rows)
+
+    def _snapshot_extras(self) -> SnapshotExtras:
+        """说明与报警配置（契约 1.15）。按**绑定表里现有的**绑定算，启用与否都算 ——
+        停用只是暂停计算，不该让报警条件随启停卸了又装；**删了**的绑定没有这些（不再诊断，报警条件随之卸载）。
+
+        ★检测状态点的报警由骨架按词表统一生成（`AI-74 §5.2`），域不写报警 —— 域不知道实时库的存在。
+        """
+        binding_des: dict[tuple[str, str], str] = {}
+        point_des: dict[int, str] = {}
+        alarms = {}
+        intervals = []
+        for b in self._bindings.list():
+            name = b.display_name.strip()
+            if name:
+                binding_des[(b.domain, b.binding)] = name
+            loaded = self._domains.get(b.domain)
+            if loaded is None:
+                continue
+            for o in loaded.declaration.outputs:
+                if o.role != ROLE_STATUS:
+                    continue
+                lid = self._points.local_id_of(b.domain, b.binding, o.key)
+                if lid is None:
+                    continue
+                alarm = build_status_alarm(o.choices, b.status_on_delay_sec)
+                if alarm is not None:
+                    alarms[lid] = alarm
+                    if b.enabled:
+                        intervals.append(b.interval_sec)
+                if name:
+                    point_des[lid] = f"{name}·{o.display}"
+        if intervals and min(intervals) >= HS_OUTAGE_SEC:
+            # ★不拒、只吵：间隔是按设备定的，拦下来不对；但后果（每周期每个状态点一条 BAD）要让现场看见。
+            logger.warning("所有带检测状态报警的绑定写入间隔都 ≥ %.0f 秒（最短 %.0f 秒）—— 实时库会判我方失联、"
+                           "给每个检测状态点各报一条 BAD（H-282 §2.3）。请至少把一条绑定的间隔调到 %.0f 秒以内",
+                           HS_OUTAGE_SEC, min(intervals), HS_OUTAGE_SEC)
+        return SnapshotExtras(binding_des=binding_des, point_des=point_des, alarms=alarms)
 
     def _warn_stateless_once(self) -> None:
         """声明了 `stateful` 的域，却没接状态存放处 —— 吵一句，每个域只吵一次。

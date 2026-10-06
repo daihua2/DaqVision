@@ -21,7 +21,7 @@ class FakeClient:
         self.snapshots = 0
         self.fail_push = False
 
-    def push_snapshot(self, rows, timeout=60.0):
+    def push_snapshot(self, rows, timeout=60.0, *, extras=None):
         if self.fail_push:
             raise RuntimeError("推快照失败（连接还没好）")
         self.snapshots += 1
