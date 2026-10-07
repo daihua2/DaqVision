@@ -1661,5 +1661,5 @@ AICloud `C-72`：按 `AI-76 §5.1` 在 khb 上实跑采基线（标注 UTC 06:41
 
 ### 33.3 仍待办
 
-- 回函 `AI-78`（含时间铁律 §2.1）与契约 1.16 待用户过目后投；部署待授权（`trainer.py`、`service.py`、`workbench.py`、`api.py`、`types.py`、`domains/vibration.py`），先备份；
+- 回函 `AI-78`（含时间铁律 §2.1）与契约 1.16 **已于 UTC 08:22 投出**，三份两端 sha256 一致；部署待授权（`trainer.py`、`service.py`、`workbench.py`、`api.py`、`types.py`、`domains/vibration.py`），先备份；
 - ★khb 仿真数据在 D 区，修好后采基线仍会被国标核查**按设计拒采**（`AI-78 §5`）；要走通「采成 → 人点启用」须有 A / B 区数据。
