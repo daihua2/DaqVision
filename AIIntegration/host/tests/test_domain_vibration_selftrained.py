@@ -161,6 +161,18 @@ class TestDeviation(unittest.TestCase):
             f = dataclasses.replace(f, artifacts={"baseline": self.art})
         return _by_key(self.d.infer(f))
 
+    def test_判据摘要只说基线多久以前采的不写绝对时刻(self):
+        # ★铁律：后台存 UTC、前端按当地时间显示。判据摘要每拍进实时库、平台原样照显 ⇒ 不许夹绝对时刻
+        #   （原先写的是截掉时区的 UTC「2026-09-17T08:00」，人会读错 8 小时）。
+        later = T0 + timedelta(hours=3)
+        ok = lambda v: [Sample(t=later, value=v, quality=Quality.OK, status_code=1)]
+        f = Frame(domain="vibration", binding="dev1", t_start=later - timedelta(seconds=60), t_end=later,
+                  channels={"x_vel": ok(1.0), "z_vel": ok(0.5)}, params=dict(PARAMS),
+                  artifacts={"baseline": self.art})
+        ev = _by_key(self.d.infer(f))["evidence"].value
+        self.assertIn("基线采自约 3 小时前", ev)
+        self.assertNotRegex(ev, r"\d{4}-\d{2}-\d{2}", "判据摘要里夹了绝对日期")
+
     def test_没有基线时整组落MODEL_NOT_LOADED(self):
         out = self._infer(artifact=False, x_vel=3.0)
         for k in ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score"):

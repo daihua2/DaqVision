@@ -437,7 +437,7 @@ class Workbench:
             raise WorkbenchError("标注必须有标签 —— 空标签的标注在训练里是噪声，不是'待定'")
         a, b = _us(t_from, "t_from"), _us(t_to, "t_to")
         if b <= a:
-            raise WorkbenchError(f"标注时间区间倒挂或为零长: {t_from} → {t_to}")
+            raise WorkbenchError("标注时间区间倒挂或为零长：起点须早于终点")
         with self._lock:
             if annotation_id is None:
                 cur = self._conn.execute(
@@ -465,7 +465,7 @@ class Workbench:
             raise WorkbenchError("annotate_range 至少要给一个对象")
         a, b = _us(t_from, "t_from"), _us(t_to, "t_to")
         if b <= a:
-            raise WorkbenchError(f"时间区间倒挂或为零长: {t_from} → {t_to}")
+            raise WorkbenchError("时间区间倒挂或为零长：起点须早于终点")
         if not label:
             raise WorkbenchError("批量标注必须有标签")
         ids: list[int] = []
@@ -930,7 +930,7 @@ class Workbench:
                     note: str = "") -> int:
         a, b = _us(t_from, "t_from"), _us(t_to, "t_to")
         if b <= a:
-            raise WorkbenchError(f"片段时间区间倒挂或为零长: {t_from} → {t_to}")
+            raise WorkbenchError("片段时间区间倒挂或为零长：起点须早于终点")
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO segments(domain,binding,t_from_us,t_to_us,name,source,point_count,note)"

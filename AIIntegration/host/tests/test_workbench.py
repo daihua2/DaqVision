@@ -62,8 +62,10 @@ class TestAnnotations(WbBase):
 
     def test_区间倒挂或零长被拒(self):
         for a, b in ((T0 + timedelta(hours=1), T0), (T0, T0)):
-            with self.assertRaises(WorkbenchError):
+            with self.assertRaises(WorkbenchError) as c:
                 self.wb.put_annotation(domain="vib", binding="d", label="x", t_from=a, t_to=b)
+            # ★报错界面原样照显、前端换不了里面的时区 ⇒ 不回显绝对时刻（时间铁律）
+            self.assertNotRegex(str(c.exception), r"\d{4}-\d{2}-\d{2}")
 
     def test_空标签被拒(self):
         # 空标签的标注在训练里是噪声，不是"待定"。

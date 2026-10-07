@@ -18,6 +18,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent import futures
@@ -103,13 +104,25 @@ def source_identity_info(cfg: Config, *, domain_count: int) -> SourceIdentityInf
     )
 
 
+def console_formatter() -> logging.Formatter:
+    """控制台日志的格式。★时刻一律 **UTC**、ISO 8601 带 `Z`（如 `2026-10-07T01:06:04.637Z`）。
+
+    铁律：后台处理与存储一律 UTC，当地时间只在前端显示。`%(asctime)s` 缺省按**本地时区**、又不带时区 ——
+    现场机器在北京时间，日志里的「09:06:04」与实时库、契约里的 UTC 差 8 小时却看不出来。
+    （journald 自己在行首另加一个本机时间戳，那是 journalctl 的显示，不归我们管。）
+    """
+    fmt = logging.Formatter("%(asctime)s.%(msecs)03dZ %(levelname)-7s %(name)s %(message)s",
+                            datefmt="%Y-%m-%dT%H:%M:%S")
+    fmt.converter = time.gmtime
+    return fmt
+
+
 def _setup_logging(store: LogStore) -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     # 控制台（systemd 收走进 journal）
     console = logging.StreamHandler(sys.stderr)
-    console.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-7s %(name)s %(message)s"))
+    console.setFormatter(console_formatter())
     root.addHandler(console)
     # ★同时喂给 LogStore：SubscribeLogs / QueryLogs 两口读的就是它。
     #   做成 handler 而不是让各处自己调 append —— 那样一定会漏，

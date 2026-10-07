@@ -184,3 +184,28 @@ class TestHttpApi(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConsoleLogTime(unittest.TestCase):
+    """★铁律：后台一律 UTC。控制台日志的时刻曾是 `%(asctime)s` 缺省的**本地时间、不带时区**。"""
+
+    def test_日志时刻是UTC且带Z(self):
+        import logging
+        import time as _time
+
+        from aiintegration.service import console_formatter
+        rec = logging.LogRecord("x", logging.INFO, __file__, 1, "消息", None, None)
+        rec.created, rec.msecs = 0.0, 0.0
+        # 把本进程时区切到北京时间（现场就是）：本地时区不该漏进日志
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "Asia/Shanghai"
+        _time.tzset()
+        try:
+            line = console_formatter().format(rec)
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            _time.tzset()
+        self.assertTrue(line.startswith("1970-01-01T00:00:00.000Z "), line)

@@ -300,6 +300,22 @@ class TestBaselineIsoCheck(unittest.TestCase):
         self.assertIn("把异常当常态", msg)
         self.assertIn("3.000", msg)
 
+    def test_拒采原因只说相对位置不写绝对时刻(self):
+        # ★铁律：后台存 UTC、前端按当地时间显示。这句话界面原样照显、前端换不了时区 ⇒ 不许夹绝对时刻。
+        start = T0 - timedelta(minutes=5)
+        items = tuple(
+            LabeledFrame(frame=dataclasses.replace(
+                _frame(BOTH, x_vel=v), t_start=start + timedelta(minutes=k),
+                t_end=start + timedelta(minutes=k + 1)), label="正常", sample_id=7)
+            for k, v in enumerate((1.0, 1.0, 3.0, 1.0, 1.0)))      # 第 3 窗落 C 区
+        with self.assertRaises(ValueError) as cm:
+            self.d.train(Dataset(domain="vibration", binding="dev1", name="基线", items=items),
+                         ProgressSink())
+        msg = str(cm.exception)
+        self.assertIn("在该段开始后约 2 分钟那一窗", msg)
+        self.assertNotIn(str(T0.year), msg, "夹了绝对时刻")
+        self.assertNotIn("+00:00", msg)
+
     def test_都在AB区可以采并记下核查结论(self):
         art = _baseline(self.d, BOTH, (1.0, 1.2, 2.0, 1.1, 0.9))     # 2.0 在 B 区
         self.assertIn("已按 GB/T 6075.3-2011", art.meta["iso_check"])

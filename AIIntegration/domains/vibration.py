@@ -71,7 +71,7 @@ from aiintegration.quality import Quality
 from aiintegration.types import (
     ROLE_STATUS, STATUS_ATTENTION, STATUS_DANGER, STATUS_LEVELS, STATUS_NORMAL, STATUS_STOPPED,
     STATUS_WARNING, STOP_LITERAL, STOP_NOT_WRITTEN, Dataset, Declaration, Finding, Frame,
-    InputSpec, OutputSpec, ParamSpec, ProgressSink, TrainedArtifact,
+    InputSpec, LabeledFrame, OutputSpec, ParamSpec, ProgressSink, TrainedArtifact,
 )
 
 # ─────────────────────────────── 限值表 ───────────────────────────────
@@ -174,7 +174,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.1.0"
+    version = "1.1.1"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -367,12 +367,12 @@ class Vibration(Domain):
                 peak = max((p for p in (_window_peak(it.frame, _vel_role(a)) for a in _AXES)
                             if p is not None), default=None)
                 if peak is not None and _classify(peak, limits)[0] in ("C", "D"):  # type: ignore[arg-type]
-                    hot.append((it.frame.t_end, peak))
+                    hot.append((it, peak))
             if hot:
-                t_hot, v_hot = max(hot, key=lambda h: h[1])
+                it_hot, v_hot = max(hot, key=lambda h: h[1])
                 raise ValueError(
                     f"所选时段有 {len(hot)} 帧按 {basis} 已在 C / D 区（最大 {v_hot:.3f} mm/s，"
-                    f"{t_hot.isoformat()}）—— 用它作基线会把异常当常态，之后再大也显得「没变」。"
+                    f"{_where_in_segment(it_hot, normals)}）—— 用它作基线会把异常当常态，之后再大也显得「没变」。"
                     "请另选一段国标判为 A / B 区的正常运行时段")
             iso_check = f"已按 {basis} 核查，所选 {len(normals)} 帧均在 A / B 区"
 
@@ -937,8 +937,7 @@ def _deviation(model: dict, peaks: dict[str, float], frame: Frame,
         score = 100.0 * (0.6 * z_part + 0.25 * d_part + 0.15 * t_part)
         out.append(Finding(key="anomaly_score", value=round(score, 1), quality=Quality.OK, t=t))
 
-    head = (f"基线采自 {str(model.get('t_from', '?'))[:16]}~{str(model.get('t_to', '?'))[:16]}"
-            f"（{model.get('frames', '?')} 帧）")
+    head = f"基线{_baseline_age(model, t)}（{model.get('frames', '?')} 帧）"
     return out, "；".join([head] + notes)
 
 
@@ -947,6 +946,39 @@ def _deviation(model: dict, peaks: dict[str, float], frame: Frame,
 def _bad_group(keys: tuple[str, ...], q: Quality, t: datetime) -> list[Finding]:
     """给一组结论落同一个坏质量码。**值为 None** —— 坏质量下不许有值。"""
     return [Finding(key=k, value=None, quality=q, t=t) for k in keys]
+
+
+def _baseline_age(model: dict, t: datetime) -> str:
+    """基线是多久以前采的 —— 说**相对时长**，不写绝对时刻。
+
+    ★判据摘要每拍写进实时库、平台原样照显；铁律是后台存 UTC、前端按当地时间显示，
+      夹在文字里的绝对时刻前端换不了时区（原先写的是截掉时区的 UTC，人会读错 8 小时）。
+      绝对时刻仍在工件 `meta`（ISO 8601 带 `+00:00`），界面要显示请从那里取、按当地时间显示。
+    """
+    try:
+        end = datetime.fromisoformat(str(model.get("t_to", "")))
+    except ValueError:
+        return "采集时间不详"
+    if end.tzinfo is None:
+        return "采集时间不详"
+    hours = (t - end).total_seconds() / 3600
+    if hours < 1:
+        return "采自不到 1 小时前"
+    if hours < 48:
+        return f"采自约 {round(hours)} 小时前"
+    return f"采自约 {round(hours / 24)} 天前"
+
+
+def _where_in_segment(hot: LabeledFrame, frames) -> str:
+    """说出那一帧在人框的那一段里的**相对位置**，不写绝对时刻。
+
+    ★这句话进任务说明、界面原样照显；铁律是后台存 UTC、前端按当地时间显示 ——
+      夹在文字里的绝对时刻前端换不了时区，写 UTC 人会读错 8 小时。人是在界面上按当地时间框的这一段，
+      说「开始后约几分钟」就找得到，且与时区无关。
+    """
+    seg_start = min(x.frame.t_start for x in frames if x.sample_id == hot.sample_id)
+    minutes = round((hot.frame.t_start - seg_start).total_seconds() / 60)
+    return "在该段开头那一窗" if minutes == 0 else f"在该段开始后约 {minutes} 分钟那一窗"
 
 
 def _bad_all(domain: Domain, frame: Frame, algos: frozenset[str] | None,
