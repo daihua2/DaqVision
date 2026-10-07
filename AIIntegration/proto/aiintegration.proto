@@ -11,6 +11,10 @@
 //   却能在 AI 页面上改它的标注"。
 //
 // 改动规则：字段编号只增不改不复用；废弃用 reserved；改契约必须升 proto_version 并记 CHANGELOG。
+//
+// ★**时间基准一律 UTC**（1.16 写明，`C-72 §3`）：`google.protobuf.Timestamp` 本身即 UTC 纪元；
+//   字符串时刻（各 `*_at`）是 UTC、格式 `YYYY-MM-DD HH:MM:SS`、**不带时区** —— 请按 UTC 解读，别按本地时间。
+//   `meta_json` 与 HTTP 口 JSON 里的时刻是带时区的 ISO 8601（`+00:00`），照它解读。
 syntax = "proto3";
 package aiintegration;
 
@@ -84,6 +88,10 @@ service AIIntegrationService {
   rpc ListTrainJobs (ListTrainJobsReq) returns (ListTrainJobsRes);
   rpc GetTrainJob   (IdReq)            returns (TrainJob);
   // 1.3 开：建一条待跑任务**立刻返回**，后台串行跑。★不是阻塞调用 —— 界面随便关。
+  // ★1.16 起（`C-72 §2`）：训练集里每条样本（人框的一段）按该绑定的 `window_sec` **切成多帧**，与在线推理每拍同长；
+  //   从段首起切，不足一窗的尾巴丢掉，没数据的窗不用（个数写在 `TrainJob.message`）。
+  //   ⇒ 框 N 秒得 ⌊N ÷ window_sec⌋ 帧：`window_sec=60` 时框 1 小时得 60 帧，`vibration` 至少要框 5 分钟。
+  //   一个任务最多切 5000 帧：超了任务直接 `failed`、原因在 `message`，不会先去实时库取数。
   rpc StartTraining (StartTrainingReq) returns (MutateRes);
   // 取消。★回执会**如实说**实际发生了什么：排队中的当场取消；正在跑的只是"请求取消"，
   //   算法不检查取消标志就会跑完当前这次训练才停 —— 我方不谎报"已取消"。
@@ -531,8 +539,8 @@ message Annotation {
   google.protobuf.Timestamp t_to   = 5;
   string label   = 6;   // ★运行期值，**不是枚举**
   string note    = 7;
-  string created_at = 8;
-  string updated_at = 9;
+  string created_at = 8;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
+  string updated_at = 9;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
 }
 message ListAnnotationsReq {
   string domain  = 1;
@@ -588,8 +596,8 @@ message Dataset {
   string name   = 3;
   string note   = 4;
   int32  sample_count = 5;
-  string created_at   = 6;
-  string updated_at   = 7;
+  string created_at   = 6;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
+  string updated_at   = 7;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
 }
 message ListDatasetsReq { string domain = 1; }
 message ListDatasetsRes { repeated Dataset items = 1; }
@@ -609,7 +617,7 @@ message Sample {
   google.protobuf.Timestamp t_from = 5;
   google.protobuf.Timestamp t_to   = 6;
   string label         = 7;   // ★入集那一刻的快照
-  string created_at    = 8;
+  string created_at    = 8;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
 }
 message ListSamplesReq {
   int64  dataset_id = 1;
@@ -633,7 +641,7 @@ message Artifact {
   string name    = 5;
   string algo    = 6;
   int64  dataset_id    = 7;
-  int32  sample_count  = 8;
+  int32  sample_count  = 8;   // 参与训练的**样本条数**（不是帧数；1.16 起一条样本按窗长切成多帧，帧数见 `training_data` 与 `meta.frame_count`）
   int32  feature_count = 9;
   // ★准确率**可空**：没测过就是没测过。`has_accuracy=false` 时请显示"未测"，**别显示 0**。
   double accuracy      = 10;
@@ -644,7 +652,7 @@ message Artifact {
   int64  size    = 14;
   string sha256  = 15;
   string meta_json  = 16;
-  string created_at = 17;
+  string created_at = 17;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
   // ── 来历（1.5 新增）──────────────────────────────────────────────
   // ★`origin`：`trained`（本系统训练面产出）/ `imported`（外部导入）。**不是封闭枚举**。
   //   `imported` 的工件，请在界面上**如实标注"外部导入、训练数据未经本系统核实"** ——
@@ -693,9 +701,9 @@ message TrainJob {
   double progress   = 8;   // 0~1
   int32  sample_count = 9;
   int64  artifact_id  = 10;
-  string created_at   = 11;
-  string started_at   = 12;
-  string finished_at  = 13;
+  string created_at   = 11;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
+  string started_at   = 12;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
+  string finished_at  = 13;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
 }
 message StartTrainingReq {
   string domain     = 1;
@@ -719,7 +727,7 @@ message Segment {
   string source  = 7;
   int32  point_count = 8;
   string note    = 9;
-  string created_at = 10;
+  string created_at = 10;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
 }
 message ListSegmentsReq { string domain = 1; string binding = 2; int32 offset = 3; int32 limit = 4; }
 message ListSegmentsRes { repeated Segment items = 1; int32 total = 2; }
@@ -739,7 +747,7 @@ message Report {
   string kind       = 3;   // basic | deep
   string path       = 4;   // `GET /reports/<path>`
   int64  size       = 5;
-  string created_at = 6;
+  string created_at = 6;   // ★UTC，`YYYY-MM-DD HH:MM:SS`，不带时区（1.16 写明，`C-72 §3`）
 }
 message ListReportsRes { repeated Report items = 1; }
 

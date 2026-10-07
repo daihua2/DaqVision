@@ -56,7 +56,7 @@ from . import dataorigin
 from .bindings import Binding, BindingStore
 from .domains import LoadedDomain
 from .fetch import Fetcher
-from .types import Dataset, LabeledFrame, ProgressSink, TrainedArtifact
+from .types import Dataset, Frame, LabeledFrame, ProgressSink, TrainedArtifact
 from .workbench import (
     JOB_CANCELED, JOB_FAILED, JOB_PENDING, JOB_READY, JOB_RUNNING,
     Workbench, WorkbenchError,
@@ -71,6 +71,11 @@ POLL_SEC = 1.0
 #: 单个训练集最多取多少条样本成帧。★不是性能上限，是**防跑飞**：
 #: 一个手滑复制出十万条的训练集，会把取数打成 DDoS。超了当场拒，说清楚。
 MAX_DATASET_ITEMS = 20000
+
+#: 一个训练任务最多切出多少帧。同样是**防跑飞**：样本按窗长切帧（见 `split_frame`），
+#: 框了几天的一段在 60 秒窗长下就是几千帧，全进内存会拖垮边缘盒上的推理。
+#: 5000 帧 ≈ 窗长 60 秒时三天半。超了**取数之前**当场拒，说清楚。
+MAX_TRAIN_FRAMES = 5000
 
 
 class TrainerError(RuntimeError):
@@ -233,7 +238,7 @@ class Trainer:
         started = time.monotonic()
 
         try:
-            dataset, skipped, origins = self._assemble(job, sink)
+            dataset, skipped, origins, n_used, n_empty = self._assemble(job, sink)
             if sink.canceled:
                 return self._cancel_now(job.id, "组装数据集阶段被取消")
             if not dataset.items:
@@ -241,7 +246,10 @@ class Trainer:
                     job.id,
                     "组装出来一条样本都没有：" + _explain_skips(skipped, total=job.sample_count))
 
-            note = f"用 {len(dataset)} 条样本训练（标签分布 {dataset.label_counts()}）"
+            note = (f"用 {len(dataset)} 帧训练（{n_used} 条样本按窗长切出；"
+                    f"标签分布 {dataset.label_counts()}）")
+            if n_empty:
+                note += f"；另有 {n_empty} 个窗口内没有数据，未参与训练"
             if skipped:
                 # ★丢了多少必须留在任务上。见模块头 §3。
                 note += "；" + _explain_skips(skipped, total=job.sample_count)
@@ -256,13 +264,13 @@ class Trainer:
                     f"域 {job.domain} 的 train() 返回了 {type(artifact).__name__}，"
                     "应为 TrainedArtifact")
 
-            art_id = self._store(job, dataset, artifact, skipped, origins)
+            art_id = self._store(job, dataset, artifact, skipped, origins, n_used)
             secs = time.monotonic() - started
             self._wb.update_job(
                 job.id, status=JOB_READY, progress=1.0, artifact_id=art_id,
                 message=f"{note}；用时 {secs:.1f}s；工件已存但**未自动启用**，请在界面上启用")
-            logger.warning("训练完成：任务 %s 域 %s 工件 %s（%.1fs，%d 条样本）",
-                           job.id, job.domain, art_id, secs, len(dataset))
+            logger.warning("训练完成：任务 %s 域 %s 工件 %s（%.1fs，%d 条样本 %d 帧）",
+                           job.id, job.domain, art_id, secs, n_used, len(dataset))
         except Exception as exc:  # noqa: BLE001 —— 模块的异常不许掀翻执行器
             logger.exception("训练任务 %s 失败", job.id)
             self._fail(job.id, f"{type(exc).__name__}: {exc}")
@@ -304,46 +312,71 @@ class Trainer:
         items: list[LabeledFrame] = []
         skipped: list[tuple[int, str]] = []
         bindings_cache: dict[str, Binding | None] = {}
+        for s in samples:
+            if s.binding not in bindings_cache:
+                bindings_cache[s.binding] = self._bindings.get(job.domain, s.binding)
+
+        # ★取数之前先数帧：超上限当场拒，别等把实时库取了一遍才发现。
+        planned = 0
+        for s in samples:
+            b = bindings_cache[s.binding]
+            if b is not None:
+                planned += frames_in(s.t_to - s.t_from, b.window_sec)
+        if planned > MAX_TRAIN_FRAMES:
+            raise TrainerError(
+                f"所选样本按窗长切出 {planned} 帧，超过上限 {MAX_TRAIN_FRAMES} 帧 —— "
+                "请缩短所框时段或拆成几个训练集")
+
         # 来源性质，只收**真正参与训练**的那些样本 —— 取不到数的样本没进模型，
         # 它是仿真还是现场都影响不了这个工件（契约 1.6，C-36 §4.2.2）。
         origins: list[str] = []
+        used: set[int] = set()
+        empty_windows = 0
 
         for i, s in enumerate(samples):
             if sink.canceled:
                 break
-            if s.binding not in bindings_cache:
-                bindings_cache[s.binding] = self._bindings.get(job.domain, s.binding)
             b = bindings_cache[s.binding]
             if b is None:
                 skipped.append((s.id, f"{s.binding} 没有绑定，不知道取哪些点"))
                 continue
-            # 样本自己的时间范围就是窗口，**不用绑定上配的 window_sec**：
-            # 那个是在线节拍用的，与人当初框的那一段无关。
-            window = max(1.0, (s.t_to - s.t_from).total_seconds())
+            span = (s.t_to - s.t_from).total_seconds()
+            if frames_in(s.t_to - s.t_from, b.window_sec) == 0:
+                skipped.append((s.id, f"时段只有 {span:g} 秒，短于一窗（{b.window_sec:g} 秒），切不出整帧"))
+                continue
+            # 一条样本**只取一次数**（窗口 = 人框的整段），再按绑定的 window_sec 切帧（`split_frame`）。
+            # ★为什么要切（`C-72 §2`）：在线推理每拍就是 window_sec 一窗，模块按帧统计
+            #   （基线是逐帧峰值的中位数与离散度）——训练帧与在线帧不同长，统计口径就对不上；
+            #   而不切的话人框一段只得一帧，要求「至少 N 帧」的模块永远采不成。
             # ★用 replace 而不是逐个抄字段：逐个抄会漏掉后加的（`data_origin`、1.11 的 `fields`），
             #   漏了 `fields` 的探测会把结构值点当整点取，拿到的全是坏样本。
-            probe = dataclasses.replace(b, window_sec=window)
+            probe = dataclasses.replace(b, window_sec=span)
             try:
-                frame = self._fetcher.fetch(probe, s.t_to)
+                whole = self._fetcher.fetch(probe, s.t_to)
             except Exception as exc:  # noqa: BLE001
                 skipped.append((s.id, f"取数失败: {type(exc).__name__}"))
                 continue
-            if not any(frame.channels.get(r) for r in b.roles):
+            frames = split_frame(whole, b.window_sec)
+            got = [f for f in frames if any(f.channels.get(r) for r in b.roles)]
+            empty_windows += len(frames) - len(got)
+            if not got:
                 # 一路样本都没有 —— hs 里那段多半已被滚存删掉。
                 skipped.append((s.id, "该时段在实时库里已无数据"))
                 continue
-            items.append(LabeledFrame(frame=frame, label=s.label, sample_id=s.id))
+            items += [LabeledFrame(frame=f, label=s.label, sample_id=s.id) for f in got]
+            used.add(s.id)
             origins.append(dataorigin.effective(s.data_origin, b.data_origin))
             if i % 20 == 0:
                 self._wb.update_job(job.id, progress=0.1 * (i + 1) / max(1, len(samples)))
 
         return (Dataset(domain=job.domain, binding=job.binding, name=ds_name,
                         items=tuple(items), skipped=tuple(skipped)),
-                skipped, origins)
+                skipped, origins, len(used), empty_windows)
 
     # ── 落盘 ──────────────────────────────────────────────────────────────
     def _store(self, job, dataset: Dataset, art: TrainedArtifact,
-               skipped: list[tuple[int, str]], origins: list[str] | None = None) -> int:
+               skipped: list[tuple[int, str]], origins: list[str] | None = None,
+               n_used: int = 0) -> int:
         rel = f"{job.domain}/{art.kind}/{job.id}-{_safe(art.algo)}{art.suffix}"
         target = self._artifacts_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -355,6 +388,7 @@ class Trainer:
 
         meta = dict(art.meta)
         meta.setdefault("label_counts", json.dumps(dataset.label_counts(), ensure_ascii=False))
+        meta.setdefault("frame_count", str(len(dataset)))
         if skipped:
             # ★工件上也留一份：任务记录可能被清理，而"这个模型是用什么训的"要长久答得上。
             meta.setdefault("skipped_count", str(len(skipped)))
@@ -364,13 +398,16 @@ class Trainer:
             # ★`kind` 由域说了算（模型 / 基线 / …）。骨架写死会让基线顶掉模型的激活位。
             domain=job.domain, name=f"{dataset.name}-{job.id}", kind=art.kind,
             binding=job.binding, algo=art.algo, dataset_id=job.dataset_id,
-            sample_count=len(dataset), feature_count=art.feature_count,
+            # ★`sample_count` 是**样本条数**（契约原义），不是帧数 —— 一条样本按窗长切成多帧，
+            #   帧数另记在 meta 的 `frame_count` 与 `training_data` 里。
+            sample_count=n_used, feature_count=art.feature_count,
             accuracy=art.accuracy, path=rel, size=len(blob),
             sha256=hashlib.sha256(blob).hexdigest(),
             meta_json=json.dumps(meta, ensure_ascii=False),
             # ★来历由骨架写，不靠域自觉：训练产出的来历本系统**确实知道**。
             origin="trained", source=f"训练任务 {job.id}",
-            training_data=(f"训练集「{dataset.name}」（id={job.dataset_id}）{len(dataset)} 条样本，"
+            training_data=(f"训练集「{dataset.name}」（id={job.dataset_id}）{n_used} 条样本、"
+                           f"按窗长切出 {len(dataset)} 帧，"
                            f"标签分布 {dataset.label_counts()}"
                            + (f"；另有 {len(skipped)} 条样本取不到数据、未参与训练" if skipped else "")
                            + _origin_note(origins or [])),
@@ -400,6 +437,41 @@ def _safe(name: str) -> str:
     """算法名进文件名：只留安全字符。★中文算法名（"决策树"）要能用，别只允许 ASCII。"""
     out = "".join(c for c in name if c.isalnum() or c in "-_")
     return out or "model"
+
+
+#: 判「够不够一整窗」时的容差（秒）。人框的起止是毫秒级的，59.9995 秒也该算一窗。
+_SPAN_EPS = 1e-3
+
+
+def frames_in(span: timedelta, window_sec: float) -> int:
+    """一段时间按窗长能切出几个**整**窗。不足一窗的尾巴不算。"""
+    if window_sec <= 0:
+        return 0
+    return max(0, int((span.total_seconds() + _SPAN_EPS) // window_sec))
+
+
+def split_frame(whole: Frame, window_sec: float) -> list[Frame]:
+    """把一条样本取回的长帧，从起点开始按 `window_sec` 切成等长帧（`C-72 §2`）。
+
+    ★窗口左闭右开 `[a, b)`，只有最后一窗含右端 —— 落在窗边界上的样本只进一帧，不重复计。
+    ★不足一窗的尾巴**丢掉**：短帧的峰值、均值与在线帧不可比，混进去会把统计拉偏。
+    ★没数据的窗也照切出来（各路为空列表），由调用方决定丢不丢 —— 切分本身不判断。
+    """
+    n = frames_in(whole.t_end - whole.t_start, window_sec)
+    out: list[Frame] = []
+    for k in range(n):
+        a = whole.t_start + timedelta(seconds=k * window_sec)
+        b = a + timedelta(seconds=window_sec)
+        last = k == n - 1
+
+        def inside(t, a=a, b=b, last=last) -> bool:
+            return a <= t < b or (last and t == b)
+
+        out.append(dataclasses.replace(
+            whole, t_start=a, t_end=b,
+            channels={r: [x for x in seq if inside(x.t)] for r, seq in whole.channels.items()},
+            structs={r: [x for x in seq if inside(x.t)] for r, seq in whole.structs.items()}))
+    return out
 
 
 def _explain_skips(skipped: list[tuple[int, str]], *, total: int) -> str:

@@ -30,7 +30,7 @@ from . import structbind
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.15"
+PROTO_VERSION = "1.16"
 
 
 def _ts(dt: datetime) -> object:

@@ -82,23 +82,30 @@ def _loaded(inst: Domain) -> LoadedDomain:
 
 
 class FakeFetcher:
-    """按 (binding) 决定给不给数据。★"取不到数"是常态，必须能造出来。"""
+    """按 (binding) 决定给不给数据。★"取不到数"是常态，必须能造出来。
 
-    def __init__(self, empty_bindings=()):
+    缺省整段每 10 秒一笔（像真采集）；`sparse` 里的绑定只在段末有一笔 —— 造"切出来的窗多数是空的"。
+    """
+
+    def __init__(self, empty_bindings=(), sparse_bindings=()):
         self.empty = set(empty_bindings)
+        self.sparse = set(sparse_bindings)
         self.calls = []
 
     def fetch(self, b: Binding, end_time):
         self.calls.append((b.binding, b.window_sec, end_time))
+        start = end_time - timedelta(seconds=b.window_sec)
         if b.binding in self.empty:
-            return Frame(domain=b.domain, binding=b.binding,
-                         t_start=end_time - timedelta(seconds=b.window_sec),
-                         t_end=end_time, channels={"x_vel": []}, params=dict(b.params))
-        return Frame(domain=b.domain, binding=b.binding,
-                     t_start=end_time - timedelta(seconds=b.window_sec),
-                     t_end=end_time,
-                     channels={"x_vel": [Sample(t=end_time, value=1.0, quality=Quality.OK,
-                                                status_code=1)]},
+            xs = []
+        elif b.binding in self.sparse:
+            xs = [end_time]
+        else:
+            xs = [start + timedelta(seconds=10 * k) for k in range(int(b.window_sec // 10) + 1)]
+        # 绑了哪几路就给哪几路；值略有起伏（1.00 ~ 1.04 mm/s），像正常运行
+        return Frame(domain=b.domain, binding=b.binding, t_start=start, t_end=end_time,
+                     channels={r: [Sample(t=t, value=1.0 + 0.01 * (i % 5), quality=Quality.OK,
+                                          status_code=1) for i, t in enumerate(xs)]
+                               for r in b.roles},
                      params=dict(b.params))
 
 
@@ -202,15 +209,41 @@ class TestHappyPath(TrainerBase):
         self.assertEqual(art.sha256, hashlib.sha256(blob).hexdigest())
         self.assertFalse(list(f.parent.glob("*.part")), "临时文件该被改名，不该留下")
 
-    def test_模块拿到的是带标签的帧且窗口是样本自己的(self):
+    def test_一条样本取一次数再按窗长切成多帧(self):
+        # ★C-72 §2：人框 5 分钟、窗长 60 秒 ⇒ 5 帧。原先一条样本只算一帧，「至少 5 帧」的基线永远采不成。
         ds = self.make_dataset(bindings=("dev1", "dev2"), labels=["正常", "不平衡"])
         jid = self.tr.submit(domain="vib", dataset_id=ds)
-        self.run_one(jid)
+        job = self.run_one(jid)
         seen = self.dom.seen
-        self.assertEqual(len(seen), 2)
-        self.assertEqual(seen.label_counts(), {"正常": 1, "不平衡": 1})
-        # ★窗口取样本自己的时间范围（5 分钟），不是绑定上配的 window_sec（缺省 60s）
+        self.assertEqual(len(seen), 10)
+        self.assertEqual(seen.label_counts(), {"正常": 5, "不平衡": 5})
+        # 每帧与在线一拍同长（绑定缺省 window_sec=60）
+        self.assertEqual({(it.frame.t_end - it.frame.t_start).total_seconds() for it in seen.items},
+                         {60.0})
+        # 同一条样本切出的帧带同一个 sample_id
+        self.assertEqual(len({it.sample_id for it in seen.items}), 2)
+        # ★取数仍是一条样本一次、窗口为整段（5 分钟）—— 切帧在内存里做，不多打实时库
+        self.assertEqual(len(self.fetcher.calls), 2)
         self.assertEqual({w for _b, w, _t in self.fetcher.calls}, {300.0})
+        self.assertIn("用 10 帧训练（2 条样本", job.message)
+
+    def test_边界上的样本只进一帧且尾巴不足一窗丢掉(self):
+        from aiintegration.trainer import split_frame
+        t = [T0 + timedelta(seconds=s) for s in (0, 59, 60, 120, 150)]
+        whole = Frame(domain="vib", binding="d", t_start=T0, t_end=T0 + timedelta(seconds=150),
+                      channels={"x_vel": [Sample(t=x, value=1.0, quality=Quality.OK) for x in t]})
+        frames = split_frame(whole, 60)
+        self.assertEqual(len(frames), 2, "150 秒按 60 秒切只有 2 个整窗，尾巴 30 秒丢掉")
+        self.assertEqual([len(f.channels["x_vel"]) for f in frames], [2, 2],
+                         "60 秒那笔只进第二帧；120 秒落在最后一窗右端，算进第二帧；150 秒在尾巴里丢掉")
+
+    def test_工件的样本数是条数帧数另记(self):
+        ds = self.make_dataset()
+        self.run_one(self.tr.submit(domain="vib", dataset_id=ds))
+        art = self.wb.list_artifacts(domain="vib").items[0]
+        self.assertEqual(art.sample_count, 3, "契约原义是样本条数，不能悄悄变成帧数")
+        self.assertEqual(json.loads(art.meta_json)["frame_count"], "15")
+        self.assertIn("切出 15 帧", art.training_data)
 
     def test_标签分布写进任务与工件(self):
         ds = self.make_dataset(bindings=("dev1", "dev2"), labels=["正常", "不平衡"])
@@ -219,7 +252,7 @@ class TestHappyPath(TrainerBase):
         self.assertIn("标签分布", job.message)
         art = self.wb.list_artifacts(domain="vib").items[0]
         meta = json.loads(art.meta_json)
-        self.assertEqual(json.loads(meta["label_counts"]), {"正常": 1, "不平衡": 1})
+        self.assertEqual(json.loads(meta["label_counts"]), {"正常": 5, "不平衡": 5})
         self.assertEqual(meta["note"], "用例造的", "模块自己挂的 meta 要原样留着")
 
     def test_进度被推进(self):
@@ -241,7 +274,7 @@ class TestSkipsAreLoud(TrainerBase):
         self.assertEqual(job.status, JOB_READY, job.message)
         self.assertIn("2/3", job.message, "丢了几条要如实说")
         self.assertIn("已无数据", job.message, "为什么丢也要说")
-        self.assertIn("用 1 条样本训练", job.message)
+        self.assertIn("用 5 帧训练（1 条样本", job.message)
 
     def test_工件上也留一份(self):
         # 任务记录可能被清理，而"这个模型是用什么训的"要长久答得上。
@@ -270,6 +303,40 @@ class TestSkipsAreLoud(TrainerBase):
         self.assertEqual(job.status, JOB_FAILED, job.message)
         self.assertIn("一条样本都没有", job.message)
         self.assertEqual(self.wb.list_artifacts(domain="vib").total, 0)
+
+
+class TestFraming(TrainerBase):
+    """按窗长切帧的几种边角（`C-72 §2`）。"""
+
+    def _one(self, binding, minutes=0, seconds=0, window=60.0):
+        if self.bindings.get("vib", binding) is None:
+            self.bindings.put(Binding("vib", binding, {"x_vel": 100}, window_sec=window))
+        ds = self.wb.put_dataset(domain="vib", name=f"F-{binding}")
+        a = self.wb.put_annotation(domain="vib", binding=binding, label="正常", t_from=T0,
+                                   t_to=T0 + timedelta(minutes=minutes, seconds=seconds))
+        self.wb.add_samples(ds, [a])
+        return ds
+
+    def test_短于一窗的样本丢掉并说清原因(self):
+        job = self.run_one(self.tr.submit(domain="vib", dataset_id=self._one("d", seconds=30)))
+        self.assertEqual(job.status, JOB_FAILED, job.message)
+        self.assertIn("短于一窗", job.message)
+        self.assertEqual(self.fetcher.calls, [], "切不出整帧就别去取数")
+
+    def test_没数据的窗不进训练集但个数留在任务上(self):
+        self.fetcher.sparse = {"d"}
+        job = self.run_one(self.tr.submit(domain="vib", dataset_id=self._one("d", minutes=5)))
+        self.assertEqual(job.status, JOB_READY, job.message)
+        self.assertEqual(len(self.dom.seen), 1)
+        self.assertIn("另有 4 个窗口内没有数据", job.message)
+
+    def test_切出的帧超上限在取数之前就拒(self):
+        from unittest import mock
+        with mock.patch("aiintegration.trainer.MAX_TRAIN_FRAMES", 4):
+            job = self.run_one(self.tr.submit(domain="vib", dataset_id=self._one("d", minutes=5)))
+        self.assertEqual(job.status, JOB_FAILED, job.message)
+        self.assertIn("超过上限 4 帧", job.message)
+        self.assertEqual(self.fetcher.calls, [], "超上限要在取数之前拒，不能先把实时库取一遍")
 
 
 class TestFailures(TrainerBase):
@@ -506,3 +573,39 @@ class TestDataOrigin(TrainerBase):
         self.fetcher.empty = {"sim1"}
         art = self._train(["d1", "sim1"], {"d1": "field", "sim1": "simulated"})
         self.assertEqual(art.data_origin, "field")
+
+
+class TestVibrationBaselineEndToEnd(TrainerBase):
+    """★`C-72` 原样场景：真的 `vibration` 域，按 `AI-76 §5.1` 标**一段**正常运行就要能采成基线。
+    原先一条样本只算一帧，这里会落「基线样本不足 …… 实际只有 1 帧」。"""
+
+    def setUp(self):
+        super().setUp()
+        from aiintegration.domains import discover
+        loaded, failed = discover(Path(__file__).resolve().parents[2] / "domains")
+        vib = {d.key: d for d in loaded}.get("vibration")
+        if vib is None:
+            self.skipTest(f"vibration 域装不上：{failed}")
+        self.domains["vibration"] = vib
+        self.bindings.put(Binding("vibration", "khb", {"x_vel": 810, "y_vel": 814, "z_vel": 818},
+                                  params={"algorithms": "baseline", "axialAxis": "z"}))
+
+    def _bake(self, minutes):
+        ds = self.wb.put_dataset(domain="vibration", name=f"采基线 {minutes} 分钟")
+        a = self.wb.put_annotation(domain="vibration", binding="khb", label="正常",
+                                   t_from=T0, t_to=T0 + timedelta(minutes=minutes))
+        self.wb.add_samples(ds, [a])
+        return self.run_one(self.tr.submit(domain="vibration", dataset_id=ds, binding="khb"))
+
+    def test_标一段五分钟采成基线(self):
+        job = self._bake(5)
+        self.assertEqual(job.status, JOB_READY, job.message)
+        art = {x.id: x for x in self.wb.list_artifacts(domain="vibration").items}[job.artifact_id]
+        self.assertEqual(art.kind, "baseline")
+        self.assertEqual(json.loads(art.meta_json)["frame_count"], "5")
+        self.assertFalse(art.active, "采成也不自动启用（C-69 §1）")
+
+    def test_不足五分钟如实说帧数不够(self):
+        job = self._bake(4)
+        self.assertEqual(job.status, JOB_FAILED, job.message)
+        self.assertIn("实际只有 4 帧", job.message)

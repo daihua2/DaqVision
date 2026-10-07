@@ -752,7 +752,11 @@ MAX_STATE_BYTES = 256 * 1024
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class LabeledFrame:
-    """一条训练样本：一帧数据 + 人给的标签。"""
+    """一帧训练数据 + 人给的标签。
+
+    ★一条样本（人框的一段）由骨架按绑定的 `window_sec` 切成多帧（`C-72 §2`），各帧与在线推理的一拍同长；
+      同一条样本切出的帧带同一个 `sample_id` 与标签。
+    """
 
     frame: Frame
     label: str
