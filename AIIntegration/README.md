@@ -1585,3 +1585,45 @@ hs 点表         = AI.* 15 个（总数 2199 → 2187），链 [2766,2763,2761]
 - ~~hs 清单上那 14 行确认 `DELETE` / `KEEP` 不由我方做~~ —— `C-61`：AICloud 按其用户决定于 **10-04 09:37:39 判 `DELETE`**，14 条全 Ok，清单清空，在用 15 点不受影响。★`AI-71 §2.1`「日后重建同名绑定拿回原 gid」是按**还在清单里**说的；真删之后是否仍成立，`C-61 §3` 请 hs 确认 ⇒ `H-281`：**成立**（判 `DELETE` 不动号，现场 14 条映射都在）；重建删前有过数据的点须先函告 hs（`H-281 §5`）；
 - ~~暂存 `/root/aii-stage-20261003{,b}/` 与两套 `*.bak-20261003-deploy*` 留到 AICloud 再核一次~~ —— `C-60`（10-04）核完、与我方一致；经用户同意 **10-04 已清**（8 个目录），服务未受影响（active、NRestarts=0）。⇒ **现场已无回滚备份，下次部署前必须先备份**。
   同日经用户同意又清了 `$APP/host.old-20260916-{1501,1533}`（9-16 的旧代码副本，服务未引用）与 `data/{bindings,workbench}.db.bak-20260918-223252`；`$APP` 下现只剩 `cert data docs domains host proto system.guid`。
+
+---
+
+## 32. 部署记录：契约 1.15 + `vibration` 1.1.0 上现场，现役迁到合并模块（2026-10-07，用户授权）
+
+### 32.1 前提
+
+`C-68` 问部署时刻；用户 10-07 定**当天立即部署、一次做完第 1 + 3 步**，新绑定显示名空、去抖 0。`AI-76` 与契约 1.15（`proto/` 两份）09:05 投出，两端 sha256 一致。
+
+### 32.2 投了什么
+
+`9d2606d`（代码同 `7ae2d62`）相对现场（`ca04352`）：骨架 9 个文件（`apiproto/aiintegration_pb2.py`、`api.py`、`bindings.py`、`domaindeps.py`、`domains.py`、`hsclient.py`、`pointmap.py`、`scheduler.py`、`types.py`）；
+域 `vibration.py` 新增，`servo_health.py`、`vfd_health.py` 随 `81ce0cb` 各多一行 `requires_artifacts=("model",)`；**删** `vibration_iso.py`、`vibration_baseline.py`。`press_fit.py`、`vision_helmet.py` 照 §28.1 不投。不装依赖。
+
+### 32.3 步骤
+
+1. 三环境各 **880** 条全过；
+2. `git archive` → `/root/aii-stage-20261007/`，sha256 两端一致（`0dd4519f…`）；`diff -rq` 与上面清单一致；无 CR；
+3. **干跑**：现场 venv + 三张库只读副本 + 隔离端口 50170、不配写路径。1.15 起、3 域装载；建新绑定 → 删旧两条 → 停用 1012~1026；离线组快照：14 点、检测状态带报警条件（`attention/warning/danger` 300/600/800、`NRLabel`「正常」）；改显示名 / 去抖不换点号、`Des` 进全部 14 点；整轮可序列化。
+   ★干跑第一次在「新绑定点号为 0」处按设计停下 —— 点号由调度器 `sync` 分配、干跑无写路径不分；改为现场轮询、干跑离线代分；
+4. `deploy-9d2606d.sh`（同 §30 套路，备份标签 `20261007-deploy9d2606d`，含 `pip freeze`）；回滚 `rollback-9d2606d.sh`；
+5. `migrate.py` 走服务 gRPC：先建 `vibration/khb-f1-g1-v1` 并核到点号齐，再 `DeleteBinding` + `RetirePoints` 两条旧的；任一步不对即停。
+
+### 32.4 投后实测
+
+```
+09:06:00 停服 → 09:06:04 起服   service_version = 0.1.0+src20261007T010604Z   proto_version = 1.15   domain_count = 3   load_errors = 无
+09:06:24 迁移                   新绑定 14 点：status 1033、其余 1036~1048；上级实体 模块 1034 / 绑定 1035
+                                 停用 1012~1020（iso 9）、1021~1026（baseline 6）；快照收敛到 14 点 + 2 上级实体、1 个点带报警配置，accepted=19
+gid                             1033→2770、1036~1048→2771~2783、1034→2768、1035→2769；旧 15 点 2705~2719
+首拍                             status=danger（vel_max 5.1 mm/s、x 轴，第 2 组刚性支承 D 区），自训四点 QualityModelNotLoaded（未采基线）
+起服以来 error 0、NRestarts=0、监听端口无变化
+```
+
+★检测状态一上来就是「危险」，报警条件装上、去抖 0 ⇒ 实时库侧这条报警**当即挂着**。数据是仿真（`C-66`：v1 两路交错写入、结论不作数），判级本身没错。怎么处理由 AICloud 用户定，见 `AI-77 §3`。
+★结论时刻取样本时刻：首条时间戳 09:05:42，早于建绑定（09:06:24）—— 不是时钟问题。
+
+### 32.5 仍待办
+
+- 完成函 `AI-77`（报点号与「危险」报警）待用户过目后投；AICloud 第 1 步现取核对、第 2 步关联；hs 照 `H-282 §6` 只读核 gid 2770 的报警；
+- 暂存 `/root/aii-stage-20261007/` 与三份 `*-20261007-deploy9d2606d` 备份**留到 AICloud / hs 核完**，清理须用户点头；
+- `vibration` 采基线：要人选一段正常运行时段（第 5 步），不是我方能替用户定的。
