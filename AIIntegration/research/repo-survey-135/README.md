@@ -176,3 +176,37 @@ README 没提、源码里出现 ISO 的另有 3 个：`Advanced-Jeffcott-Rotor-D
 ⇒ **真正按标准查表判级的只有 2 个**（`rotordynamics-vibration-toolkit`、`predictive-maintenance-mcp`），**两个的表都与我方逐值相同**；
 **泵（ISO 10816-7 / GB/T 6075.7）一个实现都没有** —— 我方泵限值仍只有 Europump 转引一个来源（`C-43 §4`），原文未核。
 另：上一级 `projects/` 下的 `node-red-contrib-condition-monitoring`（Class Ⅰ~Ⅳ 冒充 10816-3，external-projects §2.3）不在这 136 个里。
+
+## 7 ★按标准号搜 GitHub 与网上（2026-10-08）
+
+> 关键词：`10816-3` / `20816-3` / `10816-7` / `20816-7` / `GB/T 6075` / `iso10816` / `iso20816` / `pump vibration iso 10816`。
+> 走 GitHub 公开仓库搜索 API（未登录，**代码搜索未做** —— 要登录，待用户 `gh auth login` 后补）+ 网页搜索。
+> 候选浅克隆到 `D:\download\AIRef\projects\iso-grading-repos\`，**只读不执行**，逐个扫源码；无实质的已删，留 5 个。【实测】
+
+### 7.1 结论
+
+| 问题 | 答案 |
+| --- | --- |
+| 有没有泵判级（ISO 10816-7 / 20816-7 / GB/T 6075.7）的开源实现 | ★**没有**。`10816-7`、`20816-7`、`GB/T 6075` 仓库搜索均 0 条；网页搜索同样没有 |
+| 工业机器表（10816-3 组 × 支承 × 速度） | 完整实现的 4 个（下表）**全部与我方 `_MACHINE_LIMITS` 逐值相同**；另有十来个只写死其中一行 |
+| 泵限值出处 | ★**Europump《Pump Vibration Standards Guidelines》2013 原文已读**（第 9、14 页）：12 个值与我方 `_PUMP_LIMITS` **逐值相同**，含 >200 kW 的 C/D 7.6 / 9.5。其致谢页称标准摘录经 BSI 授权取自 BS EN ISO 版。**仍非标准正文** |
+
+### 7.2 留下的 5 个
+
+| 仓 | 做了什么 | 对我方 |
+| --- | --- | --- |
+| ★`jmrplens/phonometry`（`src/phonometry/vibration/machinery/evaluation.py`） | ISO 10816-3:2009 表 A.1/A.2 **速度 + 位移两套**；§5.2.3 两者都测取较严的一档；§5.3 显著变化 = 超过 B 区上限的 25%；§5.4.1 ALARM = min(基线 + 0.25 × B 上限, 1.25 × B 上限)；§5.4.2 TRIP ≤ 1.25 × C 上限；边界值归低一档；731 条符合性检查 | 速度表与我方相同。★**位移有效值表（µm）**我方没有：第 1 组刚性 29/57/90、柔性 45/90/140；第 2 组刚性 22/45/71、柔性 37/71/113（【引】该库转录，标准原文未核）。★**准则 II（变化量）是有条款依据的偏离判据**，我方自训「偏离 ≥ 3」无标定 |
+| `kazubazoo/smartpulse365`（`pdm-frontend/src/lib/standards.js`） | 10816-1 Class Ⅰ~Ⅳ 与 20816-3 组 × 支承两套可选，另可按设备填自定义限值 | 20816-3 四行与我方相同 |
+| `davidsanvel88-sys/Analizador-Motores-Siemens-ISO10816`（`src/analyzer.py`） | 组 × 支承四行，组合非法即报错 | 相同；非法组合不猜，与我方同 |
+| `Firercrow/PROJECT-Farseer`（`src/normas.py`） | 按功率 300 kW 分组 × 基础四行 | 相同 |
+| ✗ `ggkjyai04-oss/Vibration_analysis_260922_v2.0`（`src/utils/vibrationAnalysis.ts`） | 组 1/2 速度四行正确；**另有「加速度限值」和「Group 3/4 泵」两套数** | ★**反例留档**：10816-3 没有加速度限值；Group 3/4 泵是 1998 版旧分组，所给数值与 10816-3、10816-7 都对不上 —— 疑为生成内容。拿网上的表别不核就用 |
+
+已删（无实质）：只写死一行的 `conveyor-digital-twin`、`MechPulse`、`iot-predictive-maintenance` 等；用旧 Class Ⅰ~Ⅳ 的 `VibraGuard-Pro`；`biw00/predictive-maintenance-pump`（622 MB 多为自带 venv，只一个 notebook 一行限值）；空仓 `IS0-10816-Vibration-Sensor`；其余 README 提及而源码无表的。
+
+### 7.3 ISO 10816-7:2009 官方样章（iTeh，第 1~3.4 条，无附录 A）里对我方有用的原文
+
+- §3.1 / §3.2.1：★**转速 < 600 r/min 的泵，另须测峰峰值位移（µm）**，测量下限 2 Hz。⇒ 我方 `vibration.py` 判泵时注释「泵标准不限转速」、不出低速提示 —— **与原文不符**（待用户定改）。
+- §1：不适用于固体输送、渣浆、潜水泵；整体式电机泵按整机评价，柔性联轴的电机归 10816-3。
+- §3.3.2：表 A.1、A.2 适用于所有轴承的径向振动与推力轴承的轴向振动。
+- 引言：限值来自约 1500 台泵的统计；刚性 / 柔性支承、卧式 / 立式**无显著差别**，故不分；按 200 kW 分档。
+- 目录：附录 C（资料性）给 ALARM / TRIP 设定示例。
