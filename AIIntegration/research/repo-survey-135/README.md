@@ -191,15 +191,31 @@ README 没提、源码里出现 ISO 的另有 3 个：`Advanced-Jeffcott-Rotor-D
 | 工业机器表（10816-3 组 × 支承 × 速度） | 完整实现的 4 个（下表）**全部与我方 `_MACHINE_LIMITS` 逐值相同**；另有十来个只写死其中一行 |
 | 泵限值出处 | ★**Europump《Pump Vibration Standards Guidelines》2013 原文已读**（第 9、14 页）：12 个值与我方 `_PUMP_LIMITS` **逐值相同**，含 >200 kW 的 C/D 7.6 / 9.5。其致谢页称标准摘录经 BSI 授权取自 BS EN ISO 版。**仍非标准正文** |
 
-### 7.2 留下的 5 个
+### 7.2 留下的 5 个 —— 判级部分
 
-| 仓 | 做了什么 | 对我方 |
+> ★**订正（同日）**：本表初版标题「留下的 5 个」、列名「做了什么」，读起来像这几个仓**只做判级**。不对 ——
+> 判级在它们里都只是一小块，本表只记了判级那一块。判级以外做了什么见 §7.2′。
+
+| 仓 | 判级怎么做 | 对我方 |
 | --- | --- | --- |
 | ★`jmrplens/phonometry`（`src/phonometry/vibration/machinery/evaluation.py`） | ISO 10816-3:2009 表 A.1/A.2 **速度 + 位移两套**；§5.2.3 两者都测取较严的一档；§5.3 显著变化 = 超过 B 区上限的 25%；§5.4.1 ALARM = min(基线 + 0.25 × B 上限, 1.25 × B 上限)；§5.4.2 TRIP ≤ 1.25 × C 上限；边界值归低一档；731 条符合性检查 | 速度表与我方相同。★**位移有效值表（µm）**我方没有：第 1 组刚性 29/57/90、柔性 45/90/140；第 2 组刚性 22/45/71、柔性 37/71/113（【引】该库转录，标准原文未核）。★**准则 II（变化量）是有条款依据的偏离判据**，我方自训「偏离 ≥ 3」无标定 |
 | `kazubazoo/smartpulse365`（`pdm-frontend/src/lib/standards.js`） | 10816-1 Class Ⅰ~Ⅳ 与 20816-3 组 × 支承两套可选，另可按设备填自定义限值 | 20816-3 四行与我方相同 |
 | `davidsanvel88-sys/Analizador-Motores-Siemens-ISO10816`（`src/analyzer.py`） | 组 × 支承四行，组合非法即报错 | 相同；非法组合不猜，与我方同 |
 | `Firercrow/PROJECT-Farseer`（`src/normas.py`） | 按功率 300 kW 分组 × 基础四行 | 相同 |
 | ✗ `ggkjyai04-oss/Vibration_analysis_260922_v2.0`（`src/utils/vibrationAnalysis.ts`） | 组 1/2 速度四行正确；**另有「加速度限值」和「Group 3/4 泵」两套数** | ★**反例留档**：10816-3 没有加速度限值；Group 3/4 泵是 1998 版旧分组，所给数值与 10816-3、10816-7 都对不上 —— 疑为生成内容。拿网上的表别不核就用 |
+
+
+### 7.2′ 判级以外各做了什么【实测：读源码与 README】
+
+| 仓 | 整体是什么 | 判级以外的主要内容 | 对我方 |
+| --- | --- | --- | --- |
+| `phonometry` | 大型**声学 + 振动计算库**（二十多个领域：声学、建筑、人体振动、环境振动……），判级只是 `vibration/machinery/` 下一个模块 | `diagnostics.py`：按 Norton & Karczub 第 8 章算**特征故障频率** —— 轴承 FTF / BSF / BPFO / BPFI、齿轮啮合与边频、感应电机槽谐波、叶片通过频率；配合包络谱、时域同步平均、倒谱，在谱图上标出应在的位置 | 要**原始波形 + 转速**，对应模块 3「高频采集」；现场有人传感器只出标量，眼下用不上 |
+| `smartpulse365` | 完整的**预测性维护平台**：PLC / Modbus → Node-RED → MQTT → InfluxDB → FastAPI → React 看板，Supabase 登录，另有 Grafana 原型 | ① **健康分**：三轴振动峰值 + 温度 + PLC 运行状态码 → 百分比与 ok / watch / warning / critical；② **滚动均值 ± kσ 异常带**，计超限次数；③ 由 PLC 故障码出**根因历史**与时间线；④ 按设备配阈值 | ★**处境与我方最像**（标量振动传感器经网关入时序库、平台只读）。同取向：**停机不打健康分**（停着测不到轴承，报 100% 是没测过的话）、**传感器没数报缺数据、不当 0**。不同：异常带用均值 ± σ（我方中位数 + 四分位距）；缺省阈值写死 1.8 / 4.5 |
+| `Analizador-Motores-Siemens` | 单机脚本 Demo，信号是自己**仿真**的 | FFT 找峰：1×、2× 转频突出 ⇒ **不对中**；BPFO 加边频 ⇒ **轴承外圈故障**（SKF 6309）；出诊断面板 | 要波形且是仿真数据，参考价值低；只有判级表算独立佐证 |
+| `PROJECT-Farseer` | 桌面版**预测性维护工具**（可打 exe），「导入 → 分析 → 报告」三步，吃 CSV / JSON 标量读数 | ① **Isolation Forest**：每台机器每个传感器「此刻离常态多远」；② **Mann-Kendall 趋势检验 + Theil-Sen 斜率**：既判显著不显著，也给斜率大小（读数多时 0.2 ℃ 与 35 ℃ 的上升 p 值一样，只看 p 分不开）；③ **PELT 变点检测**（线性代价）：区分「慢慢爬升」（像磨损）与「平稳后突然跳变」（像冲击、松动）；④ 调 Groq 大模型出葡萄牙语报告，要求写明 p 值与样本数 | ★**与我方自训和暂缓的趋势层直接相关**（同吃标量时序）：② ③ 正对上挂着的「缓慢爬升误报」（D1）与趋势外推（README §11.3），是将来趋势层的候选方法；代价是要引 `scipy`、`ruptures`，而低频域现为零第三方依赖。它自述：限值表写死在代码里、原因只是推断、没在干净电脑上测过 |
+| ✗ `Vibration_analysis_260922` | 网页应用（TS） | 未细看 —— 判级表本身就不可信（§7.2） | 只作反例 |
+
+⇒ **对我方最值得看的是 `smartpulse365` 与 `PROJECT-Farseer`**（与现场一样是标量输入）；`phonometry` 的故障频率那套留给模块 3。
 
 已删（无实质）：只写死一行的 `conveyor-digital-twin`、`MechPulse`、`iot-predictive-maintenance` 等；用旧 Class Ⅰ~Ⅳ 的 `VibraGuard-Pro`；`biw00/predictive-maintenance-pump`（622 MB 多为自带 venv，只一个 notebook 一行限值）；空仓 `IS0-10816-Vibration-Sensor`；其余 README 提及而源码无表的。
 
