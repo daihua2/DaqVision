@@ -711,6 +711,8 @@ message StartTrainingReq {
   // 作用对象。空 = 训一个**全域通用**的模型；给了就是"这台设备专用"（v5 是每传感器一个）。
   string binding    = 3;
   // 想用哪个算法。★**由域解释**，骨架不枚举 —— 域自己在 `capabilities`/文档里说它认哪几个。
+  // ★1.17 起骨架**原样交给域**（此前只存在任务上、域拿不到）；一个域能训几类工件时靠它分派，
+  //   域不认识的值 ⇒ 任务 `failed` 并写明认哪几个。`vibration`：空 / `baseline` 采基线，`classifier` 训故障分类器。
   string algo       = 4;
 }
 message ListTrainJobsReq { string domain = 1; string status = 2; int32 offset = 3; int32 limit = 4; }

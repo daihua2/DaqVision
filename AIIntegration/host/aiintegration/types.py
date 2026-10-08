@@ -785,6 +785,11 @@ class Dataset:
     skipped: tuple[tuple[int, str], ...] = ()
     """`(sample_id, 原因)`。取不到数的那些。模块通常不看，但它有权知道自己少拿了多少。"""
 
+    algo: str = ""
+    """建任务时要的算法（`StartTrainingReq.algo`）。★**由域解释，骨架不枚举、不验** ——
+    一个域能训出几类工件（如振动的基线与分类器）时，靠它分派；不认识的值由域拒绝并说清。
+    契约 1.17 之前这一格只存在任务上、从没交到域手里。空 = 平台没指定。"""
+
     def label_counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
         for it in self.items:

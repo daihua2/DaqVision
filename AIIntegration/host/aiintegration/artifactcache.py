@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 #: 关心哪几类工件。★不是封闭枚举 —— 域产出什么类就缓存什么类，这里只是"去问哪几类"。
 #: 加一类只改这一行，且加错了最坏的后果是多问一次数据库。
-KINDS = ("model", "baseline")
+KINDS = ("model", "baseline", "classifier")
 
 
 class ActiveArtifacts:

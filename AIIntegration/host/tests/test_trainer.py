@@ -195,6 +195,13 @@ class TestHappyPath(TrainerBase):
         self.assertIsNone(self.wb.active_artifact("vib"))
         self.assertIn("未自动启用", job.message)
 
+    def test_建任务时要的算法交到域手里(self):
+        """契约 1.17：`StartTrainingReq.algo` 由域解释 —— 那就得真交到域手里。
+        此前它只存在任务上，一个域训几类工件（振动的基线 / 分类器）时无从分派。"""
+        jid = self.tr.submit(domain="vib", dataset_id=self.make_dataset(), algo="classifier")
+        self.assertEqual(self.run_one(jid).status, JOB_READY)
+        self.assertEqual(self.dom.seen.algo, "classifier")
+
     def test_工件真落盘且sha256与大小对得上(self):
         import hashlib
         ds = self.make_dataset()

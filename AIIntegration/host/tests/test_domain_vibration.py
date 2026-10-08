@@ -65,12 +65,29 @@ class TestDeclaration(unittest.TestCase):
     def test_名字与能力(self):
         self.assertEqual(self.d.instance.display, "低频采集AI振动诊断")
         self.assertEqual(self.d.caps, frozenset({"infer", "train"}))
-        self.assertEqual(self.d.declaration.requires_artifacts, ("baseline",), "可能要的全集")
+        self.assertEqual(self.d.declaration.requires_artifacts, ("baseline", "classifier"), "可能要的全集")
 
-    def test_一个传感器三轴加一路温度(self):
-        got = {i.role: (i.quantity, i.axis, i.group) for i in self.d.declaration.inputs}
-        self.assertEqual(got, {"x_vel": ("velocity", "x", ""), "y_vel": ("velocity", "y", ""),
-                               "z_vel": ("velocity", "z", ""), "temp": ("temperature", "", "")})
+    def test_一个传感器十三个标量_照原v5补齐(self):
+        """10-08 用户定：温度 + 三轴 ×（速度、加速度、位移、频率），与 v5 `FEATURE_SCHEMA` 同一组。"""
+        got = {i.role: (i.quantity, i.axis, i.group, i.required) for i in self.d.declaration.inputs}
+        want = {"temp": ("temperature", "", "", False)}
+        for a in "xyz":
+            want[f"{a}_vel"] = ("velocity", a, "", a == "x")
+            want[f"{a}_acc"] = ("acceleration", a, "", False)
+            want[f"{a}_disp"] = ("displacement", a, "", False)
+            want[f"{a}_freq"] = ("frequency", a, "", False)
+        self.assertEqual(got, want)
+        v5 = ["temp", "x_acc", "x_freq", "x_disp", "x_vel", "y_acc", "y_freq", "y_disp", "y_vel",
+              "z_acc", "z_freq", "z_disp", "z_vel"]
+        self.assertEqual(set(got), set(v5))
+        # 三轴十二路都得出自同一个点（同记录组），否则"同一时刻"没了保证
+        self.assertEqual({i.record for i in self.d.declaration.inputs if i.axis}, {"point1"})
+
+    def test_故障分类参数可留空_留空即不启用(self):
+        p = {x.key: x for x in self.d.declaration.params}["fault_classify"]
+        self.assertFalse(p.required)
+        self.assertEqual((p.has_default, p.blank_meaning), (False, "not_evaluated"))
+        self.assertEqual(p.choices, ("true", "false"))
 
     def test_启用算法必填无缺省(self):
         p = {x.key: x for x in self.d.declaration.params}["algorithms"]
@@ -92,6 +109,13 @@ class TestRequiredArtifacts(unittest.TestCase):
         for algos, want in (("classic", ()), ("baseline", ("baseline",)), ("both", ("baseline",)),
                             ("", ("baseline",)), ("bogus", ("baseline",))):
             self.assertEqual(d.required_artifacts({"algorithms": algos}), want, algos)
+
+    def test_启用故障分类才要分类器_非法按可能要(self):
+        d = _load()
+        for raw, want in (("", ()), ("false", ()), ("true", ("classifier",)), ("yes", ("classifier",))):
+            self.assertEqual(d.required_artifacts({"algorithms": "classic", "fault_classify": raw}), want, raw)
+        self.assertEqual(d.required_artifacts({"algorithms": "both", "fault_classify": "true"}),
+                         ("baseline", "classifier"))
 
     def test_ListBindings按绑定带出(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,7 +173,9 @@ class TestAlgorithmsParam(unittest.TestCase):
         d = _load()
         for raw in ("", "iso"):
             out = _by_key(d.instance.infer(_frame({**BOTH, "algorithms": raw}, x_vel=3.0)))
-            self.assertEqual(set(out), {o.key for o in d.declaration.outputs}, raw)
+            # 故障分类没启用（参数留空）⇒ 它那两项本就不写
+            self.assertEqual(set(out), {o.key for o in d.declaration.outputs} - {"fault_class", "fault_vote"},
+                             raw)
             for k, f in out.items():
                 self.assertIs(f.quality, Quality.CONFIG_INCOMPLETE, (raw, k))
             self.assertIn("启用算法", out["evidence"].value)

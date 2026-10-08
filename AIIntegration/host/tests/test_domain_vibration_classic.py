@@ -21,8 +21,10 @@ from aiintegration.quality import Quality
 from aiintegration.runner import run_domain
 from aiintegration.types import Frame, Sample
 
-#: 只启用经典时不写的那一半（与 `vibration.BASELINE_KEYS` 同）。
-BASELINE_KEYS = ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score")
+#: 只启用经典时不写的那一半（与 `vibration.BASELINE_KEYS` 同），加上未启用的故障分类（`CLASSIFY_KEYS`）。
+BASELINE_KEYS = ("vel_z_max", "acc_z_max", "disp_z_max", "freq_z_max",
+                 "ratio_drift", "temp_rise", "anomaly_score",
+                 "fault_class", "fault_vote")
 
 DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 T0 = datetime(2026, 9, 17, 8, 0, 0, tzinfo=timezone.utc)

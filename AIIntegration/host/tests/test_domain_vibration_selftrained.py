@@ -24,6 +24,8 @@ PARAMS = {"algorithms": "baseline", "axialAxis": "z"}
 #: 只启用自训时不写的那一半（与 `vibration.CLASSIC_KEYS` 同）。
 CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
                 "axial_ratio", "direction_hint")
+#: 未启用故障分类时不写的（与 `vibration.CLASSIFY_KEYS` 同）。
+CLASSIFY_KEYS = ("fault_class", "fault_vote")
 
 
 def _load():
@@ -248,7 +250,7 @@ class TestDeviation(unittest.TestCase):
         self.assertLess(out["vel_z_max"].value, 3.0)
 
     def test_一条都算不出来时每个输出都有锚点(self):
-        declared = {o.key for o in self.d.declare().outputs} - set(CLASSIC_KEYS)
+        declared = {o.key for o in self.d.declare().outputs} - set(CLASSIC_KEYS) - set(CLASSIFY_KEYS)
         out = _by_key(self.d.infer(_frame({"x_vel": []})))
         self.assertEqual(set(out), declared)
 
@@ -313,7 +315,7 @@ class TestStatus(unittest.TestCase):
         f = dataclasses.replace(_frame(_ch(x_vel=9.0)), artifacts={"baseline": self.art})
         res = run_domain(loaded, f)
         self.assertTrue(res.ok, res.error)
-        self.assertEqual({x.key for x in res.findings}, {o.key for o in loaded.declaration.outputs} - set(CLASSIC_KEYS))
+        self.assertEqual({x.key for x in res.findings}, {o.key for o in loaded.declaration.outputs} - set(CLASSIC_KEYS) - set(CLASSIFY_KEYS))
 
 
 _RUN_ROWS = [{"x_vel": x, "z_vel": z} for x, z in (
@@ -355,7 +357,7 @@ class TestStopState(unittest.TestCase):
     def test_不填门槛不判(self):
         out = self._infer("", x_vel=0.05, z_vel=0.02)
         self.assertEqual(out["run_state"].value, "未判")
-        self.assertEqual(set(out), {o.key for o in self.d.declare().outputs} - set(CLASSIC_KEYS))
+        self.assertEqual(set(out), {o.key for o in self.d.declare().outputs} - set(CLASSIC_KEYS) - set(CLASSIFY_KEYS))
 
     def test_采基线剔除停机帧(self):
         params = dict(PARAMS, stop_threshold="0.3")
@@ -383,6 +385,88 @@ class TestStopState(unittest.TestCase):
             self.d.train(_dataset(_RUN_ROWS, params=dict(PARAMS, stop_threshold="abc")),
                          ProgressSink())
         self.assertIn("停机门槛", str(cm.exception))
+
+
+class TestOtherQuantities(unittest.TestCase):
+    """10-08 补齐输入：加速度、位移偏离 ≥3 推「注意」，频率偏离只报不推（用户定）。"""
+
+    ROWS = [{"x_vel": v, "x_acc": a, "x_disp": d, "x_freq": f, "temp": 40.0}
+            for v, a, d, f in ((1.0, 0.50, 40.0, 150.0), (1.1, 0.52, 42.0, 152.0), (0.9, 0.48, 38.0, 148.0),
+                               (1.05, 0.51, 41.0, 151.0), (0.95, 0.49, 39.0, 149.0), (1.0, 0.50, 40.0, 150.0))]
+
+    def setUp(self):
+        self.d = _load().instance
+        self.art = _artifact(self.d.train(_dataset(self.ROWS), ProgressSink()))
+
+    def _infer(self, art=None, **vals):
+        f = dataclasses.replace(_frame(_ch(**vals)), artifacts={"baseline": art or self.art})
+        return _by_key(self.d.infer(f))
+
+    def test_十三路有数的都进基线(self):
+        rows = [{r: 1.0 + 0.01 * i for r in ("x_vel", "y_vel", "z_vel", "x_acc", "y_acc", "z_acc",
+                                              "x_disp", "y_disp", "z_disp", "x_freq", "y_freq", "z_freq", "temp")}
+                for i in range(5)]
+        chans = json.loads(self.d.train(_dataset(rows), ProgressSink()).blob)["channels"]
+        self.assertEqual(len(chans), 13)
+        self.assertEqual(json.loads(self.art.blob)["format"], "vibration_baseline/baseline@1", "格式号不变")
+
+    def test_都在常态时正常(self):
+        out = self._infer(x_vel=1.0, x_acc=0.5, x_disp=40.0, x_freq=150.0)
+        for k in ("acc_z_max", "disp_z_max", "freq_z_max"):
+            self.assertIs(out[k].quality, Quality.OK, k)
+            self.assertLess(abs(out[k].value), 3, k)
+        self.assertEqual(out["status"].value, "normal")
+
+    def test_加速度偏离推注意_速度不变也推(self):
+        out = self._infer(x_vel=1.0, x_acc=0.7, x_disp=40.0)
+        self.assertGreaterEqual(out["acc_z_max"].value, 3)
+        self.assertLess(out["vel_z_max"].value, 3)
+        self.assertEqual(out["status"].value, "attention")
+        self.assertIn("加速度较基线偏高", out["evidence"].value)
+
+    def test_位移偏离推注意(self):
+        out = self._infer(x_vel=1.0, x_acc=0.5, x_disp=60.0)
+        self.assertGreaterEqual(out["disp_z_max"].value, 3)
+        self.assertEqual(out["status"].value, "attention")
+
+    def test_频率偏离只报不推状态_带符号(self):
+        out = self._infer(x_vel=1.0, x_acc=0.5, x_disp=40.0, x_freq=100.0)
+        self.assertLessEqual(out["freq_z_max"].value, -3, "偏低也是变化，带符号给")
+        self.assertEqual(out["status"].value, "normal")
+        self.assertIn("只报，不影响检测状态", out["evidence"].value)
+
+    def test_加速度偏离进异常分(self):
+        calm = self._infer(x_vel=1.0, x_acc=0.5)["anomaly_score"].value
+        hot = self._infer(x_vel=1.0, x_acc=0.7)["anomaly_score"].value
+        self.assertGreater(hot, calm)
+
+    def test_没选这个量不给且落无输入(self):
+        out = self._infer(x_vel=1.0)
+        for k in ("acc_z_max", "disp_z_max", "freq_z_max"):
+            self.assertIsNone(out[k].value, k)
+            self.assertIs(out[k].quality, Quality.NO_INPUT, k)
+        self.assertEqual(out["status"].value, "normal")
+
+    def test_老基线里没有这一量_落无可用模型并说要重采(self):
+        old = _artifact(self.d.train(_dataset([{"x_vel": v} for v in (1.0, 1.1, 0.9, 1.05, 0.95)]),
+                                     ProgressSink()))
+        out = self._infer(art=old, x_vel=1.0, x_acc=5.0)
+        self.assertIs(out["acc_z_max"].quality, Quality.MODEL_NOT_LOADED)
+        self.assertIn("重采基线", out["evidence"].value)
+        self.assertEqual(out["status"].value, "normal", "老基线照常按速度判，不因缺新通道算不出")
+
+    def test_选了但本窗口全是坏值_落样本不足(self):
+        f = dataclasses.replace(
+            _frame({"x_vel": _samples(1.0), "x_acc": _samples((0.9, Quality.INPUT_BAD))}),
+            artifacts={"baseline": self.art})
+        out = _by_key(self.d.infer(f))
+        self.assertIs(out["acc_z_max"].quality, Quality.INSUFFICIENT_SAMPLES)
+
+    def test_位移尺度下限按分辨率1微米_不套速度的0点01(self):
+        flat = _artifact(self.d.train(_dataset([{"x_vel": 1.0, "x_disp": 40.0}] * 5), ProgressSink()))
+        out = self._infer(art=flat, x_vel=1.0, x_disp=41.0)
+        self.assertAlmostEqual(out["disp_z_max"].value, 1.0, msg="差 1 μm = 1 个尺度单位，不是 100")
+        self.assertEqual(out["status"].value, "normal")
 
 
 if __name__ == "__main__":

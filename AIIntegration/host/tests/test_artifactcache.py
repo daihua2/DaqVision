@@ -70,6 +70,19 @@ class TestActiveArtifacts(unittest.TestCase):
         got = self.cache.for_binding("vib", "dev1")
         self.assertEqual(set(got), {"model", "baseline"})
 
+    def test_分类器与基线各占各的档且都交到推理(self):
+        """振动 1.2.0 的故障分类器是第三类工件（`kind="classifier"`）。★漏问这一类，
+        启用了的分类器永远到不了 `infer()`，结论只会一直落「无可用模型」—— 看着像没训。"""
+        (self.dir / "vib" / "c1.json").write_bytes(b'{"format":"c"}')
+        b = self.wb.add_artifact(domain="vib", name="b", binding="dev1",
+                                 kind=KIND_BASELINE, path="vib/b1.json")
+        c = self.wb.add_artifact(domain="vib", name="c", binding="dev1",
+                                 kind="classifier", path="vib/c1.json")
+        self.wb.activate_artifact(b); self.wb.activate_artifact(c)
+        got = self.cache.for_binding("vib", "dev1")
+        self.assertEqual(set(got), {"baseline", "classifier"})
+        self.assertEqual(got["classifier"].blob, b'{"format":"c"}')
+
     def test_按id缓存不重读磁盘(self):
         aid = self.wb.add_artifact(domain="vib", name="m", binding="dev1", path="vib/m1.bin")
         self.wb.activate_artifact(aid)

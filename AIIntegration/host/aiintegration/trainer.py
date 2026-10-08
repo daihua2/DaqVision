@@ -370,7 +370,7 @@ class Trainer:
                 self._wb.update_job(job.id, progress=0.1 * (i + 1) / max(1, len(samples)))
 
         return (Dataset(domain=job.domain, binding=job.binding, name=ds_name,
-                        items=tuple(items), skipped=tuple(skipped)),
+                        items=tuple(items), skipped=tuple(skipped), algo=job.algo or ""),
                 skipped, origins, len(used), empty_windows)
 
     # ── 落盘 ──────────────────────────────────────────────────────────────

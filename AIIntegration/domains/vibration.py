@@ -15,8 +15,12 @@
 | 部分 | 结论 | 依据 |
 | --- | --- | --- |
 | 经典算法 | 速度最大值、最大值所在轴、烈度区（文字 / 数值）、距下一档余量、轴向/径向比、方向性提示 | 工业机器 GB/T 6075.3、泵 GB/T 6075.7；方向性是经验判据，只作提示 |
-| AI 自训 | 速度偏离、三轴比例漂移、温升、异常分 | 与这台设备自己采的基线比（中位数 + 四分位距） |
+| AI 自训 | 速度 / 加速度 / 位移 / 频率偏离、三轴比例漂移、温升、异常分 | 与这台设备自己采的基线比（中位数 + 四分位距） |
+| 故障分类 | 故障类别、票数占比 | 13 标量随机森林（§0.7），**只报、不推检测状态** |
 | 共用 | **检测状态**、运行状态、判据摘要 | 见 §0.3 |
+
+输入按原 v5 补齐为 13 标量（2026-10-08 用户定）：温度 + 三轴 ×（速度、加速度、位移、频率）。
+★经典判级**只看速度** —— 国标限值本就是按速度有效值定的，别的量套不上那张表。
 
 ## 0.2 启用哪种算法：参数 `algorithms`，必填、无缺省
 
@@ -29,7 +33,8 @@
 | 部分 | 会出的档 |
 | --- | --- |
 | 经典 | A、B → 正常；C → 警告；D → 危险（★B 区即「可长期运行」，不对「注意」） |
-| 自训 | 速度偏离 ≥ 3 → 注意，否则正常（★不出警告、危险：本部分门槛无标定依据，不该把设备说成危险） |
+| 自训 | 速度、加速度、位移任一偏离 ≥ 3 → 注意，否则正常（★不出警告、危险：本部分门槛无标定依据，不该把设备说成危险；★频率偏离只报不推，主频在几个谱峰间跳是常态，10-08 用户定） |
+| 故障分类 | **不参与**（10-08 用户定：现场没有真实故障标签，分类准不准没有依据） |
 
 合成规则（`_combine_status`）：
 1. 停机 ⇒ 停机；
@@ -58,11 +63,28 @@
 
 参数没填、口径没确认、没有基线、样本全是坏值 —— 每一种都对应一条特定的坏质量结论，
 而不是"给个看起来合理的数"。**猜错的烈度分级会把"该停机"说成"可长期运行"，而且从数值上看不出来。**
+
+## 0.7 故障分类（13 标量 → 人标的类别）
+
+> 2026-10-08 用户定：恢复原 v5 的 13 标量分类，**撤销定案 2.3「先不做」**；分类器手写、零第三方依赖
+> （守定案 2.4：本域一旦声明 `REQUIRES`，现场 venv 缺包就整域不铺，现役判级跟着掉）。
+
+- 参数 `fault_classify`：`true` 启用；**留空或 `false` 不启用**（`blank_meaning=not_evaluated`，老绑定不受影响）。
+- 训练走同一条训练面，按 `Dataset.algo` 分派：空 / `baseline` 采基线（平台现役就传空），`classifier` 训分类器，
+  其余拒绝并说清。分类器是**另一类工件**（`kind="classifier"`），与基线各占各的启用位。
+- 算法对齐 v5 现场实际在跑的那个（`RandomForest fallback`：类权重均衡、深度 6），但补上 v5 缺的三件
+  （research/lowfreq-layer3 §3）：**按样本分层留出验证集**（同一条样本切出的帧高度相关，按帧分会泄漏）、
+  每类精确率/召回率与混淆矩阵、每类最小样本量门槛 —— 不够就训练失败并说清，不训一个「永远答多数类」的模型。
+  `accuracy` 是**留出集**上的，不是训练集自测（v5 那 71 个 1.0 就是这么来的）。
+- 结论「故障类别」「票数占比」**只报，不推检测状态**；票数占比是各树叶子分布的平均，★不是概率。
 """
 
 from __future__ import annotations
 
+import bisect
 import json
+import math
+import random
 from datetime import datetime
 
 # ★域模块 import 骨架一律用**绝对包名**：装载器按文件路径 exec，相对 import 会当场炸。
@@ -131,6 +153,36 @@ _LEVEL_TEXT = {STATUS_NORMAL: "正常", STATUS_ATTENTION: "注意", STATUS_WARNI
 _AXES = ("x", "y", "z")
 TEMP_ROLE = "temp"
 
+#: 四个振动量（角色名后缀）。单位、显示分辨率取自有人 USR-SVT10-01B 手册（doc/传感器资料）。
+VEL, ACC, DISP, FREQ = "vel", "acc", "disp", "freq"
+#: 量 → (单位, 物理量 quantity, 显示名)。★`frequency` 不在 `H-261 §2.1` 首批五个里，已提请 hs 收录。
+_QTY: dict[str, tuple[str, str, str]] = {
+    VEL: ("mm/s", "velocity", "速度"),
+    ACC: ("g", "acceleration", "加速度"),
+    DISP: ("μm", "displacement", "位移"),
+    FREQ: ("Hz", "frequency", "频率"),
+}
+#: 幅值类：窗口内取最大值（与速度同口径）；其余（频率、温度）取窗口均值。
+_PEAK_QTYS = (VEL, ACC, DISP)
+#: 偏离能把检测状态推到「注意」的量。★频率不在内（用户 10-08 定）：主频在几个谱峰之间跳是常态。
+_STATUS_QTYS = (VEL, ACC, DISP)
+#: 加速度、位移、频率偏离的结论键。速度偏离仍是 `vel_z_max`。
+_Z_KEY = {ACC: "acc_z_max", DISP: "disp_z_max", FREQ: "freq_z_max"}
+_STATUS_Z_KEYS = ("vel_z_max",) + tuple(_Z_KEY[q] for q in _STATUS_QTYS if q != VEL)
+
+
+def _role(axis: str, qty: str) -> str:
+    return f"{axis}_{qty}"
+
+
+def _qty_of(role: str) -> str:
+    """角色 → 量；温度回空串。"""
+    return role.split("_", 1)[1] if "_" in role else ""
+
+
+#: 13 标量，顺序照原 v5 `FEATURE_SCHEMA`（`single_frame_models.py:23`）。
+FEATURE_ROLES = (TEMP_ROLE,) + tuple(_role(a, q) for a in _AXES for q in (ACC, FREQ, DISP, VEL))
+
 #: 方向性判据阈值。**经验值**，不是国标。
 #: ★出处要分清：判据**方向**（轴向偏高→不对中、径向主导→不平衡、三轴均衡→松动）出自改造方案 §3 轨A④
 #:   现象/倾向表；那张表只有「显著」「异常升高」等定性说法，**这两个数是 2026-09-11 落码时我方取的，
@@ -150,6 +202,9 @@ MIN_BASELINE_FRAMES = 5
 #: 稳健尺度的下限（mm/s，温度同用）。传感器分辨率决定它不可能真是 0；
 #: ★不设下限的后果是除零或天文数字的 z 分数，后者更坏，因为它看着像个结论。
 MIN_SCALE = 0.01
+#: 加速度、位移、频率各按自己的**显示分辨率**设下限（SVT10-01B：0.01 g / 1 μm / 1 Hz）。
+#: ★不能套速度的 0.01：位移分辨率 1 μm，四分位距为 0 时差 1 μm 就成了 100 个尺度单位。
+_MIN_SCALE_BY_QTY = {ACC: 0.01, DISP: 1.0, FREQ: 1.0}
 
 #: 四分位距折算成与标准差同尺度的系数（正态分布下 IQR ≈ 1.349σ）。
 _IQR_TO_SIGMA = 1.349
@@ -162,11 +217,22 @@ DEFAULT_NORMAL_LABEL = "正常"
 #: 两部分各自的结论键。没启用的那一半不写。
 CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
                 "axial_ratio", "direction_hint")
-BASELINE_KEYS = ("vel_z_max", "ratio_drift", "temp_rise", "anomaly_score")
+BASELINE_KEYS = ("vel_z_max", "acc_z_max", "disp_z_max", "freq_z_max",
+                 "ratio_drift", "temp_rise", "anomaly_score")
+CLASSIFY_KEYS = ("fault_class", "fault_vote")
+
+#: 启用故障分类的参数（§0.7）。
+P_CLASSIFY = "fault_classify"
+
+#: 训练时 `Dataset.algo` 认的值（§0.7）。★空串 = 采基线：平台现役采基线就传空（现场 train_jobs 实查）。
+TRAIN_BASELINE, TRAIN_CLASSIFIER = "baseline", "classifier"
+#: ★兼容：契约 1.17 之前 `algo` 从没交到域手里，调用方随手填过中文 —— 现场 09-15 有一条「基线统计」、
+#:   本仓用例用「基线」。这两个照旧按采基线走；其余不认识的拒绝，不猜。
+_BASELINE_ALIASES = ("", TRAIN_BASELINE, "基线", "基线统计")
 
 
 def _vel_role(axis: str) -> str:
-    return f"{axis}_vel"
+    return _role(axis, VEL)
 
 
 class Vibration(Domain):
@@ -174,7 +240,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.1.1"
+    version = "1.2.0"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -187,13 +253,24 @@ class Vibration(Domain):
                 display=f"{axis.upper()} 轴速度",
                 description=("速度有效值。至少选 X 轴速度" if axis == "x" else "速度有效值，可不选"))
             for axis in _AXES]
+        # 10-08 按原 v5 补齐：加速度、位移、频率。都可选；经典判级不用它们（§0.1）。
+        _uses = {ACC: "AI 自训（偏离 ≥3 推「注意」）与故障分类用",
+                 DISP: "AI 自训（偏离 ≥3 推「注意」）与故障分类用",
+                 FREQ: "AI 自训（偏离只报、不推状态）与故障分类用"}
+        for qty in (ACC, DISP, FREQ):
+            unit, quantity, name = _QTY[qty]
+            inputs += [InputSpec(
+                role=_role(axis, qty), unit=unit, required=False,
+                quantity=quantity, axis=axis, record="point1",
+                display=f"{axis.upper()} 轴{name}", description=f"{_uses[qty]}，可不选")
+                for axis in _AXES]
         inputs.append(InputSpec(
             role=TEMP_ROLE, unit="℃", required=False, quantity="temperature",
-            display="温度", description="只有 AI 自训用：有就算温升，没有就不给温升"))
+            display="温度", description="AI 自训与故障分类用：有就算温升，没有就不给温升"))
         return Declaration(
             inputs=tuple(inputs),
-            # ★「可能要」：只有启用了 AI 自训才真要，按绑定算的见 `required_artifacts`。
-            requires_artifacts=("baseline",),
+            # ★「可能要」：启用了 AI 自训才要基线、启用了故障分类才要分类器，按绑定算的见 `required_artifacts`。
+            requires_artifacts=("baseline", "classifier"),
             params=(
                 ParamSpec(
                     key=P_ALGOS, display="启用算法", value_type="enum",
@@ -261,11 +338,18 @@ class Vibration(Domain):
                     blank_meaning="not_evaluated", min="0",
                     description="速度最大值低于它即判停机：停机时不判烈度与方向、不出偏离与异常分，采基线时剔除停机帧。"
                                 "不填不判；没有缺省，按设备自己定"),
+                ParamSpec(
+                    key=P_CLASSIFY, display="启用故障分类", value_type="enum",
+                    choices=("true", "false"), choice_displays=("启用", "不启用"),
+                    required=False, level="position", blank_meaning="not_evaluated",
+                    description="13 标量随机森林，按人标的类别（如不平衡 / 不对中 / 松动）给出最像哪一类。"
+                                "须先用多类标注样本训练分类器并启用。结果只作参考、不影响检测状态。留空即不启用"),
             ),
             outputs=(
                 OutputSpec(key="status", display="检测状态", value_type="string",
                            role=ROLE_STATUS, stop_behavior=STOP_LITERAL,
-                           description="经典：A、B → 正常，C → 警告，D → 危险；AI 自训：速度偏离 ≥ 3 → 注意，否则正常；"
+                           description="经典：A、B → 正常，C → 警告，D → 危险；AI 自训：速度、加速度、位移任一偏离 ≥ 3 → 注意，否则正常"
+                                       "（频率偏离与故障分类不参与）；"
                                        "两者都用取较高档。停机 → 停机。自训算不出（如未采基线）时按经典判、判据摘要注明；"
                                        "经典也算不出时落坏质量码，不报正常",
                            choices=(STATUS_NORMAL, STATUS_ATTENTION, STATUS_WARNING, STATUS_DANGER,
@@ -299,6 +383,16 @@ class Vibration(Domain):
                 OutputSpec(key="vel_z_max", display="速度偏离", value_type="float",
                            description="AI 自训。各速度通道 (当前−基线中位数)/(四分位距/1.349) 的最大值。≥3 视为显著偏离",
                            stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="acc_z_max", display="加速度偏离", value_type="float",
+                           description="AI 自训。各加速度通道偏离的最大值，算法同速度偏离。≥3 推「注意」；没选加速度则不给",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="disp_z_max", display="位移偏离", value_type="float",
+                           description="AI 自训。各位移通道偏离的最大值，算法同速度偏离。≥3 推「注意」；没选位移则不给",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="freq_z_max", display="频率偏离", value_type="float",
+                           description="AI 自训。各频率通道偏离里绝对值最大的那个，带符号（负 = 比基线低）。"
+                                       "只报、不推检测状态；没选频率则不给",
+                           stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="ratio_drift", display="三轴比例漂移", value_type="float",
                            description="AI 自训。轴向/径向比相对基线的变化量",
                            stop_behavior=STOP_NOT_WRITTEN),
@@ -306,7 +400,13 @@ class Vibration(Domain):
                            description="AI 自训。相对基线的温度变化",
                            stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="anomaly_score", display="异常分", value_type="float", headline=True,
-                           description="AI 自训。0~100，由上面几项合成。★不是概率，是排序用的分数",
+                           description="AI 自训。0~100，由速度/加速度/位移偏离、比例漂移、温升合成。★不是概率，是排序用的分数",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="fault_class", display="故障类别", value_type="string",
+                           description="故障分类。分类器判为最像的那一类（训练时人标的标签原文）。只作参考、不影响检测状态",
+                           stop_behavior=STOP_NOT_WRITTEN),
+                OutputSpec(key="fault_vote", display="票数占比", value_type="float",
+                           description="故障分类。判出那一类在各棵树里的平均占比，0~1。★不是概率，也不是准确率",
                            stop_behavior=STOP_NOT_WRITTEN),
                 OutputSpec(key="run_state", display="运行状态", value_type="string",
                            description="运行 / 停机 / 未判（未填停机门槛）。停机时数值类结论不更新，界面据此置灰",
@@ -317,15 +417,28 @@ class Vibration(Domain):
         )
 
     def required_artifacts(self, params: dict[str, str]) -> tuple[str, ...]:
-        """按绑定参数算：只有启用了 AI 自训才要基线（契约 1.14 `Binding.requires_artifacts`）。
-        `algorithms` 没填或非法时按「可能要」回 —— 不替没填的参数下结论说「不需要」。"""
+        """按绑定参数算：启用了 AI 自训才要基线、启用了故障分类才要分类器（契约 1.14 `Binding.requires_artifacts`）。
+        `algorithms` 没填或非法、`fault_classify` 非法时按「可能要」回 —— 不替没填对的参数下结论说「不需要」。"""
         algos = _algos(params)
+        need: list[str] = []
         if algos is None or ALGO_BASELINE in algos:
-            return ("baseline",)
-        return ()
+            need.append("baseline")
+        if _classify_on(params) is not False:
+            need.append("classifier")
+        return tuple(need)
 
-    # ── 训练（采基线）──────────────────────────────────────────────────────
+    # ── 训练 ──────────────────────────────────────────────────────────────
     def train(self, dataset: Dataset, report: ProgressSink) -> TrainedArtifact:
+        """按 `dataset.algo` 分派（§0.7）：空 / `baseline` 采基线，`classifier` 训故障分类器。"""
+        algo = (dataset.algo or "").strip().lower()
+        if algo in _BASELINE_ALIASES:
+            return self._train_baseline(dataset, report)
+        if algo == TRAIN_CLASSIFIER:
+            return _train_classifier(dataset, report)
+        raise ValueError(f"不认识的训练算法 {dataset.algo!r}：本模块只认 {TRAIN_BASELINE!r}（采基线，留空同此）"
+                         f"与 {TRAIN_CLASSIFIER!r}（故障分类器），不猜")
+
+    def _train_baseline(self, dataset: Dataset, report: ProgressSink) -> TrainedArtifact:
         """采一条基线：这台设备正常运行时各通道的中位数与四分位距，以及三轴比例。
 
         ★判级参数齐全时先用国标查所选时段：有一帧落 C / D 区就拒采（§0.4）。
@@ -380,11 +493,10 @@ class Vibration(Domain):
                            + (f"（剔除停机帧 {stopped}）" if stopped else "") + f"；{iso_check}")
 
         channels: dict[str, dict[str, float]] = {}
-        for role in [_vel_role(a) for a in _AXES] + [TEMP_ROLE]:
+        for role in FEATURE_ROLES:          # 13 路有数的都记（10-08 补齐）；没选的自然采不到
             vals = []
             for it in normals:
-                v = (_window_mean(it.frame, role) if role == TEMP_ROLE
-                     else _window_peak(it.frame, role))
+                v = _feature(it.frame, role)
                 if v is not None:
                     vals.append(v)
             if len(vals) >= MIN_BASELINE_FRAMES:
@@ -500,6 +612,9 @@ class Vibration(Domain):
         if note:
             parts.append(note)
 
+        # ⑤ 故障分类：只报，不推检测状态（§0.7）
+        _classify_frame(frame, t, out, parts)
+
         parts.append(state_note)
         if bad:
             parts.append(f"降级：{'/'.join(bad)} 本窗口全是坏值，未参与判定")
@@ -564,9 +679,9 @@ class Vibration(Domain):
         out += found
         parts.append(note)
         z = next(f for f in found if f.key == "vel_z_max")
-        if z.value is None:
+        if z.value is None:                  # 「自训算不出」仍以速度为准（§0.3 不动）
             return None, z.quality
-        return (STATUS_ATTENTION if z.value >= _Z_NOTABLE else STATUS_NORMAL), None
+        return (STATUS_ATTENTION if _status_z(found) >= _Z_NOTABLE else STATUS_NORMAL), None
 
 
 # ─────────────────────────────── 合成 ───────────────────────────────
@@ -578,6 +693,16 @@ def _algos(params: dict[str, str]) -> frozenset[str] | None:
         return frozenset({ALGO_CLASSIC, ALGO_BASELINE})
     if raw in (ALGO_CLASSIC, ALGO_BASELINE):
         return frozenset({raw})
+    return None
+
+
+def _classify_on(params: dict[str, str]) -> bool | None:
+    """`fault_classify` → 是否启用故障分类。留空即不启用（`blank_meaning=not_evaluated`）；非法回 None。"""
+    raw = (params.get(P_CLASSIFY) or "").strip().lower()
+    if raw == "true":
+        return True
+    if raw in ("", "false"):
+        return False
     return None
 
 
@@ -823,6 +948,13 @@ def _window_mean(frame: Frame, role: str) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
+def _feature(frame: Frame, role: str) -> float | None:
+    """一路在一个窗口上的特征值：幅值类取最大值、频率与温度取均值。★基线与分类同口径。"""
+    if _qty_of(role) in _PEAK_QTYS:
+        return _window_peak(frame, role)
+    return _window_mean(frame, role)
+
+
 def _quantile(sorted_vals: list[float], q: float) -> float:
     """线性插值分位数（与 numpy 缺省口径一致）。"""
     n = len(sorted_vals)
@@ -839,9 +971,9 @@ def _median_iqr(vals: list[float]) -> tuple[float, float]:
     return _quantile(s, 0.5), _quantile(s, 0.75) - _quantile(s, 0.25)
 
 
-def _scale(chan: dict) -> float:
-    """四分位距折算成与标准差同尺度，并套下限。"""
-    return max(float(chan.get("iqr") or 0.0) / _IQR_TO_SIGMA, MIN_SCALE)
+def _scale(chan: dict, qty: str = VEL) -> float:
+    """四分位距折算成与标准差同尺度，并套该量的下限。"""
+    return max(float(chan.get("iqr") or 0.0) / _IQR_TO_SIGMA, _MIN_SCALE_BY_QTY.get(qty, MIN_SCALE))
 
 
 def _parse_baseline(blob: bytes) -> dict:
@@ -878,6 +1010,13 @@ def _deviation(model: dict, peaks: dict[str, float], frame: Frame,
     else:
         out.append(Finding(key="vel_z_max", value=None, quality=Quality.INSUFFICIENT_SAMPLES, t=t))
         notes.append("本帧没有与基线同通道的可信样本，速度偏离未给")
+
+    # ①' 加速度、位移、频率偏离（10-08 补齐输入）。
+    for qty in (ACC, DISP, FREQ):
+        found, note = _qty_deviation(chans, frame, qty, t)
+        out.append(found)
+        if note:
+            notes.append(note)
 
     # ② 三轴比例漂移。
     axial = frame.params.get(P_AXIAL, "").strip().lower()
@@ -927,7 +1066,7 @@ def _deviation(model: dict, peaks: dict[str, float], frame: Frame,
     if not zs:
         out.append(Finding(key="anomaly_score", value=None, quality=Quality.INSUFFICIENT_SAMPLES, t=t))
     else:
-        z_part = min(1.0, max(0.0, max(zs.values())) / (2 * _Z_NOTABLE))
+        z_part = min(1.0, max(0.0, _status_z(out)) / (2 * _Z_NOTABLE))
         got_drift = next((f for f in out if f.key == "ratio_drift"), None)
         d_part = (min(1.0, abs(got_drift.value) / 0.5)
                   if got_drift is not None and got_drift.value is not None else 0.0)
@@ -939,6 +1078,362 @@ def _deviation(model: dict, peaks: dict[str, float], frame: Frame,
 
     head = f"基线{_baseline_age(model, t)}（{model.get('frames', '?')} 帧）"
     return out, "；".join([head] + notes)
+
+
+def _status_z(found: list[Finding]) -> float:
+    """能推状态的那几项偏离（速度、加速度、位移）里最大的。调用方保证速度偏离已算出。"""
+    return max(f.value for f in found if f.key in _STATUS_Z_KEYS and f.value is not None)
+
+
+def _qty_deviation(chans: dict, frame: Frame, qty: str, t: datetime) -> tuple[Finding, str]:
+    """一个量（加速度 / 位移 / 频率）相对基线的偏离：各轴取最大，频率按绝对值取、带符号。
+
+    没选这个量 ⇒ NO_INPUT（照温升）；选了但基线里没有 ⇒ MODEL_NOT_LOADED，说清要重采；
+    选了、基线也有，但本窗口没有可信样本 ⇒ INSUFFICIENT_SAMPLES。
+    """
+    key, name = _Z_KEY[qty], _QTY[qty][2]
+    chosen = [a for a in _AXES if _role(a, qty) in frame.channels]
+    if not chosen:
+        return Finding(key=key, value=None, quality=Quality.NO_INPUT, t=t), ""
+    zs: dict[str, float] = {}
+    no_base: list[str] = []
+    for a in chosen:
+        role = _role(a, qty)
+        base = chans.get(role)
+        if base is None:
+            no_base.append(a)
+            continue
+        cur = _feature(frame, role)
+        if cur is not None:
+            zs[a] = (cur - float(base["median"])) / _scale(base, qty)
+    notes = []
+    if no_base:
+        notes.append(f"{'/'.join(no_base)} 轴{name}基线里没有（基线采于选它之前），重采基线后才有")
+    if not zs:
+        q = Quality.MODEL_NOT_LOADED if len(no_base) == len(chosen) else Quality.INSUFFICIENT_SAMPLES
+        if q is Quality.INSUFFICIENT_SAMPLES:
+            notes.append(f"{name}本窗口没有可信样本，{name}偏离未给")
+        return Finding(key=key, value=None, quality=q, t=t), "；".join(notes)
+    two_sided = qty not in _PEAK_QTYS        # 频率：偏高偏低都是变化
+    worst = max(zs, key=lambda a: abs(zs[a]) if two_sided else zs[a])
+    v = zs[worst]
+    if (abs(v) if two_sided else v) >= _Z_NOTABLE:
+        notes.append(f"{worst} 轴{name}较基线偏移 {v:+.1f} 个尺度单位（只报，不影响检测状态）"
+                     if qty not in _STATUS_QTYS else f"{worst} 轴{name}较基线偏高 {v:.1f} 个尺度单位")
+    return Finding(key=key, value=round(v, 3), quality=Quality.OK, t=t), "；".join(notes)
+
+
+# ─────────────────────────────── 故障分类 ───────────────────────────────
+
+#: 分类器格式。**存进工件里**：格式一变，老工件要能被认出来而不是被误读。
+CLASSIFIER_FORMAT = "vibration_classifier/rf@1"
+
+#: 每类至少几帧、几条样本（§0.7）。★至少 2 条样本：一条进训练、一条进留出集，否则这一类根本没被验过。
+MIN_CLASS_FRAMES = 10
+MIN_CLASS_SAMPLES = 2
+#: 留出集占比（**按样本计**，不按帧）。
+HOLDOUT_FRACTION = 0.25
+
+#: 随机森林。深度与类权重对齐 v5 现场在跑的 `RandomForestClassifier(n_estimators=120, max_depth=6,
+#: class_weight="balanced")`；树数取 100、切点按分位数取 ≤32 个 —— 纯 Python 要在十几秒内训完 5000 帧。
+RF_TREES = 100
+RF_MAX_DEPTH = 6
+RF_MIN_LEAF = 2
+RF_MAX_CUTS = 32
+RF_SEED = 42
+
+
+def _unit_of(role: str) -> str:
+    return "℃" if role == TEMP_ROLE else _QTY[_qty_of(role)][0]
+
+
+def _train_classifier(dataset: Dataset, report: ProgressSink) -> TrainedArtifact:
+    """训一个 13 标量故障分类器（§0.7）。样本够不够、验没验过，都在这里说清，不够就失败。"""
+    # ① 停机帧不进训练：停着的帧哪一类都像，只会把各类搅在一起。
+    running: list[LabeledFrame] = []
+    stopped = 0
+    for it in dataset.items:
+        _state, q, note = run_state(it.frame.params, 0.0)
+        if q is not Quality.OK:
+            raise ValueError(f"{note} —— 判不了哪些帧是停机，不训分类器")
+        if _frame_stopped(it.frame, it.frame.params):
+            stopped += 1
+        else:
+            running.append(it)
+
+    # ② 特征集 = 训练帧里出现过的那几路（按 13 标量的固定顺序）；缺任一路的帧剔除并计数。
+    rows = [(it, {r: _feature(it.frame, r) for r in FEATURE_ROLES}) for it in running]
+    feats = [r for r in FEATURE_ROLES if any(v[r] is not None for _, v in rows)]
+    if not feats:
+        raise ValueError(f"训练集 {len(dataset)} 帧里一路可信特征都没取到"
+                         + (f"（其中 {stopped} 帧判为停机已剔除）" if stopped else "")
+                         + " —— 检查所选采集点与这段时间实时库里有没有数据")
+    X: list[list[float]] = []
+    y_lab: list[str] = []
+    groups: list[tuple[str, int]] = []
+    incomplete = 0
+    for it, v in rows:
+        if any(v[r] is None for r in feats):
+            incomplete += 1
+            continue
+        X.append([v[r] for r in feats])         # type: ignore[misc]
+        y_lab.append(it.label)
+        groups.append((it.label, it.sample_id))
+
+    labels = sorted(set(y_lab))
+    frames_by = {lb: y_lab.count(lb) for lb in labels}
+    samples_by = {lb: sorted({g[1] for g in groups if g[0] == lb}) for lb in labels}
+    dist = "、".join(f"{lb} {frames_by[lb]} 帧 / {len(samples_by[lb])} 条样本" for lb in labels) or "无"
+    dropped = "".join([f"；{stopped} 帧判为停机已剔除" if stopped else "",
+                       f"；{incomplete} 帧缺特征已剔除" if incomplete else ""])
+    if len(labels) < 2:
+        raise ValueError(f"故障分类至少要两类，实际只有 {len(labels)} 类（{dist}{dropped}）—— 一类训不出分类器")
+    short = [lb for lb in labels
+             if frames_by[lb] < MIN_CLASS_FRAMES or len(samples_by[lb]) < MIN_CLASS_SAMPLES]
+    if short:
+        raise ValueError(
+            f"类别 {'、'.join(short)} 样本不足：每类至少 {MIN_CLASS_FRAMES} 帧、{MIN_CLASS_SAMPLES} 条样本"
+            f"（一条进训练、一条留作验证）；各类：{dist}{dropped}")
+    report.report(0.2, f"特征 {len(feats)} 路，{len(X)} 帧（{dist}{dropped}）")
+
+    # ③ ★按样本分层留出：同一条样本切出的帧高度相关，按帧分会把考题漏给考生。
+    rng = random.Random(RF_SEED)
+    hold: set[tuple[str, int]] = set()
+    for lb in labels:
+        sids = list(samples_by[lb])
+        rng.shuffle(sids)
+        k = min(len(sids) - 1, max(1, round(len(sids) * HOLDOUT_FRACTION)))
+        hold.update((lb, s) for s in sids[:k])
+    index = {lb: k for k, lb in enumerate(labels)}
+    y = [index[lb] for lb in y_lab]
+    tr = [i for i in range(len(X)) if groups[i] not in hold]
+    ho = [i for i in range(len(X)) if groups[i] in hold]
+
+    forest = _rf_fit([X[i] for i in tr], [y[i] for i in tr], len(labels),
+                     lambda p: report.report(0.2 + 0.35 * p, "在训练部分上训练、准备验证"))
+    pred = [_argmax(_rf_proba(forest, X[i], len(labels))) for i in ho]
+    metrics = _metrics([y[i] for i in ho], pred, labels)
+    metrics["samples"] = len(hold)
+    report.report(0.6, f"留出集 {len(ho)} 帧（{len(hold)} 条样本）准确率 {metrics['accuracy']:.3f}；"
+                       f"用全部 {len(X)} 帧重训")
+
+    # ④ 评估完用全部数据重训 —— 交付的是它；准确率仍是上面留出集上的。
+    forest = _rf_fit(X, y, len(labels), lambda p: report.report(0.6 + 0.35 * p, "用全部数据重训"))
+
+    model = {
+        "format": CLASSIFIER_FORMAT,
+        "features": feats,
+        "units": {r: _unit_of(r) for r in feats},
+        "labels": labels,
+        "class_frames": frames_by,
+        "class_samples": {lb: len(samples_by[lb]) for lb in labels},
+        "frames": len(X),
+        "stopped_excluded": stopped,
+        "incomplete_excluded": incomplete,
+        "holdout": metrics,
+        "params": {"trees": RF_TREES, "max_depth": RF_MAX_DEPTH, "min_leaf": RF_MIN_LEAF,
+                   "max_cuts": RF_MAX_CUTS, "seed": RF_SEED, "holdout_fraction": HOLDOUT_FRACTION},
+        "forest": forest,
+    }
+    blob = json.dumps(model, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    report.report(1.0, "完成")
+    return TrainedArtifact(
+        blob=blob, algo="随机森林（13 标量）", kind="classifier", suffix=".json",
+        # ★留出集上的准确率，不是训练集自测（v5 那 71 个 1.0 就是自测出来的）。
+        accuracy=metrics["accuracy"], feature_count=len(feats),
+        meta={"format": CLASSIFIER_FORMAT, "labels": json.dumps(labels, ensure_ascii=False),
+              "features": json.dumps(feats), "frames": str(len(X)),
+              "class_frames": json.dumps(frames_by, ensure_ascii=False),
+              "stopped_excluded": str(stopped), "incomplete_excluded": str(incomplete),
+              "holdout": json.dumps(metrics, ensure_ascii=False),
+              "accuracy_basis": f"按样本分层留出 {len(hold)} 条样本 / {len(ho)} 帧"})
+
+
+def _metrics(truth: list[int], pred: list[int], labels: list[str]) -> dict:
+    """留出集上的混淆矩阵（行 = 真实，列 = 判成）与每类精确率 / 召回率。分母为 0 给 None，不给 0。"""
+    n = len(labels)
+    cm = [[0] * n for _ in range(n)]
+    for a, b in zip(truth, pred):
+        cm[a][b] += 1
+    per = {}
+    for k, lb in enumerate(labels):
+        col = sum(cm[r][k] for r in range(n))
+        row = sum(cm[k])
+        per[lb] = {"precision": round(cm[k][k] / col, 4) if col else None,
+                   "recall": round(cm[k][k] / row, 4) if row else None, "support": row}
+    acc = sum(cm[k][k] for k in range(n)) / len(truth)
+    return {"frames": len(truth), "accuracy": round(acc, 4), "per_class": per, "confusion": cm}
+
+
+def _cut_points(col: list[float]) -> list[float]:
+    """一个特征的候选切点：相邻不同值的中点，多于 `RF_MAX_CUTS` 个时按分位取。严格递增。"""
+    u = sorted(set(col))
+    mids = [(u[i] + u[i + 1]) / 2 for i in range(len(u) - 1)]
+    if len(mids) <= RF_MAX_CUTS:
+        return mids
+    return sorted({mids[round(j * (len(mids) - 1) / (RF_MAX_CUTS - 1))] for j in range(RF_MAX_CUTS)})
+
+
+def _rf_fit(X: list[list[float]], y: list[int], n_classes: int, progress=None) -> list[list]:
+    """纯 Python 随机森林：有放回抽样、每次分裂随机看 ⌈√F⌉ 个特征、基尼系数、类权重均衡。
+
+    ★先把每个特征分箱（`bisect_left(切点, x)` = 小于 x 的切点个数），分裂时只扫箱的直方图 ——
+      不分箱就得每个节点每个特征排一次序，纯 Python 训 5000 帧要以分钟计。
+    节点：内部 `[特征号, 阈值, 左, 右]`（x ≤ 阈值走左）；叶子 `[-1, 各类占比]`。
+    """
+    n, F = len(X), len(X[0])
+    cuts = [_cut_points([row[f] for row in X]) for f in range(F)]
+    bins = [[bisect.bisect_left(cuts[f], row[f]) for row in X] for f in range(F)]
+    counts = [0] * n_classes
+    for c in y:
+        counts[c] += 1
+    cw = [n / (n_classes * c) if c else 0.0 for c in counts]
+    w = [cw[c] for c in y]
+    mtry = max(1, math.ceil(math.sqrt(F)))
+    rng = random.Random(RF_SEED)
+    trees: list[list] = []
+    for k in range(RF_TREES):
+        idx = [rng.randrange(n) for _ in range(n)]
+        nodes: list = []
+        _grow(bins, cuts, y, w, idx, n_classes, mtry, rng, 0, nodes)
+        trees.append(nodes)
+        if progress is not None and k % 10 == 9:
+            progress((k + 1) / RF_TREES)
+    return trees
+
+
+def _grow(bins, cuts, y, w, idx: list[int], n_classes: int, mtry: int,
+          rng: random.Random, depth: int, nodes: list) -> int:
+    dist = [0.0] * n_classes
+    for i in idx:
+        dist[y[i]] += w[i]
+    me = len(nodes)
+    nodes.append(None)
+    total = sum(dist)
+    if (depth >= RF_MAX_DEPTH or len(idx) < 2 * RF_MIN_LEAF
+            or max(dist) >= total * (1 - 1e-12)):
+        nodes[me] = [-1, [round(d / total, 6) for d in dist]]
+        return me
+    parent = total - sum(d * d for d in dist) / total      # 加权基尼 × 总权
+    best: tuple[float, int, int] | None = None
+    for f in rng.sample(range(len(cuts)), mtry):
+        nb = len(cuts[f]) + 1
+        if nb < 2:
+            continue
+        hist = [[0.0] * n_classes for _ in range(nb)]
+        cnt = [0] * nb
+        col = bins[f]
+        for i in idx:
+            b = col[i]
+            hist[b][y[i]] += w[i]
+            cnt[b] += 1
+        left = [0.0] * n_classes
+        nl = 0
+        for k in range(nb - 1):
+            for c in range(n_classes):
+                left[c] += hist[k][c]
+            nl += cnt[k]
+            if cnt[k] == 0:                  # 与上一个切点分出的两边相同
+                continue
+            if nl < RF_MIN_LEAF or len(idx) - nl < RF_MIN_LEAF:
+                continue
+            wl = sum(left)
+            wr = total - wl
+            if wl <= 0 or wr <= 0:
+                continue
+            imp = ((wl - sum(v * v for v in left) / wl)
+                   + (wr - sum((dist[c] - left[c]) ** 2 for c in range(n_classes)) / wr))
+            if best is None or imp < best[0] - 1e-12:
+                best = (imp, f, k)
+    if best is None or best[0] >= parent - 1e-12:
+        nodes[me] = [-1, [round(d / total, 6) for d in dist]]
+        return me
+    _imp, f, k = best
+    col = bins[f]
+    li = [i for i in idx if col[i] <= k]
+    ri = [i for i in idx if col[i] > k]
+    node = [f, cuts[f][k], 0, 0]
+    nodes[me] = node
+    node[2] = _grow(bins, cuts, y, w, li, n_classes, mtry, rng, depth + 1, nodes)
+    node[3] = _grow(bins, cuts, y, w, ri, n_classes, mtry, rng, depth + 1, nodes)
+    return me
+
+
+def _rf_proba(trees: list[list], x: list[float], n_classes: int) -> list[float]:
+    """各棵树叶子上的类别占比取平均。★是票数占比，不是概率。"""
+    acc = [0.0] * n_classes
+    for nodes in trees:
+        j = 0
+        while nodes[j][0] >= 0:
+            f, thr, left, right = nodes[j]
+            j = left if x[f] <= thr else right
+        for c, p in enumerate(nodes[j][1]):
+            acc[c] += p
+    return [a / len(trees) for a in acc]
+
+
+def _argmax(vals: list[float]) -> int:
+    """并列取靠前的那一类 —— 结果确定，不随机。"""
+    return max(range(len(vals)), key=lambda k: (vals[k], -k))
+
+
+def _parse_classifier(blob: bytes) -> dict:
+    """解析分类器工件。**格式不认就抛** —— 拿不认识的结构去算，算出来的类别没人看得出是错的。"""
+    model = json.loads(blob.decode("utf-8"))
+    if not isinstance(model, dict):
+        raise ValueError("分类器工件不是一个对象")
+    fmt = model.get("format", "")
+    if fmt != CLASSIFIER_FORMAT:
+        raise ValueError(f"分类器格式是 {fmt!r}，本模块只认 {CLASSIFIER_FORMAT!r}")
+    feats, labels, forest = model.get("features"), model.get("labels"), model.get("forest")
+    if not isinstance(feats, list) or not feats or any(r not in FEATURE_ROLES for r in feats):
+        raise ValueError(f"分类器的特征表不认识：{feats!r}")
+    if not isinstance(labels, list) or len(labels) < 2:
+        raise ValueError(f"分类器的类别表不对：{labels!r}")
+    if not isinstance(forest, list) or not forest:
+        raise ValueError("分类器里一棵树都没有")
+    return model
+
+
+def _classify_frame(frame: Frame, t: datetime, out: list[Finding], parts: list[str]) -> None:
+    """故障分类（§0.7）。只写结论与摘要，**不碰检测状态**。"""
+    on = _classify_on(frame.params)
+    if on is False:
+        return
+    if on is None:
+        out += _bad_group(CLASSIFY_KEYS, Quality.CONFIG_INCOMPLETE, t)
+        parts.append(f"故障分类未给：{P_CLASSIFY}={frame.params.get(P_CLASSIFY)!r} 非法，须为 true / false")
+        return
+    art = frame.artifacts.get("classifier")
+    if art is None:
+        out += _bad_group(CLASSIFY_KEYS, Quality.MODEL_NOT_LOADED, t)
+        parts.append("故障分类未给：无可用分类器（未训练或未启用）")
+        return
+    try:
+        model = _parse_classifier(art.blob)
+    except Exception as exc:  # noqa: BLE001 —— 坏工件不许掀翻整拍推理
+        out += _bad_group(CLASSIFY_KEYS, Quality.MODEL_NOT_LOADED, t)
+        parts.append(f"故障分类未给：分类器工件读不懂（{type(exc).__name__}: {exc}）")
+        return
+    feats, labels = model["features"], model["labels"]
+    unbound = [r for r in feats if r not in frame.channels]
+    if unbound:
+        out += _bad_group(CLASSIFY_KEYS, Quality.CONFIG_INCOMPLETE, t)
+        parts.append(f"故障分类未给：分类器要 {'/'.join(unbound)}，本诊断没选 —— 选上，或按现有输入重训")
+        return
+    x = [_feature(frame, r) for r in feats]
+    lacking = [r for r, v in zip(feats, x) if v is None]
+    if lacking:
+        out += _bad_group(CLASSIFY_KEYS, Quality.INSUFFICIENT_SAMPLES, t)
+        parts.append(f"故障分类未给：本窗口 {'/'.join(lacking)} 没有可信样本")
+        return
+    proba = _rf_proba(model["forest"], x, len(labels))     # type: ignore[arg-type]
+    k = _argmax(proba)
+    out += [Finding(key="fault_class", value=str(labels[k]), quality=Quality.OK, t=t),
+            Finding(key="fault_vote", value=round(proba[k], 3), quality=Quality.OK, t=t)]
+    acc = (model.get("holdout") or {}).get("accuracy")
+    basis = f"留出集准确率 {acc:.2f}" if isinstance(acc, (int, float)) else "未经留出验证"
+    parts.append(f"故障分类：最像「{labels[k]}」（票数占比 {proba[k]:.2f}；{basis}）—— ★仅供参考，不影响检测状态")
 
 
 # ─────────────────────────────── 落码 ───────────────────────────────
@@ -993,6 +1488,8 @@ def _bad_all(domain: Domain, frame: Frame, algos: frozenset[str] | None,
             skip.update(CLASSIC_KEYS)
         if ALGO_BASELINE not in algos:
             skip.update(BASELINE_KEYS)
+    if _classify_on(frame.params) is False:
+        skip.update(CLASSIFY_KEYS)
     keys = [o.key for o in domain.declare().outputs if o.key != "evidence" and o.key not in skip]
     out = [Finding(key=k, value=None, quality=q, t=t) for k in keys]
     out.append(Finding(key="evidence", value=why, quality=q, t=t))
