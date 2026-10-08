@@ -151,3 +151,28 @@ PRONOSTIA 3、MAFAULDA 3、MFPT 3、SEU/JNU 2、风机 SCADA 2、Z24 桥 1。
 2. ★**AIoT 那份可作为「低频可行性」的旁证**：31.25 Hz、奈奎斯特 15.6 Hz、频谱诊断完全做不了，
    而它做成了 4 类分类并上了 MCU。⇒ **低频不是死路**，但它证明的是"能分状态"，不是"能判故障类型"。
 3. ★**持续计数（§4.1）现在就该做** —— 三份独立来源、代价极小、不依赖任何新数据、不依赖任何人。
+
+## 6 ★ISO 判级那 8 个仓：名单与逐个核实（2026-10-08 补）
+
+> 原普查只留了计数、没留名单。目录已挪到 `D:\download\AIRef\projects\vibration-analysis-repos-all`（现为 136 个仓），
+> 按 `scan_repos.py` 同口径（同样的 README 选取、同一条正则 `ISO ?10816|ISO ?20816|ISO ?13373|ISO ?2372`）重扫，
+> README 命中仍是 **8 个**，与 §1 对得上；再扫各仓源码，看是不是真的判级。【实测】
+
+| 仓 | README 提到 | 源码里实际做的 | 对我方 |
+| --- | --- | --- | --- |
+| ★`rotordynamics-vibration-toolkit` | ISO 10816 | `data/standards/iso10816-3_zone_limits.csv` + `vibtool/io.py::classify_vibration`：**按组 × 支承查表判 A/B/C/D**，宽带速度 RMS | ★**12 个边界值与我方 `_MACHINE_LIMITS` 逐值相同** —— 继 `predictive-maintenance-mcp` 之后第二份独立佐证 |
+| `predictive-maintenance-mcp` | ISO 20816 | `iso20816.py`，组 × 支承查表 | 早已逐值对过，一致（external-projects §10.1） |
+| `PRISM` | ISO 20816 | `physics/iso_levels.py`：带通 10~1000 Hz 后算速度 RMS 判 A/B/C/D；边界在 `config.yaml` 里**只有一组** `2.8 / 7.1 / 18.0`，自注「provisional，待按机型与版本确认」 | ⚠️ 不分组与支承，那组数是 ISO 2372 / 10816-1 Class Ⅳ 的值（【推断】），不是 10816-3。可借鉴的是**先带通到 10~1000 Hz 再算 RMS** |
+| `maintenance-os` | ISO 20816 | `inference/iso.py`：**由模型预测的严重度映射成区**，不看振动值 | ✗ 名为 ISO 区，实为分类结果改名 |
+| `Anomaly_Detection_in_Wind_Turbines…` | ISO 10816 | `iso_evaluation.py`：写死 B/C = 0.765、C/D = 1.223（ISO 10816-21 风电），拿来**评估**静态阈值的漏检 | 结论见 §4.2：理想工况好、真实工况漏检明显 |
+| `Anomaly-detection-bearing-faults-PolitoTestRig` | ISO 20816 | 源码里没有 ISO 字样；README 称拿「ISO 20816 固定阈值法」与 ML 对比 | 只是对照组，未见限值表 |
+| `industrial-machinery-vibration-fault-diagnosis-lstm` | ISO 10816 | 源码里没有；README 只是行文提到 | ✗ |
+| `predictive-maintenance-demo` | ISO 13373 | `features.py` 引它说明包络解调流程 | ✗ 13373 是监测程序，不是限值 |
+
+README 没提、源码里出现 ISO 的另有 3 个：`Advanced-Jeffcott-Rotor-Dynamics-Simulator`（打印一句「会超 ISO 10816 报警限」）、
+`abla-rotor-analytics`（★**明确不做绝对判级**：「无通用限值，真实报警按机按点由工程师定」，改为对自身基线趋势 —— 与我方第 ② 层同一思路）、
+`signalmap`（注释里一句「ISO 10816 建立在 RMS 上」）。
+
+⇒ **真正按标准查表判级的只有 2 个**（`rotordynamics-vibration-toolkit`、`predictive-maintenance-mcp`），**两个的表都与我方逐值相同**；
+**泵（ISO 10816-7 / GB/T 6075.7）一个实现都没有** —— 我方泵限值仍只有 Europump 转引一个来源（`C-43 §4`），原文未核。
+另：上一级 `projects/` 下的 `node-red-contrib-condition-monitoring`（Class Ⅰ~Ⅳ 冒充 10816-3，external-projects §2.3）不在这 136 个里。
