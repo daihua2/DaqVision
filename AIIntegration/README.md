@@ -1713,4 +1713,4 @@ AICloud `C-72`：按 `AI-76 §5.1` 在 khb 上实跑采基线（标注 UTC 06:41
 - 投后：`proto_version=1.19`、`service_version=0.1.0+src20261010T201015Z`、3 域、`NRestarts=0`、0 条 ERROR；投放哈希核对一致；快照 19 点 + 2 上级全接受；
   `/health.registration` 20:10:16 核对 `unregistered=[]`；`ListBindings` 19 点 `unregistered` 全 false；回读 localId 1033 每分钟一拍未断（20:09:04 → 20:10:20 → 20:11:13）；现场 `run-tests.sh 312` 968 条全过。
 - **20:13:31 投 `AI-94`**。
-- ⇒ 现场有备份与暂存，**清理须用户点头**。
+- 备份与暂存经用户同意 **21:30:14 已清**（服务未受影响）⇒ **现场又无回滚备份，下次部署前必须先备份**。
