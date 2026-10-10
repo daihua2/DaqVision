@@ -70,8 +70,12 @@ class Registration:
             return ""
         if res is None or res.newPoints <= 0 or res.result.Code != daq.Deny:
             return ""
-        return res.result.Message or (
-            f"超出授权数据点数（已用 {res.used} / 授权 {res.limit}，本次新增 {res.newPoints}）")
+        # 备用话只在实时库没给原话时用。「本次新增」写实际加进去的个数，被拒即 0（AICloud 用户 10-10 定，`C-89`）。
+        if res.result.Message:
+            return res.result.Message
+        if res.limit < 0:
+            return f"未授权，不能新增数据点（已用 {res.used}，本次新增 0），请导入授权后再添加数据点"
+        return f"已达授权数据点数（已用 {res.used} / 授权 {res.limit}，本次新增 0），请购买授权后再添加数据点"
 
     # ── 乙 ────────────────────────────────────────────────────────────────
     def refresh(self, rows: list[PointRow]) -> RegistrationView:

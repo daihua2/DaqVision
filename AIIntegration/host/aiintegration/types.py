@@ -436,6 +436,10 @@ STATUS_NORMAL, STATUS_ATTENTION, STATUS_WARNING, STATUS_DANGER, STATUS_STOPPED =
 STATUS_LEVELS = (STATUS_NORMAL, STATUS_ATTENTION, STATUS_WARNING, STATUS_DANGER, STATUS_STOPPED)
 ROLE_STATUS = "status"
 
+#: `OutputSpec.choice_tones` 的词表（契约 1.19，AICloud `C-91 §1`）。★**封闭**：平台按它取主题里的
+#: 成功 / 信息 / 警告 / 错误色，`default` 为次要文字色；自造一个词，平台认不出、且不报错。
+TONES = ("success", "info", "warning", "error", "default")
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class OutputSpec:
@@ -475,6 +479,16 @@ class OutputSpec:
     choice_displays: tuple[str, ...] = ()
     """与 `choices` **同序对应**的显示名；空则直接显示取值。"""
 
+    choice_tones: tuple[str, ...] = ()
+    """与 `choices` **同序对应**的显示色调（契约 1.19，AICloud `C-91`）：`TONES` 里的词，空串同 `default`。
+    整格为空 = 这项结论不上色。
+
+    ★**只管显示、不表示严重程度** —— 严重程度看 `role=status`。烈度区 B 按 GB/T 6075 属正常、
+      检测状态也判正常，只是显示成蓝色，用来与 A 区分。
+    ★由来：每个取值显示什么颜色，原先契约里没有地方说；平台自己认「`iso_zone` 的 A 是绿」，
+      就违反了 `C-65` 立的「只看声明、不认结论名」。
+    """
+
     role: str = ""
     """这一条结论的**标准角色**（契约 1.13）。空 = 普通结论。已定取值只有一个：
 
@@ -507,6 +521,14 @@ class OutputSpec:
                 f"OutputSpec({self.key}).choice_displays 与 choices 长度不一致 "
                 f"({len(self.choice_displays)} vs {len(self.choices)}) —— "
                 "同序对应，错位会让界面显示成别的取值")
+        if self.choice_tones:
+            if len(self.choice_tones) != len(self.choices):
+                raise ValueError(
+                    f"OutputSpec({self.key}).choice_tones 与 choices 长度不一致 "
+                    f"({len(self.choice_tones)} vs {len(self.choices)}) —— 同序对应，错位会把别的取值上错色")
+            stray = [t for t in self.choice_tones if t and t not in TONES]
+            if stray:
+                raise ValueError(f"OutputSpec({self.key}).choice_tones 只能取自 {TONES} 或空串，收到 {stray}")
         if self.stop_behavior == STOP_LITERAL and not self.choices:
             # 写「停机」那一档，取值域里必须有它，否则界面不知道该认哪个值为停机。
             raise ValueError(

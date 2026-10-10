@@ -164,6 +164,17 @@ class TestAdmit(_Base):
             r = self.put()
         self.assertTrue(r.ok, "实时库一抖就建不了绑定 —— 授权是实时库的闸，它自己会拦")
 
+    def test_实时库没给原话时_备用话按C89口径(self):
+        """「本次新增」写实际加进去的个数，被拒即 0；-1 与满额分开说（`C-89`）。"""
+        res = self.hs.check_point_quota(new_count=2)
+        res.result.Message = ""
+        self.hs.check_point_quota = lambda **kw: res
+        r = self.put()
+        self.assertFalse(r.ok)
+        self.assertIn("已达授权数据点数（已用 10 / 授权 10，本次新增 0）", r.message)
+        res.limit = -1
+        self.assertIn("未授权，不能新增数据点（已用 10，本次新增 0）", self.put().message)
+
     def test_老引擎没有预检口_放行(self):
         self.hs.unsupported = True
         self.assertTrue(self.put().ok)

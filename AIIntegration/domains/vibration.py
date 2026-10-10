@@ -240,7 +240,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.2.0"
+    version = "1.2.1"
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -364,7 +364,9 @@ class Vibration(Domain):
                            stop_behavior=STOP_LITERAL,
                            choices=("A", "B", "C", "D", STOPPED),
                            choice_displays=("A 新投运", "B 可长期运行", "C 不宜长期连续运行",
-                                            "D 足以造成损坏", STOPPED)),
+                                            "D 足以造成损坏", STOPPED),
+                           # 只管显示（C-91）：B 属正常、检测状态也判正常，蓝色只为与 A 区分。
+                           choice_tones=("success", "info", "warning", "error", "default")),
                 OutputSpec(key="iso_zone_code", display="烈度区(数值)", value_type="int",
                            description="经典。1=A 2=B 3=C 4=D，0=停机，给趋势曲线与报警门限用",
                            stop_behavior=STOP_LITERAL,

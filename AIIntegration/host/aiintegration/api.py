@@ -30,7 +30,7 @@ from . import structbind
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.18"
+PROTO_VERSION = "1.19"
 
 
 def _ts(dt: datetime) -> object:
@@ -155,6 +155,7 @@ class ApiService(WorkbenchApiMixin):
                     stop_behavior=o.stop_behavior, role=o.role, headline=o.headline)
                 ospec.choices.extend(o.choices)
                 ospec.choice_displays.extend(o.choice_displays)
+                ospec.choice_tones.extend(o.choice_tones)
             # 台账参数自述 —— 贵方**按这张表渲染绑定表单**，不按域名写死字段。
             for pm in d.declaration.params:
                 spec = info.params.add(
