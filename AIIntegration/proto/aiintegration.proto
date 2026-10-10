@@ -414,6 +414,14 @@ message ConclusionPoint {
   string name       = 3;   // 点名（`AI.<域>.<绑定>.<结论名>`）
   string unit       = 4;
   string value_type = 5;   // float | int | bool | string
+  // ── 1.18（`C-85`、`C-86`、`H-294`；用户 10-10 定「甲 + 乙」的乙）──────────
+  // ★**这个点在实时库里没登记上**（只读，我方推完快照问实时库 `CheckPointQuota` 核对）。
+  //   多半是授权数据点数已满或为「不许新增」：实时库拒登记**不报错** —— 我方结论照常写入，
+  //   但实时库点表里没有这个点，趋势、组态、报警都看不到它。请在绑定页把这样的点标出来。
+  //   授权扩容或腾出名额后，随我方下一次重推快照（最迟约 1 小时）登记上，本格回 false。
+  // ★**false 不是「已核对、登记上了」**：没核对过（无写路径、老引擎、实时库连不上）也回 false。
+  //   原因原话在我方日志（告警级）与 `/health` 的 `registration.note`。
+  bool unregistered = 6;
 }
 message ListBindingsRequest { string domain = 1; }   // 空 = 全部
 message ListBindingsReply   { repeated Binding bindings = 1; }
@@ -422,6 +430,11 @@ message PutBindingRequest   { Binding binding = 1; }
 //   ★只改参数的 PutBinding（贵方改台账后逐条下发，C-64 §2.4）：不重置节拍、不推迟下一轮；不换结论点号；
 //     不让已启用的工件失效 —— 但工件**是在旧参数下采的**这件事由域自己核（如基线采集时的轴向与现在不同，
 //     比例漂移那一项落 `model_not_loaded` 并提示重采）。
+// ★1.18 起（用户 10-10 定「甲 + 乙」的甲）：这次保存会让**新结论点**进实时库（新建、停用后重建、由停用改启用的新绑定），
+//   而实时库授权数据点数不够 ⇒ `ok=false`，`message` 是「绑定 … 未保存：」加实时库预检的原话
+//   （「已达授权数据点数（已用 X / 授权 Y …）…」或「未授权,不能新增数据点 …」）。
+//   只改参数、停用、改显示名不新增点，满额时照样能存。问不到实时库（连不上、老引擎）时放行，
+//   登记不上的点由 `ConclusionPoint.unregistered` 报出。
 message PutBindingReply     { bool ok = 1; string message = 2; }
 message DeleteBindingRequest{ string domain = 1; string binding = 2; }
 // ★删绑定**只停算，不删已经写进实时库的结论点** —— 绑定是"要不要继续算"，

@@ -144,6 +144,8 @@ class _Handler(BaseHTTPRequestHandler):
             #   实时库重启后点定义会丢，值却照样写得进、writePath 照样 ready，
             #   现场只能靠数平台镜像的行数才发现。这一格直说：快照被**当前这个引擎实例**接受了没有。
             "snapshot": _snapshot_state(c),
+            # ★推成了不等于登记上了：授权满额时被拒的点照样算进 accepted、值照样写得进（`H-294`、`H-290`）。
+            "registration": _registration_state(c),
         })
 
     def _download(self, root: Path, rel: str, what: str):
@@ -208,6 +210,23 @@ def _finding_json(f) -> dict:
     }
 
 
+def _registration_state(c) -> dict | str:
+    """结论点在实时库登记上没有（`registration` 乙）。只报最近一次核对的事实与时刻。"""
+    if not c.get("can_write"):
+        return "不适用（未配置写路径）"
+    reg = c.get("registration")
+    if reg is None:
+        return "未知（未接核对）"
+    v = reg.view
+    return {
+        "checkedAt": v.checked_at.isoformat() if v.checked_at else None,
+        "unregistered": sorted(v.unregistered),
+        "limit": v.limit,
+        "used": v.used,
+        "note": v.note,
+    }
+
+
 def _snapshot_state(c) -> str:
     """健康口里那一格。★**只说得出"多久以前推过一次"**，说不出"当前引擎实例手上有没有"。
 
@@ -236,7 +255,8 @@ def _snapshot_state(c) -> str:
 
 def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir: Path,
                 can_write: bool, reports_dir: Path | None = None,
-                events=None, importer=None, scheduler=None) -> ThreadingHTTPServer:
+                events=None, importer=None, scheduler=None,
+                registration=None) -> ThreadingHTTPServer:
     host, _, port = listen.rpartition(":")
     artifacts_dir = Path(artifacts_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -247,7 +267,7 @@ def make_server(listen: str, *, guid: str, version: str, domains, artifacts_dir:
         "guid": guid, "version": version, "domains": domains,
         "artifacts_dir": artifacts_dir, "reports_dir": reports_dir,
         "can_write": can_write, "events": events, "importer": importer,
-        "scheduler": scheduler,
+        "scheduler": scheduler, "registration": registration,
     }})
     srv = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler)
     srv.daemon_threads = True

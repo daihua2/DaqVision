@@ -30,7 +30,7 @@ from . import structbind
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.17"
+PROTO_VERSION = "1.18"
 
 
 def _ts(dt: datetime) -> object:
@@ -83,7 +83,8 @@ class ApiService(WorkbenchApiMixin):
                  domains: dict[str, LoadedDomain], bindings: BindingStore,
                  load_errors: list[tuple[str, str]] | None = None,
                  on_bindings_changed=None, workbench=None, rediagnose=None,
-                 trainer=None, points=None, hs_client=None, structs=None) -> None:
+                 trainer=None, points=None, hs_client=None, structs=None,
+                 registration=None) -> None:
         self._guid = guid
         self._version = version
         self._logs = logstore
@@ -106,6 +107,8 @@ class ApiService(WorkbenchApiMixin):
         #   不跳过核对把它存下来 —— 那等于"不换算、只拒绝"那条规矩在这条路上失效。
         self._hs = hs_client
         self._structs = structs
+        # 结论点登记（授权数据点数，`registration` 模块头）：建前拦、建后报。没接（无写路径）= 两样都不做。
+        self._registration = registration
 
     # ── 身份与域 ──────────────────────────────────────────────────────────
     def GetInfo(self, request, context):
@@ -186,7 +189,9 @@ class ApiService(WorkbenchApiMixin):
                 lid = self._points.local_id_of(b.domain, b.binding, o.key) or 0
                 out.points.add(key=o.key, local_id=lid,
                                name=default_point_name(b.domain, b.binding, o.key),
-                               unit=o.unit, value_type=o.value_type)
+                               unit=o.unit, value_type=o.value_type,
+                               unregistered=bool(lid) and self._registration is not None
+                               and self._registration.is_unregistered(lid))
         loaded = self._domains.get(b.domain)
         if loaded is not None:
             # 只算**测点类**必填角色：图片类输入不绑 globalId，由上传触发，不存在"没绑"。
@@ -233,12 +238,29 @@ class ApiService(WorkbenchApiMixin):
             why = self._check_fields(nb, loaded)
             if why:
                 return pb.PutBindingReply(ok=False, message=why)
+        why = self._admit_points(nb, loaded)
+        if why:
+            return pb.PutBindingReply(ok=False, message=why)
         try:
             self._bindings.put(nb, allow_no_roles=no_point_inputs)
         except ValueError as exc:
             # 校验失败原样回给调用方（globalId=0、一个角色都没绑…），**不吞**。
             return pb.PutBindingReply(ok=False, message=str(exc))
         return pb.PutBindingReply(ok=True, message=self._notify_changed())
+
+    def _admit_points(self, b: Binding, loaded: LoadedDomain) -> str:
+        """建前拦（`registration` 甲）：这次保存会让新结论点进快照、而实时库授权数据点数不够 ⇒ 不存。
+
+        ★只看「这次才进快照」的点：在用的早已在快照里；停用的绑定不建点（启用那次再问）。
+          所以满额时改参数、停用都照样能存。
+        """
+        if self._registration is None or self._points is None or not b.enabled:
+            return ""
+        fresh, revived = self._points.to_add(
+            b.domain, b.binding, [o.key for o in loaded.declaration.outputs])
+        why = self._registration.admit(new_count=fresh, local_ids=revived,
+                                       what=f"保存绑定 {b.domain}/{b.binding}")
+        return f"绑定 {b.domain}/{b.binding} 未保存：{why}" if why else ""
 
     def _check_fields(self, b: Binding, loaded: LoadedDomain) -> str:
         """按字段绑定的核对（`structbind`）。过了回空串，不过回原因。"""

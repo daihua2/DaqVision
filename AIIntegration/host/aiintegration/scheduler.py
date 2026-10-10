@@ -97,8 +97,10 @@ class Scheduler:
 
     def __init__(self, *, client: HsClient, fetcher: Fetcher,
                  domains: dict[str, LoadedDomain], bindings: BindingStore,
-                 points: PointMap, artifacts=None, states=None) -> None:
+                 points: PointMap, artifacts=None, states=None, registration=None) -> None:
         self._client = client
+        # 推完快照核对结论点登记上没有（`registration` 乙）。没接 = 不核对（无写路径时就没接）。
+        self._registration = registration
         self._fetcher = fetcher
         self._domains = domains
         self._bindings = bindings
@@ -154,6 +156,9 @@ class Scheduler:
         rows = self._points.all()
         self._client.push_snapshot(rows, extras=self._snapshot_extras())
         self._last_snapshot_mono = time.monotonic()
+        if self._registration is not None:
+            # ★推成了也不等于登记上了：授权满额时被拒的点照样算进 accepted（`H-294 §1`）。
+            self._registration.refresh(rows)
         return len(rows)
 
     def _snapshot_extras(self) -> SnapshotExtras:

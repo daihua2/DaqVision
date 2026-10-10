@@ -261,6 +261,19 @@ class PointMap:
             ).fetchone()
         return None if row is None else int(row["local_id"])
 
+    def to_add(self, domain: str, binding: str, keys: list[str]) -> tuple[int, list[int]]:
+        """这几个结论名若要进快照，哪些是**这次才进**的 → (还没有号的个数, 停用过、要重新启用的号)。
+
+        供建绑定前问授权（`registration` 甲）：在用的点早已在快照里，不算新增。
+        """
+        with self._lock:
+            rows = {r["key"]: r for r in self._conn.execute(
+                "SELECT key, local_id, retired_at FROM points WHERE domain=? AND binding=?",
+                (domain, binding))}
+        fresh = sum(1 for k in keys if k not in rows)
+        revived = sorted(int(rows[k]["local_id"]) for k in keys if k in rows and rows[k]["retired_at"])
+        return fresh, revived
+
     def count(self) -> int:
         """在用点数。"""
         with self._lock:

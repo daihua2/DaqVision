@@ -37,6 +37,7 @@ from .hsclient import HsClient, HsConfig, SourceIdentityInfo
 from .identity import SystemGuid
 from .logstore import LogStore, LogStoreHandler
 from .pointmap import PointMap
+from .registration import Registration
 from .runner import run_domain
 from .scheduler import Scheduler
 from .structreg import StructRegistry
@@ -234,9 +235,11 @@ class Service:
         structs = StructRegistry(client)
         # 当前启用工件的提供者：推理时交给模块（模块不碰存储）。
         active_arts = ActiveArtifacts(workbench, cfg.data_dir / "artifacts")
+        # 结论点登记（授权数据点数）：建前拦、推完快照后核对。★只在有写路径时接 —— 没有写路径就不登记任何点。
+        registration = Registration(client) if can_write else None
         sched = Scheduler(client=client, fetcher=Fetcher(client, structs), domains=domains,
                           bindings=bindings, points=points, artifacts=active_arts,
-                          states=workbench)
+                          states=workbench, registration=registration)
         # 训练执行器：串行一条，排队顺序 = 建任务顺序（见 trainer 模块头 §2）。
         # ★没有写路径也照起 —— 训练只读实时库、只写本地工件，与结论回流无关。
         trainer = Trainer(workbench=workbench, bindings=bindings, domains=domains,
@@ -267,7 +270,7 @@ class Service:
                              on_bindings_changed=(sched.sync if can_write else None),
                              workbench=workbench, rediagnose=rediagnose,
                              trainer=trainer, points=points,
-                             hs_client=client, structs=structs)
+                             hs_client=client, structs=structs, registration=registration)
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
                              handlers=(api.build_handler(svc),))
         if server.add_insecure_port(cfg.api_listen) == 0:
@@ -285,6 +288,7 @@ class Service:
             artifacts_dir=cfg.data_dir / "artifacts",
             reports_dir=cfg.data_dir / "reports", can_write=can_write, events=events,
             scheduler=sched,      # /health 的 snapshot 那一格要问它（AICloud C-27 §3.2）
+            registration=registration,
             # 外部工件导入：只在本进程里写工作台库（"唯一写者"前提），命令行工具只是 HTTP 客户端。
             importer=ArtifactImporter(workbench=workbench, domains=domains,
                                       artifacts_dir=cfg.data_dir / "artifacts"))

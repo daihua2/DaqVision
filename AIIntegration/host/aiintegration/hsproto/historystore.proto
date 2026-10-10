@@ -148,6 +148,45 @@ message LogStreamItem
 	int64		totalCount		= 3;
 }
 
+// ---- 授权数据点数(AICloud C-81,2026-10-09;能力位 features:"point-quota")----
+// 平台按授权文件里的「实时库数据点数」下发上限;引擎在登记**新的存储点**时把关:
+// 全库存储点(persist=true 的采集点 + 自指标,与平台「实时库采集点 共 N 点」同口径)+ 新增 > 上限 ⇒ 拒收这个新点。
+// ★只拒新增:已在点表里的点改配置、授权调小后已经超出的那些点,一概不动、照常采集落库。
+// ★落盘(1.9.555 起,H-292):引擎重启后沿用上次下发的值,平台下次下发再以平台为准。各配置源第一份完整快照
+//   只放行以前登记过的老点(实时库内部的登记账本),新点照常把关 —— 新网关首次接入同样受限。
+// ★自指标由引擎自己建,计数但永不被拒。
+// ★只管登记,不管写入:PostVQT 不判授权(未登记点号的样本照收,不进点表、不计点数)。2026-10-10 起(1.9.550,H-290)。
+message SetPointQuotaReq
+{
+	int32	maxPoints	= 1;	// 0 = 不限制;>0 = 上限;<0 = 不许新增(一律按 -1,D-283;能力位 point-quota-deny-new)
+}
+// 加点前的预检:网关保存采集点之前问一次,超了就不保存、界面当场报「提交失败」。
+// 只答「这次加进来会不会超」,**不预占名额**;真正的把关仍在登记那一刻(几台网关同时抢最后几个名额时以登记为准)。
+message CheckPointQuotaReq
+{
+	// 点归属的网关 guid。只有**全量连接**(回环 / 白名单)才认本字段,空 = 本实例的 --self-guid;
+	// 受限连接(跨机从网关)一律取证书里的 guid、忽略本字段 —— 不能替别的网关问。
+	string	guid				= 1;
+	int32	newCount			= 2;	// 确定是新点的个数(新建、新建导入:这些还没有本地点号)
+	// 已有本地点号、这次要成为存储点的(改成「存储=是」、更新导入):已在库且存储的不算新,其余算新。
+	repeated int32	localIds	= 3;
+}
+message CheckPointQuotaRes
+{
+	daq.Status	result		= 1;	// Ok = 可以加;Deny = 超出授权,Message 是给界面的原话
+	int32		limit		= 2;	// 0 = 不限制(此时 result 恒 Ok);-1 = 不许新增(有新点即 Deny)
+	int32		used		= 3;	// 现有存储点数(含自指标)
+	int32		newPoints	= 4;	// 本次请求里实际算作新增的点数
+}
+// GetServerStatus 里的授权点数(能力位同上)。
+message PointQuotaStatus
+{
+	int32	limit		= 1;	// 0 = 不限制 / 从没下发过;-1 = 不许新增(原样回报,不折算成 0)
+	int32	used		= 2;	// 现有存储点数(含自指标)
+	int64	rejected	= 3;	// 进程启动以来按授权拒收新点的次数
+	string	lastReject	= 4;	// 最近一个被拒的「guid/localId」(回环主控直存段写「(回环主控)」)
+}
+
 // ---- 服务健康/状态(供 daqgate 状态栏:在线/版本/运行时长)----
 message ServerStatusReq {}
 message ServerStatusRes
@@ -221,6 +260,9 @@ message ServerStatusRes
 	//   693 个采集点还没到 ⇒ 1380 条标签解析不到,而日志里只有一行看着完全正常的 INFO。
 	// ★本口给**逐源明细**;聚合位与两个计数在 HTTP `/health` 上(轮询方用那份,不必开 gRPC)。
 	PointTableReadiness	pointTableReadiness	= 16;
+
+	// 授权数据点数(AICloud C-81;能力位 features:"point-quota")。被拒过新点时 degrades 里另有一条说明。
+	PointQuotaStatus	pointQuota	= 17;
 }
 
 // 点表就绪明细。
@@ -379,6 +421,9 @@ message HistoryRecord
 //
 //   ★不适用**发生时刻族**(kTrendData/kMinTime/kMaxTime/kFirstTime/kLastTime)与 kRawData:
 //     它们的时间戳是样本自身时刻、本就不锚栅格,补齐等于给一条不存在的栅格填格子。
+//   ★反过来:其余各法(含 **kFirstValue/kLastValue**、kBegin/kEndInterpolated 与各统计)的时间戳
+//     **一律是桶起点** —— 答的是"这个桶"的问题,不是"那一笔样本在哪一刻"。标量、离散、结构值同此。
+//     要样本自身时刻,用 kFirstTime/kLastTime(AIIntegration AI-70 §5.2 实测提出,本句应其建议补写)。
 //
 //   质量码按**可信度**编,不按"怎么算出来的"编:
 //     · 两侧好断点夹住的插值/统计        → QualityGood(5000)     直接用(误差 ≤ compErr)
@@ -734,6 +779,20 @@ message StoredPoint
 	// ★裸 bool 不是 optional:缺省 false = "没配报警",落在安全侧(与 canCtrlDown 同一取舍);
 	//   "老引擎不发"与"真的没配"靠**能力位**分开,不靠字段是否存在(D-202 §4.2)。
 	bool	alarmEnabled	= 25;
+	// 结构值点挂的**结构**(AIIntegration AI-70 §5.1 请求;能力位 "storedpoints-struct-ref",hs 1.9.537 起)。
+	// 有了它,消费方不必先读一条值才认得出结构:拿 structId 调 GetStruct(id, version=0) 取最新版描述。
+	//
+	// ★取值:该点已绑定 ⇒ 绑定的结构(盘上数据以它为准;配置里的 StructRef 若后来改成别的,换绑被拒,
+	//   这里仍是原绑定);尚未绑定(还没写进过值)⇒ 按配置 Paras "StructRef" 解析出的结构(首次写入
+	//   正是按它绑定);非结构值点 / 没配 StructRef / 名字在注册表里查不到 ⇒ 0 与空串。
+	//   ⇒ "0 但 valueType==36" = 结构值点没配好结构(写入会被拒,见 GetServerStatus 降级项)。
+	// ★**不带版本**:绑定只锁结构、不锁版本(定稿 #7"版本可升"),版本跟着每一条值走(VQT.StructVal)。
+	//   解老值必须用值里的版本,别拿最新版去解 —— 见 RecordPoint.StructVal 那条注释。
+	// ★structId 是全库共享命名空间(定稿 #15),受限连接与全量连接看到的是同一个号,不做 localId 翻译。
+	// ★变更时机:与其它格同路(本流每 tick 比对整条 StoredPoint 的序列化字节)——结构晚于点建好、
+	//   首次写入落定绑定,都会如实出一条增量帧。
+	int32	structId	= 26;
+	string	structName	= 27;
 }
 
 message StoredPointsRes
@@ -1779,6 +1838,9 @@ service HistoryStoreGRPCService {
 	rpc	LookupGlobal(LookupGlobalReq)							returns (LookupGlobalRes);
 	rpc	ListSelfMetrics(ListSelfMetricsReq)						returns (ListSelfMetricsRes);
 	rpc	SetSelfMetricParas(SetSelfMetricParasReq)				returns (daq.Status);
+	// 授权数据点数(AICloud C-81)。SetPointQuota 走全量门(只平台下发);CheckPointQuota 对所有连接开放(网关加点前预检)。
+	rpc	SetPointQuota(SetPointQuotaReq)							returns (daq.Status);
+	rpc	CheckPointQuota(CheckPointQuotaReq)						returns (CheckPointQuotaRes);
 	rpc	ListEntityIdentities(EntityIdentityReq)					returns (EntityIdentitiesRes);
 	rpc	ListCategoryNames(CategoryNamesReq)						returns (CategoryNamesRes);
 	rpc	EnsureSelfGid(EnsureSelfGidReq)							returns (EnsureSelfGidRes);

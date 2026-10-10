@@ -530,6 +530,25 @@ class HsClient:
         vqts = daq.VQTs(VQTs=[build_vqt(lid, f) for lid, f in items])
         return self._unary(self._write_channel(), "PostVQT", vqts, daq.Status, timeout=timeout)
 
+    def check_point_quota(self, *, new_count: int = 0, local_ids: list[int] | tuple[int, ...] = (),
+                          timeout: float = 10.0) -> hs.CheckPointQuotaRes | None:
+        """授权数据点数预检（hs `CheckPointQuota`，能力位 `point-quota`）。老引擎没有这个口 → None。
+
+        ★**必须走写连接**：受限连接按证书里的 guid 算，问的才是**我方**的点（`H-294 §2`）。
+          读连接是明文回环全量连接，`guid` 留空会被算成实时库自己的 `--self-guid` —— 不报错，只是答非所问。
+        ★`newPoints` 回答「这些点号里有几个还没作为存储点登记」，`result` 回答「再加这么多会不会超」，
+          两件事别混（`H-294 §2`）。快照提交是同步的（`SNAPSHOT_END` 在推流的 RPC 线程里提交），
+          推完紧接着问不会误报。
+        """
+        req = hs.CheckPointQuotaReq(newCount=new_count, localIds=list(local_ids))
+        try:
+            return self._unary(self._write_channel(), "CheckPointQuota", req,
+                               hs.CheckPointQuotaRes, timeout=timeout)
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.UNIMPLEMENTED:
+                return None
+            raise
+
     # ── 降级态 ────────────────────────────────────────────────────────────
     def log_degraded(self, what: str, exc: BaseException) -> None:
         """连不上时的告警。
