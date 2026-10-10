@@ -1701,3 +1701,16 @@ AICloud `C-72`：按 `AI-76 §5.1` 在 khb 上实跑采基线（标注 UTC 06:41
   khb 新分配 localId 1049~1053 ⇒ gid **2784~2788**（`acc_z_max` / `disp_z_max` / `freq_z_max` / `fault_class` / `fault_vote`），快照 19 点 + 2 上级实体全接受；
   原 14 点号不变、照常出值（16:21:47 起每分钟一拍）；三项新偏离与其它自训结论同落 `-1034`（未采基线），分类两点不写（未启用）。读回走受限连接只读口（`LookupGlobal` / `QueryHistory`）。
 - **16:27:22 投 `AI-86`**（实际时刻、新点号、致歉）。
+
+## 35. 部署记录：契约 1.18（结论点登记）+ 1.19（取值色调）上现场（2026-10-10，用户授权；本节时刻均为 UTC）
+
+改动见 `暂缓与未定事项.md §二之十三`、`AI-91`、`AI-92`：授权满额时建 AI 绑定当场拒（甲）、推完快照核对没登记上的点（乙）；`OutputSpec.choice_tones`，烈度区上色。
+
+- 投放 `0351ff3` 相对现场（`8a12d4e`，81 个文件逐个核过哈希、无漂移；AICloud 自补 `test_source_identity.py` 保留）20 个文件，含 `host/tests/`。不动绑定、参数、依赖、数据，不新增、不停用点。暂存 `/root/aii-stage-20261010/`。
+- 试跑（现场布局 + `run-tests.sh 312`）：968 条全过、跳过 120。干跑（现场 venv + 三张库快照 + 隔离端口、无写路径、guid 备份指到临时目录）：1.19、3 域、无装载错误、`iso_zone` 五个色调。
+- 联机只读核对（新代码 + 现役证书，受限连接 `CheckPointQuota`）：19 个在用点 `newPoints=0`，`limit=2193`、`used=2193`；「新增 1 个」回 `Deny` 带原话。
+- **19:58:25 投 `AI-93` 预告「20:10 前后、停服约 10 秒」**；`deploy-0351ff3.sh`（备份标签 `20261010-deploy0351ff3`：`host.bak-` / `domains.bak-` / `data/backup-`）**20:10:00.9 停服 → 20:10:15.9 起服**，约 15 秒（`systemctl stop` 返回慢，进程 20:10:01 已退出），比预告多 5 秒，已在 `AI-94` 说明。回滚 `rollback-0351ff3.sh`（不新增点 ⇒ 回滚不进待确认删除清单）。
+- 投后：`proto_version=1.19`、`service_version=0.1.0+src20261010T201015Z`、3 域、`NRestarts=0`、0 条 ERROR；投放哈希核对一致；快照 19 点 + 2 上级全接受；
+  `/health.registration` 20:10:16 核对 `unregistered=[]`；`ListBindings` 19 点 `unregistered` 全 false；回读 localId 1033 每分钟一拍未断（20:09:04 → 20:10:20 → 20:11:13）；现场 `run-tests.sh 312` 968 条全过。
+- **20:13:31 投 `AI-94`**。
+- ⇒ 现场有备份与暂存，**清理须用户点头**。
