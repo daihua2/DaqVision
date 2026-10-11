@@ -151,18 +151,20 @@ class TestIsoClassification(unittest.TestCase):
         self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIs(out["direction_hint"].quality, Quality.CONFIG_INCOMPLETE)
 
-    def test_不适用则不出分级且说明原因(self):
+    def test_平台所填不适用已不采用_缺功率则不出分级并说明(self):
+        # 用户 2026-10-12 定「不适用应由你判定」：平台的「不适用」不再采用；没有功率就定不了分组
         f = _frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "machineGroup": "notApplicable"})
         out = _by_key(self.d.instance.infer(f))
         for k in ("iso_zone", "iso_zone_code", "iso_margin"):
             self.assertIs(out[k].quality, Quality.CONFIG_INCOMPLETE, k)
             self.assertIsNone(out[k].value)
         self.assertIs(out["vel_max"].quality, Quality.OK, "数值照给")
-        self.assertIn("不适用", out["evidence"].value)
+        self.assertIn("已不采用", out["evidence"].value)
+        self.assertIn("额定功率未传", out["evidence"].value)
 
     def test_判据摘要写明国标(self):
         ev = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)})))["evidence"].value
-        self.assertIn("GB/T 6075.3-2011（第 2 组 / 刚性支承）", ev)
+        self.assertIn("GB/T 6075.3-2011（按所填第 2 组 / 刚性支承）", ev)
         self.assertNotIn("ISO 20816", ev, "判级依据已改用国标")
 
 
@@ -311,19 +313,20 @@ class TestScopeAndRadial(unittest.TestCase):
 
     def test_功率15kW及以下与超50MW无适用标准(self):
         for kw in ("15", "5", "50001"):
-            out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw)
+            out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw, machineGroup="")
             self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, kw)
             self.assertIsNone(out["iso_zone"].value, kw)
             self.assertIn("⚠无适用的现场判级标准", out["evidence"].value, kw)
             self.assertAlmostEqual(out["vel_max"].value, 2.0)
-        for kw in ("15.1", "300", "50000", ""):
-            self.assertIs(self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw)["iso_zone"].quality,
+        for kw in ("15.1", "300", "50000"):
+            self.assertIs(self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw, machineGroup="")["iso_zone"].quality,
                           Quality.OK, kw)
 
-    def test_机器分组不适用给出无标准警示(self):
-        out = self._out({"x_vel": _samples(2.0)}, machineGroup="notApplicable")
-        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
-        self.assertIn("⚠无适用的现场判级标准", out["evidence"].value)
+    def test_平台所填不适用不采用_按功率推分组照判(self):
+        out = self._out({"x_vel": _samples(2.0)}, machineGroup="notApplicable", ratedPowerKw="200")
+        self.assertEqual(out["iso_zone"].value, "B")
+        self.assertIn("已不采用", out["evidence"].value)
+
 
     def test_轴向最大时只按径向判区(self):
         # 第 2 组刚性 1.4/2.8/4.5：径向 x=2.0 ⇒ B；轴向 z=5.0 若参与就是 D
@@ -347,6 +350,90 @@ class TestScopeAndRadial(unittest.TestCase):
         out = self._out({"x_vel": _samples(2.0), "z_vel": _samples(5.0)}, axialAxis="")
         self.assertEqual(out["iso_zone"].value, "D")
         self.assertIn("轴向未指明", out["evidence"].value)
+
+
+class TestApplicabilityByUs(unittest.TestCase):
+    """用户 2026-10-12 定「不适用应由你判定」：平台只传事实（设备类型、功率、转速、支承、泵类别），
+    适用与否、分组都由本模块按 GB/T 6075.3 / 6075.7 判。"""
+
+    BASE = {"algorithms": "classic", "vel_is_rms": "true", "axialAxis": "z", "supportClass": "rigid",
+            "ratedSpeedRpm": "1480"}
+
+    def setUp(self):
+        self.d = _load()
+
+    def _out(self, vel=3.0, **over):
+        return _by_key(self.d.instance.infer(_frame({"x_vel": _samples(vel)}, {**self.BASE, **over})))
+
+    def _no_std(self, out, word):
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIsNone(out["iso_zone"].value)
+        self.assertIn("⚠无适用的现场判级标准", out["evidence"].value)
+        self.assertIn(word, out["evidence"].value)
+        self.assertIs(out["vel_max"].quality, Quality.OK, "数值照给")
+
+    def test_分组由功率推出(self):
+        # 3.0 mm/s：第 1 组刚性 2.3/4.5/7.1 ⇒ B；第 2 组刚性 1.4/2.8/4.5 ⇒ C
+        self.assertEqual(self._out(ratedPowerKw="400", machineType="motor")["iso_zone"].value, "B")
+        self.assertEqual(self._out(ratedPowerKw="300", machineType="motor")["iso_zone"].value, "C")
+        self.assertIn("按额定 400 kW 定为第 1 组", self._out(ratedPowerKw="400", machineType="motor")["evidence"].value)
+
+    def test_非电机所填分组与功率不符是矛盾(self):
+        out = self._out(ratedPowerKw="200", machineType="compressor", machineGroup="group1")
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("自相矛盾", out["evidence"].value)
+
+    def test_电机可按轴中心高分组_所填优先(self):
+        out = self._out(ratedPowerKw="200", machineType="motor", machineGroup="group1")
+        self.assertEqual(out["iso_zone"].value, "B", "按所填第 1 组")
+        self.assertIn("轴中心高", out["evidence"].value)
+
+    def test_另有标准的类型不出分级(self):
+        for mtype, word in (("reciprocating", "GB/T 6075.6"), ("screwCompressor", "明文排除"),
+                            ("hydroUnit", "GB/T 6075.5"), ("windTurbine", "ISO 10816-21")):
+            self._no_std(self._out(ratedPowerKw="200", machineType=mtype), word)
+
+    def test_燃机超3MW另依6075点4(self):
+        self._no_std(self._out(ratedPowerKw="5000", machineType="gasTurbine"), "GB/T 6075.4")
+        self.assertIs(self._out(ratedPowerKw="2000", machineType="gasTurbine")["iso_zone"].quality, Quality.OK)
+
+    def test_300kW及以下柔性支承风机应依ISO14694(self):
+        self._no_std(self._out(ratedPowerKw="200", machineType="fan", supportClass="flexible"), "ISO 14694")
+        self.assertIs(self._out(ratedPowerKw="200", machineType="fan")["iso_zone"].quality, Quality.OK,
+                      "刚性支承的风机 GB/T 6075.3 照判")
+        self.assertIs(self._out(ratedPowerKw="400", machineType="fan", supportClass="flexible")["iso_zone"].quality,
+                      Quality.OK, ">300 kW 的风机 GB/T 6075.3 照判")
+
+    def test_设备类型未传照判并警示(self):
+        out = self._out(ratedPowerKw="200")
+        self.assertIs(out["iso_zone"].quality, Quality.OK)
+        self.assertIn("设备类型未传", out["evidence"].value)
+        self.assertNotIn("设备类型未传", self._out(ratedPowerKw="200", machineType="motor")["evidence"].value)
+
+    def test_设备类型取值不认不猜(self):
+        out = self._out(ratedPowerKw="200", machineType="spaceship")
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("取值不认", out["evidence"].value)
+
+    def test_类型为泵须有泵类别_类别与类型冲突是矛盾(self):
+        out = self._out(ratedPowerKw="90", machineType="pump")
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("泵类别", out["evidence"].value)
+        self.assertEqual(self._out(ratedPowerKw="90", machineType="pump", pumpCategory="category2")["iso_zone"].value,
+                         "A", "第Ⅱ类 ≤200 kW：3.0 < 3.2")
+        out = self._out(ratedPowerKw="90", machineType="motor", pumpCategory="category2")
+        self.assertIn("自相矛盾", out["evidence"].value)
+
+    def test_缺功率也缺分组则不出分级(self):
+        out = self._out(machineType="motor")
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("额定功率未传", out["evidence"].value)
+
+    def test_设备类型声明在台账层级且无缺省(self):
+        spec = {p.key: p for p in self.d.declaration.params}["machineType"]
+        self.assertEqual(spec.level, "machine")
+        self.assertEqual(spec.default, "")
+        self.assertIn("fan", spec.choices)
 
 
 class TestParamsMissing(unittest.TestCase):
