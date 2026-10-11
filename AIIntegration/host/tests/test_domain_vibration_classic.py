@@ -9,7 +9,7 @@
 4. **坏值不当成 0**；
 5. **T 取样本自己的时刻**；
 6. **检测状态**：A/B 正常、C 警告、D 危险、停机；分级给不出时同落坏码（`C-65 §2`）；
-7. 低速设备注明仅供参考；方向性只作提示；一条绑定只管一个传感器的三轴（`C-64 §2.1`）。
+7. 低速设备（工业机器与泵）照常按速度出分级，但警示标准要求另看位移、可能判轻；方向性只作提示；一条绑定只管一个传感器的三轴（`C-64 §2.1`）。
 """
 
 import unittest
@@ -197,7 +197,7 @@ class TestStatus(unittest.TestCase):
 
 
 class TestPump(unittest.TestCase):
-    """GB/T 6075.7-2015：按泵类别与额定功率（200 kW 分档）取限值，不看支承、不限转速。"""
+    """GB/T 6075.7-2015：按泵类别与额定功率（200 kW 分档）取限值，不看支承；低速另看位移（我方测不到，警示）。"""
 
     PUMP = {"algorithms": "classic", "pumpCategory": "category2", "ratedPowerKw": "90", "vel_is_rms": "true", "axialAxis": "z"}
 
@@ -233,10 +233,22 @@ class TestPump(unittest.TestCase):
         b = self._out(5.0, supportClass="flexible")["iso_zone"].value
         self.assertEqual(a, b)
 
-    def test_泵不加低速注释(self):
-        ev = self._out(3.0, ratedSpeedRpm="300")["evidence"].value
+    def test_低速泵照常分级但警示可能判轻(self):
+        # 用户 2026-10-12 定：GB/T 6075.7 §3.1 要求 <600 r/min 另测峰峰值位移，我方测不到 ⇒ 照出但警示（原「泵不加低速注释」作废）
+        out = self._out(3.0, ratedSpeedRpm="300")
+        ev = out["evidence"].value
+        self.assertIs(out["iso_zone"].quality, Quality.OK)
         self.assertIn("GB/T 6075.7-2015（第Ⅱ类", ev)
-        self.assertNotIn("仅供参考", ev)
+        self.assertIn("低速泵", ev)
+        self.assertIn("可能判轻", ev)
+        self.assertNotIn("可能判轻", self._out(3.0, ratedSpeedRpm="1480")["evidence"].value)
+
+    def test_泵1kW及以下无适用标准(self):
+        out = self._out(3.0, ratedPowerKw="1")
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("⚠无适用的现场判级标准", out["evidence"].value)
+        self.assertAlmostEqual(out["vel_max"].value, 3.0)
+        self.assertIs(self._out(3.0, ratedPowerKw="1.1")["iso_zone"].quality, Quality.OK)
 
     def test_泵缺额定功率不出分级(self):
         out = self._out(3.0, ratedPowerKw="")
@@ -264,19 +276,77 @@ class TestLowSpeed(unittest.TestCase):
         out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(2.0)}, params)))
         return out
 
-    def test_低速设备照常分级但注明仅供参考(self):
+    def test_低速设备照常分级但警示可能判轻(self):
         out = self._ev("450")
         self.assertIs(out["iso_zone"].quality, Quality.OK, "照常出分级")
-        self.assertIn("仅供参考", out["evidence"].value)
+        self.assertIn("可能判轻", out["evidence"].value)
 
     def test_非低速不加注(self):
-        self.assertNotIn("仅供参考", self._ev("1480")["evidence"].value)
+        self.assertNotIn("可能判轻", self._ev("1480")["evidence"].value)
 
     def test_600整不算低速(self):
-        self.assertNotIn("仅供参考", self._ev("600")["evidence"].value)
+        self.assertNotIn("可能判轻", self._ev("600")["evidence"].value)
+
+    def test_转速不在国标范围不出分级(self):
+        # GB/T 6075.3 第 1 章：120~15 000 r/min
+        for rpm in ("100", "16000"):
+            out = self._ev(rpm)
+            self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, rpm)
+            self.assertIn("⚠无适用的现场判级标准", out["evidence"].value, rpm)
+        for rpm in ("120", "15000"):
+            self.assertIs(self._ev(rpm)["iso_zone"].quality, Quality.OK, rpm)
 
     def test_未填额定转速如实说明(self):
         self.assertIn("额定转速未填", self._ev("")["evidence"].value)
+
+
+class TestScopeAndRadial(unittest.TestCase):
+    """用户 2026-10-12 定：按标准判级；不在标准范围的不出烈度区、只给数值并警示；判区只取径向（GB/T 6075.3 §5.2.4）。"""
+
+    def setUp(self):
+        self.d = _load()
+
+    def _out(self, channels, **over):
+        return _by_key(self.d.instance.infer(_frame(channels, {**FULL_PARAMS, **over})))
+
+    def test_功率15kW及以下与超50MW无适用标准(self):
+        for kw in ("15", "5", "50001"):
+            out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw)
+            self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, kw)
+            self.assertIsNone(out["iso_zone"].value, kw)
+            self.assertIn("⚠无适用的现场判级标准", out["evidence"].value, kw)
+            self.assertAlmostEqual(out["vel_max"].value, 2.0)
+        for kw in ("15.1", "300", "50000", ""):
+            self.assertIs(self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw)["iso_zone"].quality,
+                          Quality.OK, kw)
+
+    def test_机器分组不适用给出无标准警示(self):
+        out = self._out({"x_vel": _samples(2.0)}, machineGroup="notApplicable")
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("⚠无适用的现场判级标准", out["evidence"].value)
+
+    def test_轴向最大时只按径向判区(self):
+        # 第 2 组刚性 1.4/2.8/4.5：径向 x=2.0 ⇒ B；轴向 z=5.0 若参与就是 D
+        out = self._out({"x_vel": _samples(2.0), "z_vel": _samples(5.0)})
+        self.assertEqual(out["iso_zone"].value, "B")
+        self.assertAlmostEqual(out["iso_margin"].value, 0.8)
+        self.assertAlmostEqual(out["vel_max"].value, 5.0, msg="速度最大值照旧是三轴最大")
+        self.assertEqual(out["dominant_axis"].value, "z")
+        self.assertIn("不参与判区", out["evidence"].value)
+
+    def test_径向两轴取大(self):
+        out = self._out({"x_vel": _samples(1.0), "y_vel": _samples(3.0), "z_vel": _samples(0.5)})
+        self.assertEqual(out["iso_zone"].value, "C")
+
+    def test_只有轴向读数不出分级(self):
+        out = self._out({"z_vel": _samples(2.0)})
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("只认径向", out["evidence"].value)
+
+    def test_轴向未指明按三轴最大判并警示(self):
+        out = self._out({"x_vel": _samples(2.0), "z_vel": _samples(5.0)}, axialAxis="")
+        self.assertEqual(out["iso_zone"].value, "D")
+        self.assertIn("轴向未指明", out["evidence"].value)
 
 
 class TestParamsMissing(unittest.TestCase):

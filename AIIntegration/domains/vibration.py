@@ -124,6 +124,14 @@ _PUMP_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
 }
 PUMP_POWER_SPLIT_KW = 200.0
 
+#: 国标适用范围（用户 2026-10-12 定：按标准判级，不在标准范围的不出烈度区、只给数值并警示）。
+#: GB/T 6075.3 第 1 章：功率 >15 kW、转速 120~15 000 r/min、第 1 组 ≤50 MW；GB/T 6075.7 表 A.1：功率 >1 kW。
+MACHINE_MIN_KW, MACHINE_MAX_KW = 15.0, 50_000.0
+MACHINE_MIN_RPM, MACHINE_MAX_RPM = 120.0, 15_000.0
+PUMP_MIN_KW = 1.0
+#: 警示前缀：判据摘要里凡是「没有标准依据 / 标准要求的量测不到」都以它开头，平台与人一眼可辨。
+NO_STD = "⚠无适用的现场判级标准"
+
 _GROUPS = ("group1", "group2")
 _PUMPS = ("category1", "category2")
 _NA = "notApplicable"
@@ -241,7 +249,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.2.1"
+    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -308,11 +316,13 @@ class Vibration(Domain):
                 ParamSpec(
                     key=P_POWER, display="额定功率", value_type="float", unit="kW",
                     required=False, level="machine",
-                    description="泵必填：按 200 kW 分两档取限值"),
+                    description="泵必填：按 200 kW 分两档取限值，≤1 kW 的泵无适用标准。"
+                                "工业机器选填：填了就核对 GB/T 6075.3 范围（>15 kW 且 ≤50 MW），不在范围不出烈度分级"),
                 ParamSpec(
                     key=P_SPEED, display="额定转速", value_type="float", unit="r/min",
                     required=False, level="machine",
-                    description="工业机器低于 600 r/min 时照常出分级，但判据摘要注明结果仅供参考（标准要求另看位移）"),
+                    description="选填。工业机器不在 120~15 000 r/min 时不出烈度分级；"
+                                "低于 600 r/min 时照常按速度出分级，但判据摘要警示标准要求另看位移、可能判轻（泵同）"),
                 ParamSpec(
                     key="vel_is_rms", display="速度口径确认为有效值", value_type="enum",
                     choices=("true", "false"),
@@ -327,7 +337,7 @@ class Vibration(Domain):
                     choices=("x", "y", "z"), choice_displays=("X 轴", "Y 轴", "Z 轴"),
                     required=True, level="sensor",
                     description="沿转轴方向的那一轴，在振动传感器上填。没有缺省：猜错会把不对中说成不平衡。"
-                                "缺它只影响方向性与比例漂移；★改了它，已采基线的比例那一项作废，须重采"),
+                                "国标判区只取径向两轴，缺它则按三轴最大判并警示；也决定方向性与比例漂移。★改了它，已采基线的比例那一项作废，须重采"),
                 ParamSpec(
                     key="normal_label", display="采基线时认哪个标签算正常",
                     value_type="string", default=DEFAULT_NORMAL_LABEL, has_default=True,
@@ -483,8 +493,8 @@ class Vibration(Domain):
         else:
             hot = []
             for it in normals:
-                peak = max((p for p in (_window_peak(it.frame, _vel_role(a)) for a in _AXES)
-                            if p is not None), default=None)
+                fp = {a: p for a in _AXES if (p := _window_peak(it.frame, _vel_role(a))) is not None}
+                peak = _radial_peak(fp, params)[0] if fp else None
                 if peak is not None and _classify(peak, limits)[0] in ("C", "D"):  # type: ignore[arg-type]
                     hot.append((it, peak))
             if hot:
@@ -606,7 +616,7 @@ class Vibration(Domain):
         # ③' 自训算不出 ⇒ 状态按经典判（§0.3 第 3 条，`H-282 §2.2`）
         if baseline_on and b_level is None:
             if not classic:
-                c_level, c_bad, note = _classic_fallback(frame.params, vel_max)
+                c_level, c_bad, note = _classic_fallback(frame.params, peaks)
                 parts.append(note)
             elif c_level is not None:
                 parts.append("★AI 自训部分本次算不出，检测状态只按经典算法判；采到可用基线后自动按两者合成")
@@ -638,22 +648,24 @@ class Vibration(Domain):
         limits, iso_bad, basis, is_pump = _grading(frame.params)
         level: str | None = None
         bad_q: Quality | None = None
+        v_grade, ax_grade, radial_note = _radial_peak(peaks, frame.params)
+        if not iso_bad and v_grade is None:
+            iso_bad, radial_note = radial_note, ""
         if iso_bad:
             out += _bad_group(("iso_zone", "iso_zone_code", "iso_margin"), Quality.CONFIG_INCOMPLETE, t)
             parts.append(f"烈度分级未给：{iso_bad}")
             bad_q = Quality.CONFIG_INCOMPLETE
         else:
-            zone, code, margin = _classify(vel_max, limits)  # type: ignore[arg-type]
+            zone, code, margin = _classify(v_grade, limits)  # type: ignore[arg-type]
             level = _ZONE_STATUS[zone]
             out += [Finding(key="iso_zone", value=zone, quality=Quality.OK, t=t),
                     Finding(key="iso_zone_code", value=code, quality=Quality.OK, t=t),
                     Finding(key="iso_margin", value=round(margin, 4), quality=Quality.OK, t=t)]
             parts.append(
-                f"{basis} 判为 {zone} 区，"
+                f"{basis} 按径向 {ax_grade} {v_grade:.3f} mm/s 判为 {zone} 区，"
                 + (f"已超出 C/D 界 {-margin:.3f} mm/s" if margin < 0 else f"距下一档还有 {margin:.3f} mm/s"))
-            if not is_pump:                  # 低速注释只给工业机器。★泵标准其实也有：GB/T 6075.7 §3.1 要求 <600 r/min 另测峰峰值位移
-                                             # （表 A.2，0.5/1/2 倍工频滤波值，要频谱）—— 我方未做，待用户定（repo-survey-135 §7.3）
-                parts.append(_speed_note(frame.params.get(P_SPEED, "")))
+            parts.append(radial_note)
+            parts.append(_speed_note(frame.params.get(P_SPEED, ""), is_pump))
 
         axial = frame.params.get(P_AXIAL, "").strip().lower()
         dir_bad, dir_q, ratio, hint = _direction_check(peaks, axial)
@@ -729,7 +741,7 @@ def _combine_status(c_level: str | None, c_bad: Quality | None,
     return None, b_bad
 
 
-def _classic_fallback(params: dict[str, str], vel_max: float
+def _classic_fallback(params: dict[str, str], peaks: dict[str, float]
                       ) -> tuple[str | None, Quality | None, str]:
     """只启用自训、自训又算不出时，借经典判级出状态。返回 `(档位, 算不出时的码, 判据摘要)`。
 
@@ -737,9 +749,12 @@ def _classic_fallback(params: dict[str, str], vel_max: float
       码返回 None，让状态落自训那部分的码（那才是这条绑定缺的东西）。
     """
     limits, why, basis, _ = _grading(params)
+    v_grade, _, radial_note = _radial_peak(peaks, params)
+    if not why and v_grade is None:
+        why = radial_note
     if why:
-        return None, None, f"无可用基线，判级参数也不全（{why}），检测状态无从借经典判"
-    zone, _, _ = _classify(vel_max, limits)
+        return None, None, f"无可用基线，经典判级也给不出（{why}），检测状态无从借经典判"
+    zone, _, _ = _classify(v_grade, limits)  # type: ignore[arg-type]
     return _ZONE_STATUS[zone], None, (f"★无可用基线：检测状态暂借经典算法判（{basis} 判为 {zone} 区；"
                                       "经典未启用，其结论点不写）；采到基线后自动改按 AI 自训")
 
@@ -852,6 +867,9 @@ def _grading(params: dict[str, str]
             raw = params.get(P_POWER, "").strip()
             return None, (f"泵按 {_PUMP_STD} 判级需要额定功率（{P_POWER}={raw or '未填'}），"
                           "无法确定功率档"), "", True
+        if power <= PUMP_MIN_KW:
+            return None, (f"{NO_STD}：额定 {power:g} kW ≤ {PUMP_MIN_KW:g} kW，"
+                          f"{_PUMP_STD} 表 A.1 只适用于功率 >1 kW 的泵，只给数值"), "", True
         band = "le200" if power <= PUMP_POWER_SPLIT_KW else "gt200"
         roman = "Ⅰ" if pump == "category1" else "Ⅱ"
         basis = (f"{_PUMP_STD}（第{roman}类 / 额定 {power:g} kW，"
@@ -859,9 +877,17 @@ def _grading(params: dict[str, str]
         return _PUMP_LIMITS[(pump, band)], "", basis, True
 
     if group == _NA:
-        return None, f"机器分组为「不适用」：设备不在 {_MACHINE_STD} 范围内，不给分级", "", False
+        return None, (f"{NO_STD}：机器分组为「不适用」—— 设备不在 {_MACHINE_STD} 范围内"
+                      "（如 ≤15 kW 小电机与伺服、≤300 kW 风机、往复机等，或另有专门标准、或无标准），只给数值"), "", False
     if pump == _NA and not group:
         return None, "机器分组未填（泵类别为「不适用」，按工业机器判需要机器分组）", "", False
+    power, rpm = _num(params.get(P_POWER, "")), _num(params.get(P_SPEED, ""))
+    if power is not None and power > 0 and not (MACHINE_MIN_KW < power <= MACHINE_MAX_KW):
+        return None, (f"{NO_STD}：额定 {power:g} kW 不在 {_MACHINE_STD} 范围"
+                      f"（>{MACHINE_MIN_KW:g} kW 且 ≤50 MW），只给数值"), "", False
+    if rpm is not None and rpm > 0 and not (MACHINE_MIN_RPM <= rpm <= MACHINE_MAX_RPM):
+        return None, (f"{NO_STD}：额定 {rpm:g} r/min 不在 {_MACHINE_STD} 范围"
+                      f"（{MACHINE_MIN_RPM:g}~{MACHINE_MAX_RPM:g} r/min），只给数值"), "", False
     limits = _MACHINE_LIMITS.get((group, mount))
     if limits is None:
         return None, (f"参数不全或取值非法：{P_GROUP}={group or '未填'} "
@@ -915,18 +941,47 @@ def _direction(peaks: dict[str, float], ax_key: str, radial_keys: list[str]) -> 
     return ratio, "径向主导且轴向较弱 —— 提示：可能是不平衡"
 
 
-def _speed_note(raw: str) -> str:
-    """定案 1.2：低速设备照常出分级，但注明仅供参考。"""
+def _speed_note(raw: str, is_pump: bool) -> str:
+    """低速设备照常按速度出分级（定案 1.2），但标准还要求看位移、我方测不到 ⇒ 警示「可能判轻」。
+
+    ★只会判轻不会判重：标准规定速度与位移取较严一档，缺了位移那一项，结果只可能比标准的轻。
+    """
     raw = (raw or "").strip()
+    what = "泵" if is_pump else "设备"
     if not raw:
-        return "额定转速未填，无法判断是否低速设备（<600 r/min 时标准要求另看位移）"
-    try:
-        rpm = float(raw)
-    except ValueError:
-        return f"额定转速 {raw!r} 不是数，无法判断是否低速设备"
-    if rpm < LOW_SPEED_RPM:
-        return (f"低速设备（额定 {rpm:g} r/min < 600），标准要求另看位移，本结果仅供参考")
-    return ""
+        return f"额定转速未填，无法判断是否低速{what}（<600 r/min 时标准要求另看位移）"
+    rpm = _num(raw)
+    if rpm is None:
+        return f"额定转速 {raw!r} 不是数，无法判断是否低速{what}"
+    if rpm >= LOW_SPEED_RPM:
+        return ""
+    if is_pump:
+        return (f"⚠低速泵（额定 {rpm:g} r/min < 600）：{_PUMP_STD} §3.1 / 表 A.2 要求另测 0.5/1/2 倍工频的"
+                "峰峰值位移，本模块测不到，结果只按速度，可能判轻")
+    return (f"⚠低速设备（额定 {rpm:g} r/min < 600）：{_MACHINE_STD} 附录 A 要求速度与位移都看、取较严一档，"
+            "本模块只按速度，可能判轻")
+
+
+def _radial_peak(peaks: dict[str, float], params: dict[str, str]
+                 ) -> tuple[float | None, str, str]:
+    """判区用的速度：按国标**只取径向**。返回 `(值, 轴, 说明)`；值为 None 表示没有可判的径向读数。
+
+    ★GB/T 6075.3 §5.2.3 / §5.2.4、GB/T 6075.7 §5.3：限值表按两个正交径向取大，适用于所有轴承的径向振动，
+      推力轴承才含轴向（用户 2026-10-12 定按标准做）。本模块不知道轴承类型，一律只取径向；
+      轴向偏大另由「轴向/径向比」与方向性提示说。`vel_max`（速度最大值）照旧是三轴最大，只是不拿它判区。
+    """
+    axial = (params.get(P_AXIAL, "") or "").strip().lower()
+    if axial not in _AXES:
+        ax = max(peaks, key=lambda k: peaks[k])
+        return peaks[ax], ax, (f"⚠轴向未指明（{P_AXIAL}={axial or '未填'}），按三轴最大判区，"
+                               "可能把轴向读数算进去（国标只认径向）")
+    radial = {k: v for k, v in peaks.items() if k != axial}
+    if not radial:
+        return None, "", f"{NO_STD}：只有轴向 {axial} 有读数，国标判区只认径向振动，只给数值"
+    ax = max(radial, key=lambda k: radial[k])
+    note = (f"轴向 {axial} 读数最大（{peaks[axial]:.3f} mm/s），按国标不参与判区（推力轴承除外）"
+            if axial in peaks and peaks[axial] > radial[ax] else "")
+    return radial[ax], ax, note
 
 
 # ─────────────────────────────── 自训部分 ───────────────────────────────

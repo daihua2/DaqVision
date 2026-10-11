@@ -289,7 +289,7 @@ class TestBaselineOnlyFallback(unittest.TestCase):
         s = out["status"]
         self.assertIs(s.quality, Quality.MODEL_NOT_LOADED)
         self.assertIsNone(s.value)
-        self.assertIn("判级参数也不全", out["evidence"].value)
+        self.assertIn("经典判级也给不出", out["evidence"].value)
 
     def test_有基线就按自训_不借经典(self):
         art = _baseline(self.d, self.ONLY, (0.9, 1.0, 1.1, 1.05, 0.95))
@@ -325,6 +325,13 @@ class TestBaselineIsoCheck(unittest.TestCase):
         self.assertIn("C / D 区", msg)
         self.assertIn("把异常当常态", msg)
         self.assertIn("3.000", msg)
+
+    def test_轴向偏大不算国标C区_照采(self):
+        # 用户 2026-10-12 定按标准判区只取径向：轴向 z=5.0（若参与即 D 区）、径向 x=1.0 ⇒ 不拒采
+        items = tuple(LabeledFrame(frame=_frame(BOTH, x_vel=1.0, z_vel=5.0), label="正常", sample_id=i + 1)
+                      for i in range(5))
+        art = self.d.train(Dataset(domain="vibration", binding="dev1", name="基线", items=items), ProgressSink())
+        self.assertIsNotNone(art)
 
     def test_拒采原因只说相对位置不写绝对时刻(self):
         # ★铁律：后台存 UTC、前端按当地时间显示。这句话界面原样照显、前端换不了时区 ⇒ 不许夹绝对时刻。
