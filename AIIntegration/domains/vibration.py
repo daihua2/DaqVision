@@ -317,7 +317,7 @@ class Vibration(Domain):
                     choice_displays=(
                         "第 1 组：大型机器，额定功率 >300 kW；电动机轴中心高 H≥315 mm",
                         "第 2 组：中型机器，额定功率 >15 kW 且 ≤300 kW；电动机轴中心高 160≤H<315 mm",
-                        "不适用：不在 GB/T 6075.3 范围内",
+                        "（已作废）不适用：本模块不再采用，适用与否由本模块按设备类型、功率、转速判定",
                     ),
                     required=False, level="machine",
                     description="可不填：本模块按额定功率推出（>300 kW 第 1 组，15~300 kW 第 2 组）。"
