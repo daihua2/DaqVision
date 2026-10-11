@@ -283,12 +283,21 @@ class TestParamsMissing(unittest.TestCase):
     def setUp(self):
         self.d = _load()
 
-    def test_口径未确认为有效值就不给分级(self):
-        for bad in ("false", "", "TRUE-ish"):
+    def test_口径不是有效值就不给分级(self):
+        for bad, why in (("false", "手册明写为峰值"), ("", "未填"), ("TRUE-ish", "取值不认")):
             f = _frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "vel_is_rms": bad})
             out = _by_key(self.d.instance.infer(f))
             self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, bad)
+            self.assertIn(why, out["evidence"].value, bad)
             self.assertAlmostEqual(out["vel_max"].value, 3.0)
+
+    def test_手册未注明口径按惯例视为有效值(self):
+        # 用户 2026-10-12 定：速度是 RMS、位移是峰峰值为惯例 —— 「是」这一项必须把「手册未注明」包进来，
+        # 否则填表的人会因手册没写而选「否」，整条诊断就不出烈度分级。
+        spec = {p.key: p for p in self.d.declaration.params}["vel_is_rms"]
+        yes = dict(zip(spec.choices, spec.choice_displays))["true"]
+        self.assertIn("手册未注明", yes)
+        self.assertIn("惯例", spec.description)
 
     def test_工业机器缺机器分组或支承方式不出分级(self):
         for missing in ("machineGroup", "supportClass"):

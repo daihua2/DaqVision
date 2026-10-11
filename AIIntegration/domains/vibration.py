@@ -316,9 +316,12 @@ class Vibration(Domain):
                 ParamSpec(
                     key="vel_is_rms", display="速度口径确认为有效值", value_type="enum",
                     choices=("true", "false"),
-                    choice_displays=("是，已确认为有效值", "否 / 未确认（峰值或手册未注明）"),
+                    # ★惯例（用户 2026-10-12 定「速度是 RMS、位移是峰峰值……以此为惯例！」）：手册没写口径的按有效值算；
+                    #   只有手册明写峰值 / 峰峰值时才选「否」。仁科、博感明写的正是这一组合（传感器资料 README）。
+                    choice_displays=("是：有效值（手册未注明的按惯例视为有效值）", "否：手册明写为峰值或峰峰值"),
                     required=True, level="position",
-                    description="烈度判级要求速度有效值。选「否」时不出烈度分级，只给数值"),
+                    description="烈度判级要求速度有效值。按惯例，手册未注明口径的视为有效值；"
+                                "手册明写峰值 / 峰峰值时选「否」，此时不出烈度分级，只给数值"),
                 ParamSpec(
                     key=P_AXIAL, display="轴向是哪一轴", value_type="enum",
                     choices=("x", "y", "z"), choice_displays=("X 轴", "Y 轴", "Z 轴"),
@@ -839,7 +842,8 @@ def _grading(params: dict[str, str]
         return None, (f"参数自相矛盾：既填了泵类别（{pump}）又填了机器分组（{group}），"
                       "不猜哪个对"), "", True
     if is_rms != "true":
-        return None, (f"速度口径未确认为有效值（vel_is_rms={is_rms or '未填'}）"
+        why = {"false": "手册明写为峰值 / 峰峰值", "": "未填"}.get(is_rms, "取值不认")
+        return None, (f"速度口径不是有效值（vel_is_rms={is_rms or '未填'}：{why}）"
                       "—— 拿峰值套有效值判据会整档偏高，故不给分级"), "", is_pump
 
     if is_pump:
