@@ -617,3 +617,57 @@ class TestStopState(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCustomLimits(unittest.TestCase):
+    """用户 2026-10-12 定「除了有国际标准的，阈值应该能配置」：无适用标准时用自定预警 / 报警 / 危险线，有国标不采用。"""
+
+    # 2 kW 伺服电机：不在 GB/T 6075.3 范围（≤15 kW）
+    SERVO = {"algorithms": "classic", "vel_is_rms": "true", "axialAxis": "z", "supportClass": "rigid",
+             "machineType": "motor", "ratedPowerKw": "2", "ratedSpeedRpm": "3000"}
+    LIMITS = {"limitAttention": "2.0", "limitWarning": "3.5", "limitDanger": "5.0"}
+
+    def setUp(self):
+        self.d = _load()
+
+    def _out(self, vel, params):
+        return _by_key(self.d.instance.infer(_frame({"x_vel": _samples(vel)}, params)))
+
+    def test_无标准时按自定门槛判_四段对正常注意警告危险(self):
+        for vel, zone, status in ((2.0, "A", "normal"), (3.0, "B", "attention"),
+                                  (4.0, "C", "warning"), (5.1, "D", "danger")):
+            out = self._out(vel, {**self.SERVO, **self.LIMITS})
+            self.assertEqual(out["iso_zone"].value, zone, vel)
+            self.assertIs(out["iso_zone"].quality, Quality.OK, vel)
+            self.assertEqual(out["status"].value, status, vel)
+        ev = self._out(3.0, {**self.SERVO, **self.LIMITS})["evidence"].value
+        self.assertIn("依用户自定门槛", ev)
+        self.assertIn("非标准", ev)
+        self.assertIn("⚠无适用的现场判级标准", ev, "仍要说清为什么没有标准")
+
+    def test_有国标时自定门槛不采用(self):
+        params = {**self.SERVO, **self.LIMITS, "ratedPowerKw": "200"}   # 第 2 组刚性 1.4/2.8/4.5
+        out = self._out(3.0, params)
+        self.assertEqual(out["iso_zone"].value, "C", "按国标，不按自定（自定下是 B）")
+        self.assertEqual(out["status"].value, "warning")
+        self.assertIn("自定门槛不采用", out["evidence"].value)
+
+    def test_自定门槛不全或不递增不采用(self):
+        for bad in ({"limitAttention": "2.0", "limitWarning": "3.5"},
+                    {"limitAttention": "3.5", "limitWarning": "2.0", "limitDanger": "5.0"},
+                    {"limitAttention": "x", "limitWarning": "3.5", "limitDanger": "5.0"}):
+            out = self._out(3.0, {**self.SERVO, **bad})
+            self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, bad)
+            self.assertIn("三条都填且递增", out["evidence"].value, bad)
+
+    def test_无标准也无自定门槛_提示可以填(self):
+        out = self._out(3.0, self.SERVO)
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("可在诊断上填自定预警线", out["evidence"].value)
+
+    def test_自定门槛声明随诊断填且无缺省(self):
+        specs = {p.key: p for p in self.d.declaration.params}
+        for k in ("limitAttention", "limitWarning", "limitDanger"):
+            self.assertEqual(specs[k].level, "position", k)
+            self.assertEqual(specs[k].default, "", k)
+            self.assertFalse(specs[k].required, k)

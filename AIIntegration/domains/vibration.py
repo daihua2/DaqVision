@@ -174,6 +174,10 @@ RUNNING, STOPPED, UNJUDGED = "运行", "停机", "未判"
 
 #: 烈度区 → 检测状态（用户 2026-10-05 同意）。★B 区不对「注意」：国标 B 区即「可长期运行」。
 _ZONE_STATUS = {"A": STATUS_NORMAL, "B": STATUS_NORMAL, "C": STATUS_WARNING, "D": STATUS_DANGER}
+#: 用户自定门槛（用户 2026-10-12 定「除了有国际标准的，阈值应该能配置」）：**只在无适用标准时采用**。
+#: 三条线依次为预警 / 报警 / 危险 ⇒ 四段 A/B/C/D 对 正常 / 注意 / 警告 / 危险（与国标 B 区算正常不同：自定的第二段就是「预警」）。
+P_CUSTOM = ("limitAttention", "limitWarning", "limitDanger")
+_CUSTOM_STATUS = {"A": STATUS_NORMAL, "B": STATUS_ATTENTION, "C": STATUS_WARNING, "D": STATUS_DANGER}
 
 #: 档位高低（停机不参与比较）。
 _RANK = {STATUS_NORMAL: 0, STATUS_ATTENTION: 1, STATUS_WARNING: 2, STATUS_DANGER: 3}
@@ -269,7 +273,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类型 / 功率 / 转速判（§1.5.3）
+    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类型 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -380,6 +384,20 @@ class Vibration(Domain):
                     blank_meaning="not_evaluated", min="0",
                     description="速度最大值低于它即判停机：停机时不判烈度与方向、不出偏离与异常分，采基线时剔除停机帧。"
                                 "不填不判；没有缺省，按设备自己定"),
+                ParamSpec(
+                    key=P_CUSTOM[0], display="自定预警线", value_type="float", unit="mm/s",
+                    required=False, level="position", min="0",
+                    description="★只在无适用标准时采用（如 ≤15 kW 小电机、伺服、≤300 kW 柔性风机、往复机），有国标的填了也不用。"
+                                "速度有效值，三条线须都填且递增：超预警线为「注意」，超报警线为「警告」，超危险线为「危险」。"
+                                "判据摘要会注明「依用户自定门槛，非标准」。机器人等变工况设备宜在固定工况下比较"),
+                ParamSpec(
+                    key=P_CUSTOM[1], display="自定报警线", value_type="float", unit="mm/s",
+                    required=False, level="position", min="0",
+                    description="见「自定预警线」。须大于预警线"),
+                ParamSpec(
+                    key=P_CUSTOM[2], display="自定危险线", value_type="float", unit="mm/s",
+                    required=False, level="position", min="0",
+                    description="见「自定预警线」。须大于报警线（与判设备停机的「停机门槛」无关）"),
                 ParamSpec(
                     key=P_CLASSIFY, display="启用故障分类", value_type="enum",
                     choices=("true", "false"), choice_displays=("启用", "不启用"),
@@ -515,7 +533,7 @@ class Vibration(Domain):
                 + "）—— 样本太少算出来的离散度没有意义")
 
         # ★国标核查：用偏大的那段作基线，之后再大也显得「没变」。
-        limits, iso_bad, basis, _is_pump, _ = _grading(params)
+        limits, iso_bad, basis, _is_pump, _, _ = _basis(params)
         if iso_bad:
             iso_check = f"未做国标核查：{iso_bad}"
         else:
@@ -673,7 +691,7 @@ class Vibration(Domain):
     def _classic(frame: Frame, peaks: dict[str, float], vel_max: float, t: datetime,
                  out: list[Finding], parts: list[str]) -> tuple[str | None, Quality | None]:
         """烈度分级 + 方向性。返回 `(档位, 算不出时的码)`。"""
-        limits, iso_bad, basis, is_pump, grade_notes = _grading(frame.params)
+        limits, iso_bad, basis, is_pump, grade_notes, zone_status = _basis(frame.params)
         level: str | None = None
         bad_q: Quality | None = None
         v_grade, ax_grade, radial_note = _radial_peak(peaks, frame.params)
@@ -686,7 +704,7 @@ class Vibration(Domain):
             bad_q = Quality.CONFIG_INCOMPLETE
         else:
             zone, code, margin = _classify(v_grade, limits)  # type: ignore[arg-type]
-            level = _ZONE_STATUS[zone]
+            level = zone_status[zone]
             out += [Finding(key="iso_zone", value=zone, quality=Quality.OK, t=t),
                     Finding(key="iso_zone_code", value=code, quality=Quality.OK, t=t),
                     Finding(key="iso_margin", value=round(margin, 4), quality=Quality.OK, t=t)]
@@ -778,14 +796,14 @@ def _classic_fallback(params: dict[str, str], peaks: dict[str, float]
     ★借的只是状态：经典那几个结论点**没启用就不写**（§0.2）。判级参数不全就不借 ——
       码返回 None，让状态落自训那部分的码（那才是这条绑定缺的东西）。
     """
-    limits, why, basis, _, _ = _grading(params)
+    limits, why, basis, _, _, zone_status = _basis(params)
     v_grade, _, radial_note = _radial_peak(peaks, params)
     if not why and v_grade is None:
         why = radial_note
     if why:
         return None, None, f"无可用基线，经典判级也给不出（{why}），检测状态无从借经典判"
     zone, _, _ = _classify(v_grade, limits)  # type: ignore[arg-type]
-    return _ZONE_STATUS[zone], None, (f"★无可用基线：检测状态暂借经典算法判（{basis} 判为 {zone} 区；"
+    return zone_status[zone], None, (f"★无可用基线：检测状态暂借经典算法判（{basis} 判为 {zone} 区；"
                                       "经典未启用，其结论点不写）；采到基线后自动改按 AI 自训")
 
 
@@ -966,6 +984,37 @@ def _grading(params: dict[str, str]
                       f"查不到 {_MACHINE_STD} 边界"), "", False, notes
     basis = f"{_MACHINE_STD}（{how} / {'刚性' if mount == 'rigid' else '柔性'}支承）"
     return limits, "", basis, False, notes
+
+
+def _custom_limits(params: dict[str, str]) -> tuple[tuple[float, float, float] | None, str]:
+    """用户自定的三条线。返回 `(门槛, 不采用的原因)`；三条都没填 ⇒ `(None, "")`。"""
+    raws = [(params.get(k, "") or "").strip() for k in P_CUSTOM]
+    if not any(raws):
+        return None, ""
+    vals = [_num(r) for r in raws]
+    if any(v is None for v in vals) or not (0 < vals[0] < vals[1] < vals[2]):  # type: ignore[operator]
+        shown = " / ".join(r or "未填" for r in raws)
+        return None, f"自定门槛须三条都填且递增（预警 / 报警 / 危险 = {shown}），不采用"
+    return (vals[0], vals[1], vals[2]), ""  # type: ignore[return-value]
+
+
+def _basis(params: dict[str, str]
+           ) -> tuple[tuple[float, float, float] | None, str, str, bool, list[str], dict[str, str]]:
+    """判据来源：**有适用国标按国标；没有的才用用户自定门槛**（用户 2026-10-12 定）。
+
+    返回 `(边界, 未给原因, 判据说明, 是否按泵, 警示, 区→状态)`。自定门槛的第二段是「注意」，故区→状态随来源而变。
+    """
+    limits, why, basis, is_pump, notes = _grading(params)
+    custom, cwhy = _custom_limits(params)
+    if why.startswith(NO_STD):
+        if custom is None:
+            return None, why + "；" + (cwhy or "可在诊断上填自定预警线 / 报警线 / 危险线"), "", is_pump, notes, _ZONE_STATUS
+        a, b, c = custom
+        return custom, "", f"⚠依用户自定门槛（预警 {a:g} / 报警 {b:g} / 危险 {c:g} mm/s），非标准", is_pump, \
+            [why.replace("，只给数值", "") + "，改依用户自定门槛", *notes], _CUSTOM_STATUS
+    if not why and (custom is not None or cwhy):
+        notes = [*notes, "有适用国标，自定门槛不采用"]
+    return limits, why, basis, is_pump, notes, _ZONE_STATUS
 
 
 def _classify(vel: float, limits: tuple[float, float, float]) -> tuple[str, int, float]:
