@@ -113,8 +113,9 @@ _MACHINE_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
 }
 
 #: GB/T 6075.7-2015（等同 ISO 10816-7:2009）旋转动力泵，(泵类别, 功率档) → 边界。
-#: ★出处：AICloud `C-43 §4` 转引 Europump《Guidelines on Pump Vibration》（2013）对 ISO 10816-7 的摘录，
-#:   **标准原文尚未取得、未核对**（用户 2026-09-18 定：先按此实现）。取得原文后须逐值核对。
+#: 出处：AICloud `C-43 §4` 转引 Europump 2013 摘录（用户 2026-09-18 定「先按此实现」）。
+#: ★2026-10-12 已按 ISO 10816-7:2009 与 GB/T 6075.7-2015 原文表 A.1 核对，12 值逐值相同。
+#:   国标把 Category Ⅰ/Ⅱ 译作「1 组 / 2 组」；界面用「第Ⅰ/Ⅱ类」，免与 GB/T 6075.3 的机器分组混淆。
 _PUMP_LIMITS: dict[tuple[str, str], tuple[float, float, float]] = {
     ("category1", "le200"): (2.5, 4.0, 6.6),
     ("category1", "gt200"): (3.5, 5.0, 7.6),
@@ -647,7 +648,8 @@ class Vibration(Domain):
             parts.append(
                 f"{basis} 判为 {zone} 区，"
                 + (f"已超出 C/D 界 {-margin:.3f} mm/s" if margin < 0 else f"距下一档还有 {margin:.3f} mm/s"))
-            if not is_pump:                  # 低速规定出自 GB/T 6075.3；泵标准不限转速
+            if not is_pump:                  # 低速注释只给工业机器。★泵标准其实也有：GB/T 6075.7 §3.1 要求 <600 r/min 另测峰峰值位移
+                                             # （表 A.2，0.5/1/2 倍工频滤波值，要频谱）—— 我方未做，待用户定（repo-survey-135 §7.3）
                 parts.append(_speed_note(frame.params.get(P_SPEED, "")))
 
         axial = frame.params.get(P_AXIAL, "").strip().lower()

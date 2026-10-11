@@ -174,7 +174,7 @@ README 没提、源码里出现 ISO 的另有 3 个：`Advanced-Jeffcott-Rotor-D
 `signalmap`（注释里一句「ISO 10816 建立在 RMS 上」）。
 
 ⇒ **真正按标准查表判级的只有 2 个**（`rotordynamics-vibration-toolkit`、`predictive-maintenance-mcp`），**两个的表都与我方逐值相同**；
-**泵（ISO 10816-7 / GB/T 6075.7）一个实现都没有** —— 我方泵限值仍只有 Europump 转引一个来源（`C-43 §4`），原文未核。
+**泵（ISO 10816-7 / GB/T 6075.7）一个实现都没有** —— 我方泵限值当时只有 Europump 转引一个来源（`C-43 §4`）；★2026-10-12 已按 ISO 10816-7:2009 / GB/T 6075.7-2015 原文核对一致。
 另：上一级 `projects/` 下的 `node-red-contrib-condition-monitoring`（Class Ⅰ~Ⅳ 冒充 10816-3，external-projects §2.3）不在这 136 个里。
 
 ## 7 ★按标准号搜 GitHub 与网上（2026-10-08）
