@@ -245,12 +245,18 @@ class TestPump(unittest.TestCase):
         self.assertIn("可能判轻", ev)
         self.assertNotIn("可能判轻", self._out(3.0, ratedSpeedRpm="1480")["evidence"].value)
 
-    def test_泵1kW及以下无适用标准(self):
+    def test_泵1kW及以下无适用标准_按附录C下端判(self):
+        # 无 6075.7 可依；用户 2026-10-13 定：自定门槛未填的按 GB/T 41850.1 附录 C 下端 0.71 / 1.8 / 4.5
         out = self._out(3.0, ratedPowerKw="1")
-        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIs(out["iso_zone"].quality, Quality.OK)
+        self.assertEqual(out["iso_zone"].value, "C")
         self.assertIn("⚠无适用的现场判级标准", out["evidence"].value)
+        self.assertIn("GB/T 41850.1-2024 附录 C", out["evidence"].value)
+        self.assertNotIn("GB/T 6075.7-2015（第", out["evidence"].value)
         self.assertAlmostEqual(out["vel_max"].value, 3.0)
-        self.assertIs(self._out(3.0, ratedPowerKw="1.1")["iso_zone"].quality, Quality.OK)
+        out = self._out(3.0, ratedPowerKw="1.1")
+        self.assertIs(out["iso_zone"].quality, Quality.OK)
+        self.assertNotIn("41850.1", out["evidence"].value, ">1 kW 按 6075.7")
 
     def test_泵缺额定功率不出分级(self):
         out = self._out(3.0, ratedPowerKw="")
@@ -312,11 +318,18 @@ class TestScopeAndRadial(unittest.TestCase):
         return _by_key(self.d.instance.infer(_frame(channels, {**FULL_PARAMS, **over})))
 
     def test_功率15kW及以下与超50MW无适用标准(self):
-        for kw in ("15", "5", "50001"):
+        out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw="50001", machineGroup="")
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIsNone(out["iso_zone"].value)
+        self.assertIn("⚠无适用的现场判级标准", out["evidence"].value)
+        self.assertAlmostEqual(out["vel_max"].value, 2.0)
+        # ≤15 kW：仍无 6075.3 可依，但自定门槛未填时按 GB/T 41850.1 附录 C 下端判（用户 2026-10-13 定）
+        for kw in ("15", "5"):
             out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw, machineGroup="")
-            self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, kw)
-            self.assertIsNone(out["iso_zone"].value, kw)
+            self.assertIs(out["iso_zone"].quality, Quality.OK, kw)
+            self.assertEqual(out["iso_zone"].value, "C", kw)
             self.assertIn("⚠无适用的现场判级标准", out["evidence"].value, kw)
+            self.assertIn("GB/T 41850.1-2024 附录 C", out["evidence"].value, kw)
             self.assertAlmostEqual(out["vel_max"].value, 2.0)
         for kw in ("15.1", "300", "50000"):
             self.assertIs(self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw, machineGroup="")["iso_zone"].quality,
@@ -660,10 +673,65 @@ class TestCustomLimits(unittest.TestCase):
             self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, bad)
             self.assertIn("三条都填且递增", out["evidence"].value, bad)
 
-    def test_无标准也无自定门槛_提示可以填(self):
-        out = self._out(3.0, self.SERVO)
+    def test_另有专门标准而未实现的_无自定门槛提示可以填(self):
+        # 往复式机器另依 GB/T 6075.6：表 C.1 注 1 只许用于「没有特定标准」的机器，不套附录 C 缺省
+        for extra in ({"machineType": "reciprocating"}, {"machineType": "fan", "supportClass": "flexible"},
+                      {"machineType": "fan"}):
+            out = self._out(3.0, {**self.SERVO, **extra})
+            self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, extra)
+            self.assertIn("可在诊断上填自定预警线", out["evidence"].value, extra)
+            self.assertNotIn("41850.1", out["evidence"].value, extra)
+
+    def test_无标准无自定门槛_小型机器按附录C下端判_B区为正常(self):
+        # 用户 2026-10-13 定：≤15 kW 且无专门标准，按 GB/T 41850.1 表 C.1 下端 0.71 / 1.8 / 4.5
+        for vel, zone, status in ((0.71, "A", "normal"), (1.5, "B", "normal"),
+                                  (3.0, "C", "warning"), (4.6, "D", "danger")):
+            out = self._out(vel, self.SERVO)
+            self.assertEqual(out["iso_zone"].value, zone, vel)
+            self.assertIs(out["iso_zone"].quality, Quality.OK, vel)
+            self.assertEqual(out["status"].value, status, vel)
+        ev = self._out(1.5, self.SERVO)["evidence"].value
+        self.assertIn("GB/T 41850.1-2024 附录 C 表 C.1", ev)
+        self.assertIn("非专门标准", ev)
+        self.assertIn("⚠无适用的现场判级标准", ev, "仍要说清为什么没有专门标准")
+        self.assertNotIn("依用户自定门槛", ev)
+
+    def test_附录C缺省只到15kW_泵只到1kW(self):
+        self.assertIs(self._out(1.5, {**self.SERVO, "ratedPowerKw": "15"})["iso_zone"].quality, Quality.OK)
+        pump = {**self.SERVO, "machineType": "pump", "pumpCategory": "category1", "ratedPowerKw": "0.75"}
+        out = self._out(1.5, pump)
+        self.assertEqual(out["iso_zone"].value, "B")
+        self.assertIn("41850.1", out["evidence"].value)
+        # 15 kW 以上、转速超出 6075.3 范围：无标准但不是小型机器，表 C.1 没给取哪一端 ⇒ 不缺省
+        out = self._out(1.5, {**self.SERVO, "ratedPowerKw": "30", "ratedSpeedRpm": "60"})
         self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
-        self.assertIn("可在诊断上填自定预警线", out["evidence"].value)
+        self.assertNotIn("41850.1", out["evidence"].value)
+
+    def test_附录C缺省_设备类型未传要警示(self):
+        params = {k: v for k, v in self.SERVO.items() if k != "machineType"}
+        out = self._out(1.5, params)
+        self.assertEqual(out["iso_zone"].value, "B")
+        self.assertIn("未能核对是否另有专门标准", out["evidence"].value)
+
+    def test_自定门槛优先于附录C缺省(self):
+        out = self._out(3.0, {**self.SERVO, **self.LIMITS})
+        self.assertEqual(out["iso_zone"].value, "B", "按自定 2.0/3.5/5.0，不按附录 C（附录 C 下是 C）")
+        self.assertEqual(out["status"].value, "attention")
+
+    def test_自定门槛填错不退回附录C缺省(self):
+        out = self._out(1.5, {**self.SERVO, "limitAttention": "2.0", "limitWarning": "3.5"})
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
+        self.assertIn("三条都填且递增", out["evidence"].value)
+        self.assertNotIn("41850.1", out["evidence"].value)
+
+    def test_附录C缺省值与说明出处(self):
+        import sys   # noqa: PLC0415
+        v = sys.modules[type(self.d.instance).__module__]
+        self.assertEqual(v.ANNEX_C_LOWER, (0.71, 1.8, 4.5))
+        desc = {p.key: p for p in self.d.declaration.params}["limitAttention"].description
+        for s in ("GB/T 41850.1-2024", "ISO 20816-1:2016", "表 C.1", "0.71 / 1.8 / 4.5",
+                  "注 1", "注 2", "功率不大于 15 kW", "资料性", "B 区为正常"):
+            self.assertIn(s, desc, s)
 
     def test_自定门槛声明随诊断填且无缺省(self):
         specs = {p.key: p for p in self.d.declaration.params}

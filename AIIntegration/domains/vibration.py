@@ -178,6 +178,14 @@ _ZONE_STATUS = {"A": STATUS_NORMAL, "B": STATUS_NORMAL, "C": STATUS_WARNING, "D"
 #: 三条线依次为预警 / 报警 / 危险 ⇒ 四段 A/B/C/D 对 正常 / 注意 / 警告 / 危险（与国标 B 区算正常不同：自定的第二段就是「预警」）。
 P_CUSTOM = ("limitAttention", "limitWarning", "limitDanger")
 _CUSTOM_STATUS = {"A": STATUS_NORMAL, "B": STATUS_ATTENTION, "C": STATUS_WARNING, "D": STATUS_DANGER}
+#: 自定门槛**三条都没填**时的缺省（用户 2026-10-13 定「设置适当缺省值，并说明出处」）：
+#: GB/T 41850.1-2024（= ISO 20816-1:2016，IDT）附录 C 表 C.1 的 A/B · B/C · C/D 区界**下端**。
+#: 出处：表 C.1 注 1「本表仅适用于没有特定标准和没有合适经验可用的机器」；注 2「小型机器（如功率不大于 15 kW 的电动机）
+#: 倾向于取范围的下端」。⇒ 只用于 ≤15 kW（泵 ≤1 kW）且**确无专门标准**的设备；附录 C 为资料性，判据摘要注明「非专门标准」。
+#: ★这是国标区界，不是「预警 / 报警 / 危险线」⇒ 区→状态照国标（B 区为正常），不用 `_CUSTOM_STATUS`。
+#: ★不做成 ParamSpec 缺省：界面预置后就分不出「用户填的预警线」与「附录 C 区界」，B 区会被判成「注意」。
+ANNEX_C_LOWER = (0.71, 1.8, 4.5)
+ANNEX_C_STD = "GB/T 41850.1-2024 附录 C 表 C.1"
 
 #: 档位高低（停机不参与比较）。
 _RANK = {STATUS_NORMAL: 0, STATUS_ATTENTION: 1, STATUS_WARNING: 2, STATUS_DANGER: 3}
@@ -273,7 +281,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类型 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）
+    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类型 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13，未部署）
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -389,7 +397,12 @@ class Vibration(Domain):
                     required=False, level="position", min="0",
                     description="★只在无适用标准时采用（如 ≤15 kW 小电机、伺服、≤300 kW 柔性风机、往复机），有国标的填了也不用。"
                                 "速度有效值，三条线须都填且递增：超预警线为「注意」，超报警线为「警告」，超危险线为「危险」。"
-                                "判据摘要会注明「依用户自定门槛，非标准」。机器人等变工况设备宜在固定工况下比较"),
+                                "判据摘要会注明「依用户自定门槛，非标准」。机器人等变工况设备宜在固定工况下比较。"
+                                "★三条都不填时的缺省：额定功率 ≤15 kW（泵 ≤1 kW）且无专门标准的设备，"
+                                "按 GB/T 41850.1-2024（等同 ISO 20816-1:2016）附录 C 表 C.1 区界下端 0.71 / 1.8 / 4.5 mm/s 判区，"
+                                "区的含义照国标（B 区为正常，不是「注意」）。出处：表 C.1 注 1「本表仅适用于没有特定标准和没有合适经验可用的机器」，"
+                                "注 2「小型机器（如功率不大于 15 kW 的电动机）倾向于取范围的下端」；附录 C 为资料性，原文要求宜由供需双方商定，"
+                                "判据摘要注明「非专门标准」。另有专门标准而本模块未实现的设备（往复式机器、风机等）不套用此缺省，须自填"),
                 ParamSpec(
                     key=P_CUSTOM[1], display="自定报警线", value_type="float", unit="mm/s",
                     required=False, level="position", min="0",
@@ -986,6 +999,23 @@ def _grading(params: dict[str, str]
     return limits, "", basis, False, notes
 
 
+def _annex_c_applies(params: dict[str, str]) -> bool:
+    """自定门槛没填时，可否按 GB/T 41850.1 附录 C 下端判（见 `ANNEX_C_LOWER`）。
+
+    只在 `_grading` 已判「无适用标准」后调用。条件：额定功率 ≤15 kW（泵 ≤1 kW），且该设备**没有专门标准**
+    —— 往复式机器（GB/T 6075.6）、螺杆压缩机（GB/T 7777）、水力机组、风电机组、风机（ISO 14694）都另有标准，
+    表 C.1 注 1 只许用于「没有特定标准」的机器，故不套。
+    """
+    power = _num(params.get(P_POWER, ""))
+    if power is None or power <= 0:
+        return False
+    mtype = params.get(P_TYPE, "").strip()
+    if mtype in _TYPE_OTHER_STD or mtype == "fan":
+        return False
+    # 泵只在 ≤1 kW 时才落到「无适用标准」（>1 kW 归 6075.7），故与其他设备同用 ≤15 kW 一条即可
+    return power <= MACHINE_MIN_KW
+
+
 def _custom_limits(params: dict[str, str]) -> tuple[tuple[float, float, float] | None, str]:
     """用户自定的三条线。返回 `(门槛, 不采用的原因)`；三条都没填 ⇒ `(None, "")`。"""
     raws = [(params.get(k, "") or "").strip() for k in P_CUSTOM]
@@ -1000,13 +1030,22 @@ def _custom_limits(params: dict[str, str]) -> tuple[tuple[float, float, float] |
 
 def _basis(params: dict[str, str]
            ) -> tuple[tuple[float, float, float] | None, str, str, bool, list[str], dict[str, str]]:
-    """判据来源：**有适用国标按国标；没有的才用用户自定门槛**（用户 2026-10-12 定）。
+    """判据来源：**有适用国标按国标；没有的才用用户自定门槛**（用户 2026-10-12 定）；
+    自定门槛**三条都没填**、且 ≤15 kW 确无专门标准的，按 GB/T 41850.1 附录 C 下端（用户 2026-10-13 定，见 `ANNEX_C_LOWER`）。
+    自定门槛填了却不全 / 不递增的，**不退回缺省**（退回会掩盖填错），照旧不出分级并说明。
 
     返回 `(边界, 未给原因, 判据说明, 是否按泵, 警示, 区→状态)`。自定门槛的第二段是「注意」，故区→状态随来源而变。
     """
     limits, why, basis, is_pump, notes = _grading(params)
     custom, cwhy = _custom_limits(params)
     if why.startswith(NO_STD):
+        if custom is None and not cwhy and _annex_c_applies(params):
+            a, b, c = ANNEX_C_LOWER
+            if not params.get(P_TYPE, "").strip():
+                notes = [*notes, f"⚠设备类型未传（{P_TYPE}），未能核对是否另有专门标准"]
+            return ANNEX_C_LOWER, "", (f"⚠依 {ANNEX_C_STD} 下端（A/B {a:g} / B/C {b:g} / C/D {c:g} mm/s，"
+                                       "小型机器倾向下端；资料性），非专门标准"), is_pump, \
+                [why.replace("，只给数值", "") + f"，自定门槛未填，改依 {ANNEX_C_STD} 下端", *notes], _ZONE_STATUS
         if custom is None:
             return None, why + "；" + (cwhy or "可在诊断上填自定预警线 / 报警线 / 危险线"), "", is_pump, notes, _ZONE_STATUS
         a, b, c = custom
