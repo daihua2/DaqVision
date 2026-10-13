@@ -138,6 +138,9 @@ _CLASSES: dict[str, str] = {
     "EM": "电动机", "EG": "发电机", "BL": "风机 / 鼓风机", "CO": "压缩机", "GT": "燃气轮机", "ST": "汽轮机",
     "PU": "泵", "CE": "内燃机", "CF": "离心机", "TE": "透平膨胀机", "LE": "液体膨胀机", "MI": "搅拌机",
     "windTurbine": "风电机组", "hydroUnit": "水力发电与泵站机组", "other": "其他旋转设备",
+    # AICloud 用户 10-13 定伺服电动机单独成类（`C-98 §1`）。GB/T 2900.26-2008 3.2.68 定为电动机的一种，
+    # GB/T 6075.3 涵盖「electrical motors of any type」⇒ 判级与 EM 同（`C-98 §3`）
+    "servoMotor": "伺服电动机",
 }
 #: 附录 A 型式表（表 A.5 / A.8 / A.11 / A.14 / A.17 / A.20 / A.23 / A.26）。BL、CF、LE、MI 与扩展类无型式。
 _KINDS: dict[str, dict[str, str]] = {
@@ -149,6 +152,7 @@ _KINDS: dict[str, dict[str, str]] = {
     "PU": {"CE": "离心（旋转动力）", "RE": "往复", "RO": "回转"},
     "ST": {"MS": "多级", "SS": "单级"},
     "TE": {"CE": "离心", "AX": "轴流"},
+    "servoMotor": {"AC": "交流伺服", "DC": "直流伺服"},   # GB/T 2900.26 3.2.76 / 3.2.69（`C-98 §2`）
 }
 #: GB/T 6075.3 与 6075.7 都不管的「类别 + 型式」（`AI-99 §4`；型式为空 = 整个类别）。
 #: 值为 (原因, 是否另有专门标准)：另有专门标准的不套附录 C 缺省（表 C.1 注 1 只许用于「没有特定标准」的机器）。
@@ -174,7 +178,8 @@ P_DRIVEN = ("drivenClass", "drivenType")
 _RECIPROCATING = (("CE", ""), ("CO", "RE"), ("PU", "RE"))
 #: 泵的安装环境（`C-94 §2.2`，ISO 14224 表 A.22）：GB/T 6075.7 第 1 章排除潜水泵。
 P_PUMP_ENV = "pumpEnvironment"
-_ELECTRICAL = ("EM", "EG")                    # 第 1/2 组另可按轴中心高分，平台所填分组优先
+_ELECTRICAL = ("EM", "EG", "servoMotor")      # 第 1/2 组另可按轴中心高分，平台所填分组优先
+_MOTORS = ("EM", "servoMotor")
 GAS_TURBINE_MAX_KW = 3_000.0                  # >3 MW 的燃机另依 GB/T 6075.4 / ISO 10816-4
 FAN_SPLIT_KW = 300.0                          # ≤300 kW 且柔性支承的风机：GB/T 6075.3 第 1 章注排除，应依 ISO 14694
 GROUP1_MIN_KW = 300.0                         # GB/T 6075.3 §4.2：第 1 组 >300 kW，第 2 组 >15 kW 且 ≤300 kW
@@ -311,7 +316,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；未部署
+    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；扩展类 servoMotor 判级同电动机并警示变工况（C-98，10-13）；未部署
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -366,14 +371,14 @@ class Vibration(Domain):
                     required=False, level="machine",
                     description="ISO 14224:2016 表 A.4 类别代码：EM 电动机、EG 发电机、BL 风机、CO 压缩机、GT 燃气轮机、"
                                 "ST 汽轮机、PU 泵、CE 内燃机、CF 离心机、TE 透平膨胀机、LE 液体膨胀机、MI 搅拌机；"
-                                "扩展类 windTurbine 风电机组、hydroUnit 水力机组，兜底 other 其他旋转设备。"
+                                "扩展类 servoMotor 伺服电动机（判级同电动机）、windTurbine 风电机组、hydroUnit 水力机组，兜底 other 其他旋转设备。"
                                 "经典算法据此判是否在国标范围，不在的不出烈度分级；其他代码按无适用标准处理。"
                                 "未填时照判并警示「未能核对是否在标准范围」"),
                 ParamSpec(
                     key=P_KIND, display="设备型式（ISO 14224）", value_type="string",
                     required=False, level="machine",
                     description="所属类别型式表的代码，如 CO 的 CE 离心 / RE 往复 / SC 螺杆 / AX 轴流、PU 的 CE / RE / RO、"
-                                "EG 的 TD / SD / TE / MD。往复、螺杆、回转容积式等不在国标范围。无型式表的类别不填"),
+                                "EG 的 TD / SD / TE / MD、servoMotor 的 AC / DC。往复、螺杆、回转容积式等不在国标范围。无型式表的类别不填"),
                 ParamSpec(
                     key=P_DRIVER[0], display="驱动机类别（由机组推出）", value_type="string",
                     required=False, level="machine",
@@ -1014,9 +1019,14 @@ def _grading(params: dict[str, str]
             notes.append(f"⚠设备型式未传（{P_KIND}），未核是否为{out}型（不在国标范围）")
     # GB/T 6075.3 第 1 章排除一体式电机泵与潜水电泵的电机。约定这两种整台建成一台 PU、不拆机组（`C-95` 选甲），
     # 平台不强制 ⇒ 拆成了机组的电机照判，注明未核（`C-95 §1`、`AI-100 §3.1` 末句）
-    if cls == "EM" and any(c == "PU" for c, _ in _partners(params, P_DRIVEN)[0]):
+    if cls in _MOTORS and any(c == "PU" for c, _ in _partners(params, P_DRIVEN)[0]):
         notes.append("⚠被驱动机含泵：未核是否一体式电机泵 / 潜水电泵（GB/T 6075.3 第 1 章排除；"
                      "此类应整台建成一台泵，按 GB/T 6075.7 判）")
+    # GB/T 6075.3 表 A.1 注 1：限值「do not apply when the machine is undergoing a transient condition
+    # (i.e. changing speed or load)」；GB/T 41850.1 的区界同样针对稳态。机器人关节等伺服多在变速变载（`C-98 §3`）
+    if cls == "servoMotor":
+        notes.append("⚠伺服电动机多为变速、变载运行：国标限值只适用于稳态（GB/T 6075.3 表 A.1 注 1：转速或负载变化的"
+                     "瞬态不适用），本模块分不出读数是否取自稳态，变工况下的分级只作参考")
 
     # ── 泵：GB/T 6075.7
     if is_pump:

@@ -438,6 +438,19 @@ class TestApplicabilityByUs(unittest.TestCase):
         self.assertIs(ok["iso_zone"].quality, Quality.OK, "型式留空位的那台没标往复，照判")
         self.assertNotIn("联接设备", ok["evidence"].value)
 
+    def test_伺服电动机判级同电动机_并警示变工况(self):
+        # C-98 §3：servoMotor 单独成类，判级与 EM 同；GB/T 6075.3 表 A.1 注 1 瞬态不适用 ⇒ 警示
+        out = self._out(ratedPowerKw="400", equipmentClass="servoMotor", equipmentType="AC")
+        self.assertEqual(out["iso_zone"].value, "B", "按功率定第 1 组，同 EM")
+        self.assertIn("变工况下的分级只作参考", out["evidence"].value)
+        out = self._out(ratedPowerKw="200", equipmentClass="servoMotor", machineGroup="group1")
+        self.assertEqual(out["iso_zone"].value, "B", "可按轴中心高分组，所填优先")
+        self.assertNotIn("变工况", self._out(ratedPowerKw="400", equipmentClass="EM")["evidence"].value)
+        out = self._out(ratedPowerKw="200", equipmentClass="servoMotor", equipmentType="AX")
+        self.assertIn("取值不认", out["evidence"].value, "型式只有 AC / DC")
+        out = self._out(ratedPowerKw="200", equipmentClass="servoMotor", drivenClass="PU")
+        self.assertIn("未核是否一体式电机泵", out["evidence"].value)
+
     def test_电机拖泵_注明未核一体式与潜水电泵(self):
         # C-95 选甲：一体式电机泵、潜水电泵整台建成一台 PU；平台不强制，拆成机组的电机照判并注明
         out = self._out(ratedPowerKw="200", equipmentClass="EM", drivenClass="BL,PU", drivenType=",CE")
@@ -772,6 +785,17 @@ class TestCustomLimits(unittest.TestCase):
             self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, extra)
             self.assertIn("可在诊断上填自定预警线", out["evidence"].value, extra)
             self.assertNotIn("41850.1", out["evidence"].value, extra)
+
+    def test_小型伺服电动机按附录C缺省_工业机器人不套(self):
+        # C-98 §3：servoMotor ≤15 kW 三条自定线都空 ⇒ 同 EM 按附录 C 下端；industrialRobot 本模块不认 ⇒ 无标准、不套
+        out = self._out(1.5, {**self.SERVO, "equipmentClass": "servoMotor", "equipmentType": "AC"})
+        self.assertEqual(out["iso_zone"].value, "B")
+        self.assertIn("41850.1", out["evidence"].value)
+        self.assertIn("变工况", out["evidence"].value)
+        for cls in ("industrialRobot", "pressFitPress"):
+            out = self._out(1.5, {**self.SERVO, "equipmentClass": cls})
+            self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, cls)
+            self.assertNotIn("41850.1", out["evidence"].value, cls)
 
     def test_确无专门标准的类别_小型的按附录C缺省(self):
         for extra in ({"equipmentClass": "TE", "equipmentType": "AX"}, {"equipmentClass": "MI"},
