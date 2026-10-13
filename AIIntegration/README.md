@@ -1714,3 +1714,17 @@ AICloud `C-72`：按 `AI-76 §5.1` 在 khb 上实跑采基线（标注 UTC 06:41
   `/health.registration` 20:10:16 核对 `unregistered=[]`；`ListBindings` 19 点 `unregistered` 全 false；回读 localId 1033 每分钟一拍未断（20:09:04 → 20:10:20 → 20:11:13）；现场 `run-tests.sh 312` 968 条全过。
 - **20:13:31 投 `AI-94`**。
 - 备份与暂存经用户同意 **21:30:14 已清**（服务未受影响）⇒ **现场又无回滚备份，下次部署前必须先备份**。
+
+## 36. 部署记录：`vibration` 1.3.0 上现场（2026-10-13，用户授权；本节时刻均为 UTC）
+
+改动见定案 §1.5.2~§1.5.5、`AI-95`~`AI-101`、`AI-105`、`AI-106`：按标准判级与无标准警示、自定门槛、≤15 kW 附录 C 缺省、设备分类改照 ISO 14224（`equipmentClass` / `equipmentType`、联接设备、`pumpEnvironment`）、扩展类 `servoMotor`。
+
+- 用户原话「AICloud 已发函就绪，部署吧」（`C-99`：平台只发模块声明的键，部署时刻由我方定；`C-96`：须我方先部署平台才能核新键）。
+- 投放 `64869b0`（代码同 `94f0e57`）相对现场 `0351ff3`：现场 84 个文件逐个核过哈希、无漂移（`press_fit.py`、`vision_helmet.py` 本就未铺）。只换 3 个文件：`domains/vibration.py`、`host/tests/test_domain_vibration.py`、`test_domain_vibration_classic.py`。
+  契约仍 1.19，不动骨架、绑定、依赖；结论点不增不减（19 个）。暂存 `/root/aii-stage-20261013/`（含 `deploy-` / `rollback-64869b0.sh`、`readback.py`、试跑副本 `try/`）。
+- 试跑：暂存副本上现场 `run-tests.sh 312` 1012 条全过；现场 venv 装载三域无错、新键已声明、结论 19；按现役参数判区不变（第 2 组刚性），三条「未传」警示。
+- **14:55:26 投 `AI-107` 预告「15:05 前后、约 10 秒」**；`deploy-64869b0.sh`（备份标签 `20261013-deploy64869b0`：`host.bak-` / `domains.bak-` / `data/backup-`，数据在停服后备份）**15:04:50 停服 → 15:04:55 起服**，约 5 秒。
+- 投后：三域装载（vibration 1.3.0）、快照 19 点 + 2 上级全接受、`unregistered=[]`；授权已变为 `limit=10000`、`used=2195`（此前 2193/2193）；`NRestarts=0`、0 条 ERROR；投放哈希一致；
+  回读 gid 2770 / 2771 / 2773 / 2783 三拍（15:13:24、15:14:44、15:15:08）照常、质量 Ok，判据摘要带新警示；现场正式目录 `run-tests.sh 312` 1012 条全过。`/health.version` 仍 `src20261010T201015Z`（版本号取自骨架，本次未动骨架）。
+- **15:19:16 投 `AI-108`**。回滚 `rollback-64869b0.sh` 只退代码（不新增点 ⇒ 不进待确认删除）；平台若已保存带新键的绑定，须 `--with-data` 并先函告。
+- 待：AICloud 按 `C-99 §3` 保存同步并函告核验；备份与暂存的清理待用户点头。
