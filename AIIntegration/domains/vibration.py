@@ -145,7 +145,9 @@ _CLASSES: dict[str, str] = {
 #: 附录 A 型式表（表 A.5 / A.8 / A.11 / A.14 / A.17 / A.20 / A.23 / A.26）。BL、CF、LE、MI 与扩展类无型式。
 _KINDS: dict[str, dict[str, str]] = {
     "CE": {"DE": "柴油机", "GE": "燃气发动机"},
-    "CO": {"CE": "离心", "RE": "往复", "SC": "螺杆", "AX": "轴流"},
+    "CO": {"CE": "离心", "RE": "往复", "SC": "螺杆", "AX": "轴流", "rotaryPD": "回转容积式（刮板、液环等）"},
+    # 扩展型式 rotaryPD（用户 10-14 定，AI-109）：ISO 型式表没有、平台却分得出的回转容积式，小写词以别于 ISO 代码（同 AI-99 §3）
+    "BL": {"rotaryPD": "回转容积式（螺杆、罗茨等）"},
     "EG": {"TD": "燃气轮机驱动", "SD": "汽轮机驱动", "TE": "透平膨胀机驱动", "MD": "发动机驱动"},
     "EM": {"AC": "交流", "DC": "直流"},
     "GT": {"IN": "工业型", "AD": "航改型", "HD": "重型"},
@@ -155,11 +157,14 @@ _KINDS: dict[str, dict[str, str]] = {
     "servoMotor": {"AC": "交流伺服", "DC": "直流伺服"},   # GB/T 2900.26 3.2.76 / 3.2.69（`C-98 §2`）
 }
 #: GB/T 6075.3 与 6075.7 都不管的「类别 + 型式」（`AI-99 §4`；型式为空 = 整个类别）。
-#: 值为 (原因, 是否另有专门标准)：另有专门标准的不套附录 C 缺省（表 C.1 注 1 只许用于「没有特定标准」的机器）。
+#: 值为 (原因, 不套附录 C)：另有专门标准、或未核清有无专门标准的，不套附录 C 缺省（表 C.1 注 1 只许用于「没有特定标准」的机器）。
 _NOT_COVERED: dict[tuple[str, str], tuple[str, bool]] = {
     ("CE", ""): ("内燃机为往复式机器，另依 GB/T 6075.6 / ISO 10816-6", True),
     ("CO", "RE"): ("往复压缩机另依 GB/T 41850.8 / ISO 20816-8", True),
     ("CO", "SC"): ("螺杆等回转容积式压缩机 GB/T 6075.3 明文排除，另依 GB/T 7777", True),
+    ("CO", "rotaryPD"): ("回转容积式压缩机（刮板、液环等）GB/T 6075.3 第 1 章排除，另依 GB/T 7777（容积式压缩机）", True),
+    ("BL", "rotaryPD"): ("回转容积式风机（螺杆、罗茨等）与回转容积式压缩机同理按 GB/T 6075.3 第 1 章排除处理，"
+                         "未核到专门的现场判级标准", True),
     ("PU", "RE"): ("往复泵为往复式机器，另依 GB/T 6075.6 / ISO 10816-6", True),
     ("PU", "RO"): ("回转容积泵不在 GB/T 6075.3 涵盖之列，GB/T 6075.7 第 1 章也排除", False),
     ("EG", "MD"): ("发动机驱动的发电机与往复式机器联接，GB/T 6075.3 第 1 章排除，另依 GB/T 2820.9", True),
@@ -316,7 +321,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；扩展类 servoMotor 判级同电动机并警示变工况（C-98，10-13）；未部署
+    version = "1.3.1"   # 1.3.1（2026-10-14）：扩展型式 rotaryPD，回转容积式压缩机 / 风机判无适用标准（AI-109）。1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；扩展类 servoMotor 判级同电动机并警示变工况（C-98，10-13）；10-13 已部署
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -378,7 +383,8 @@ class Vibration(Domain):
                     key=P_KIND, display="设备型式（ISO 14224）", value_type="string",
                     required=False, level="machine",
                     description="所属类别型式表的代码，如 CO 的 CE 离心 / RE 往复 / SC 螺杆 / AX 轴流、PU 的 CE / RE / RO、"
-                                "EG 的 TD / SD / TE / MD、servoMotor 的 AC / DC。往复、螺杆、回转容积式等不在国标范围。无型式表的类别不填"),
+                                "EG 的 TD / SD / TE / MD、servoMotor 的 AC / DC；扩展型式 rotaryPD（回转容积式）用于 CO、BL。"
+                                "往复、螺杆、回转容积式等不在国标范围。无型式表的类别不填"),
                 ParamSpec(
                     key=P_DRIVER[0], display="驱动机类别（由机组推出）", value_type="string",
                     required=False, level="machine",
@@ -1013,7 +1019,8 @@ def _grading(params: dict[str, str]
     if why:
         return None, f"{NO_STD}：{why}，本模块未实现，只给数值", "", is_pump, notes
     notes += coupling_notes
-    if cls in _KINDS and not kind:
+    # 风机的型式只有扩展的 rotaryPD 一种，叶轮式风机本来就不带型式 ⇒ 风机不提示「型式未传」
+    if cls in _KINDS and not kind and cls != "BL":
         out = "、".join(name for k, name in _KINDS[cls].items() if (cls, k) in _NOT_COVERED)
         if out:
             notes.append(f"⚠设备型式未传（{P_KIND}），未核是否为{out}型（不在国标范围）")

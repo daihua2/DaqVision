@@ -417,6 +417,18 @@ class TestApplicabilityByUs(unittest.TestCase):
                            ({"equipmentClass": "other"}, "不是 ISO 14224 的类别")):
             self._no_std(self._out(ratedPowerKw="200", **over), word)
 
+    def test_回转容积式压缩机与风机不出分级(self):
+        # 用户 10-14 定扩展型式 rotaryPD（AI-109）：平台按 GB/T 14885 分得出刮板式 / 液环压缩机、螺杆式风机，ISO 型式表没有
+        self._no_std(self._out(ratedPowerKw="200", equipmentClass="CO", equipmentType="rotaryPD"), "GB/T 7777")
+        self._no_std(self._out(ratedPowerKw="200", equipmentClass="BL", equipmentType="rotaryPD"), "回转容积式风机")
+        out = self._out(ratedPowerKw="200", equipmentClass="CO")
+        self.assertIn("回转容积式", out["evidence"].value, "压缩机型式未传时提示里要有回转容积式")
+
+    def test_叶轮式风机不带型式_不提示型式未传(self):
+        out = self._out(ratedPowerKw="200", equipmentClass="BL")
+        self.assertIs(out["iso_zone"].quality, Quality.OK)
+        self.assertNotIn("设备型式未传", out["evidence"].value)
+
     def test_同类别其他型式照判(self):
         for over in ({"equipmentClass": "CO", "equipmentType": "AX"}, {"equipmentClass": "EG", "equipmentType": "SD"},
                      {"equipmentClass": "GT", "equipmentType": "HD"}, {"equipmentClass": "ST", "equipmentType": "MS"}):
@@ -425,7 +437,7 @@ class TestApplicabilityByUs(unittest.TestCase):
     def test_型式未传_同类别有不在范围的型式要警示(self):
         out = self._out(ratedPowerKw="200", equipmentClass="CO")
         self.assertIs(out["iso_zone"].quality, Quality.OK, "照判")
-        self.assertIn("未核是否为往复、螺杆型", out["evidence"].value)
+        self.assertIn("未核是否为往复、螺杆、回转容积式（刮板、液环等）型", out["evidence"].value)
         self.assertNotIn("设备型式未传", self._out(ratedPowerKw="200", equipmentClass="EM")["evidence"].value,
                          "电动机两种型式都在范围内，不必警示")
 
@@ -779,6 +791,8 @@ class TestCustomLimits(unittest.TestCase):
                       {"equipmentClass": "BL"}, {"equipmentClass": "CO", "equipmentType": "SC"},
                       {"equipmentClass": "EG", "equipmentType": "MD"}, {"equipmentClass": "CF"},
                       {"equipmentClass": "windTurbine"},
+                      {"equipmentClass": "CO", "equipmentType": "rotaryPD"},   # 另依 GB/T 7777
+                      {"equipmentClass": "BL", "equipmentType": "rotaryPD"},   # 未核清有无专门标准，保守不套
                       {"drivenClass": "CO", "drivenType": "RE"},     # 与往复式机器联接：GB/T 6075.6
                       {"equipmentClass": "FC"}):                     # 不认的类别：附录 C 是机器振动的区界
             out = self._out(3.0, {**self.SERVO, **extra})
