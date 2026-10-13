@@ -1012,6 +1012,11 @@ def _grading(params: dict[str, str]
         out = "、".join(name for k, name in _KINDS[cls].items() if (cls, k) in _NOT_COVERED)
         if out:
             notes.append(f"⚠设备型式未传（{P_KIND}），未核是否为{out}型（不在国标范围）")
+    # GB/T 6075.3 第 1 章排除一体式电机泵与潜水电泵的电机。约定这两种整台建成一台 PU、不拆机组（`C-95` 选甲），
+    # 平台不强制 ⇒ 拆成了机组的电机照判，注明未核（`C-95 §1`、`AI-100 §3.1` 末句）
+    if cls == "EM" and any(c == "PU" for c, _ in _partners(params, P_DRIVEN)[0]):
+        notes.append("⚠被驱动机含泵：未核是否一体式电机泵 / 潜水电泵（GB/T 6075.3 第 1 章排除；"
+                     "此类应整台建成一台泵，按 GB/T 6075.7 判）")
 
     # ── 泵：GB/T 6075.7
     if is_pump:

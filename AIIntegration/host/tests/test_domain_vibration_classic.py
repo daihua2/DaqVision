@@ -438,6 +438,15 @@ class TestApplicabilityByUs(unittest.TestCase):
         self.assertIs(ok["iso_zone"].quality, Quality.OK, "型式留空位的那台没标往复，照判")
         self.assertNotIn("联接设备", ok["evidence"].value)
 
+    def test_电机拖泵_注明未核一体式与潜水电泵(self):
+        # C-95 选甲：一体式电机泵、潜水电泵整台建成一台 PU；平台不强制，拆成机组的电机照判并注明
+        out = self._out(ratedPowerKw="200", equipmentClass="EM", drivenClass="BL,PU", drivenType=",CE")
+        self.assertIs(out["iso_zone"].quality, Quality.OK)
+        self.assertIn("未核是否一体式电机泵 / 潜水电泵", out["evidence"].value)
+        for over in ({"drivenClass": "BL"}, {"equipmentClass": "ST", "drivenClass": "PU"}):
+            out = self._out(ratedPowerKw="200", **{"equipmentClass": "EM", **over})
+            self.assertNotIn("一体式电机泵", out["evidence"].value, over)
+
     def test_联接设备未传或个数不符_照判并警示(self):
         out = self._out(ratedPowerKw="200", equipmentClass="EM")
         self.assertIs(out["iso_zone"].quality, Quality.OK)
