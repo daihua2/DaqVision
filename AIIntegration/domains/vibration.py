@@ -129,22 +129,52 @@ PUMP_POWER_SPLIT_KW = 200.0
 MACHINE_MIN_KW, MACHINE_MAX_KW = 15.0, 50_000.0
 MACHINE_MIN_RPM, MACHINE_MAX_RPM = 120.0, 15_000.0
 PUMP_MIN_KW = 1.0
-#: 设备类型（用户 2026-10-12 定：适用与否由本模块判，平台只传事实）。键名、取值待 AICloud 台账定（AI-96），先按此声明。
-P_TYPE = "machineType"
-_TYPES: dict[str, str] = {
-    "motor": "电动机", "generator": "发电机", "fan": "风机 / 鼓风机", "pump": "旋转动力泵",
-    "compressor": "回转式压缩机（离心、轴流）", "screwCompressor": "螺杆等回转容积式压缩机",
-    "reciprocating": "往复式机器（往复压缩机、往复泵、内燃机等）", "steamTurbine": "汽轮机",
-    "gasTurbine": "燃气轮机", "hydroUnit": "水力发电与泵站机组", "windTurbine": "风电机组", "other": "其他工业机器",
+#: 设备类别与型式（用户 2026-10-12 定：适用与否由本模块判，平台只传事实）。
+#: 用户 2026-10-13 读完 ISO 14224:2016 原文后定「同意改用 ISO 代码」：类别取表 A.4、型式取附录 A 型式表；
+#: 扩展类与兜底类用小写词（`AI-99 §3 / §5`）。键名 AICloud `C-94` 照 `AI-99 §6.1` 定，`machineType` 作废。
+#: ★不声明成 enum：电气、机械大类的设备挂了振动诊断也照收，按「无适用标准」处理并写明代码（`AI-99 §6.1`）。
+P_CLASS, P_KIND = "equipmentClass", "equipmentType"
+_CLASSES: dict[str, str] = {
+    "EM": "电动机", "EG": "发电机", "BL": "风机 / 鼓风机", "CO": "压缩机", "GT": "燃气轮机", "ST": "汽轮机",
+    "PU": "泵", "CE": "内燃机", "CF": "离心机", "TE": "透平膨胀机", "LE": "液体膨胀机", "MI": "搅拌机",
+    "windTurbine": "风电机组", "hydroUnit": "水力发电与泵站机组", "other": "其他旋转设备",
 }
-#: 这几类 GB/T 6075.3 明文排除：另有专门标准（本模块未实现）或无标准。
-_TYPE_OTHER_STD = {
-    "reciprocating": "往复式机器另依 GB/T 6075.6 / ISO 10816-6",
-    "screwCompressor": "螺杆等回转容积式压缩机 GB/T 6075.3 明文排除，暂无对应的现场判级国标",
-    "hydroUnit": "水力发电与泵站机组另依 GB/T 6075.5 / ISO 10816-5",
-    "windTurbine": "风电机组另依 ISO 10816-21（另见 GB/T 35854）",
+#: 附录 A 型式表（表 A.5 / A.8 / A.11 / A.14 / A.17 / A.20 / A.23 / A.26）。BL、CF、LE、MI 与扩展类无型式。
+_KINDS: dict[str, dict[str, str]] = {
+    "CE": {"DE": "柴油机", "GE": "燃气发动机"},
+    "CO": {"CE": "离心", "RE": "往复", "SC": "螺杆", "AX": "轴流"},
+    "EG": {"TD": "燃气轮机驱动", "SD": "汽轮机驱动", "TE": "透平膨胀机驱动", "MD": "发动机驱动"},
+    "EM": {"AC": "交流", "DC": "直流"},
+    "GT": {"IN": "工业型", "AD": "航改型", "HD": "重型"},
+    "PU": {"CE": "离心（旋转动力）", "RE": "往复", "RO": "回转"},
+    "ST": {"MS": "多级", "SS": "单级"},
+    "TE": {"CE": "离心", "AX": "轴流"},
 }
-_ELECTRICAL = ("motor", "generator")          # 第 1/2 组另可按轴中心高分，平台所填分组优先
+#: GB/T 6075.3 与 6075.7 都不管的「类别 + 型式」（`AI-99 §4`；型式为空 = 整个类别）。
+#: 值为 (原因, 是否另有专门标准)：另有专门标准的不套附录 C 缺省（表 C.1 注 1 只许用于「没有特定标准」的机器）。
+_NOT_COVERED: dict[tuple[str, str], tuple[str, bool]] = {
+    ("CE", ""): ("内燃机为往复式机器，另依 GB/T 6075.6 / ISO 10816-6", True),
+    ("CO", "RE"): ("往复压缩机另依 GB/T 41850.8 / ISO 20816-8", True),
+    ("CO", "SC"): ("螺杆等回转容积式压缩机 GB/T 6075.3 明文排除，另依 GB/T 7777", True),
+    ("PU", "RE"): ("往复泵为往复式机器，另依 GB/T 6075.6 / ISO 10816-6", True),
+    ("PU", "RO"): ("回转容积泵不在 GB/T 6075.3 涵盖之列，GB/T 6075.7 第 1 章也排除", False),
+    ("EG", "MD"): ("发动机驱动的发电机与往复式机器联接，GB/T 6075.3 第 1 章排除，另依 GB/T 2820.9", True),
+    ("CF", ""): ("离心机不在 GB/T 6075.3 涵盖之列，另依 GB/T 10895", True),
+    ("TE", ""): ("透平膨胀机不在 GB/T 6075.3 涵盖之列，未找到专门的现场判级标准", False),
+    ("LE", ""): ("液体膨胀机不在 GB/T 6075.3 涵盖之列，未找到专门的现场判级标准", False),
+    ("MI", ""): ("搅拌机不在 GB/T 6075.3 涵盖之列，未找到专门的现场判级标准", False),
+    ("windTurbine", ""): ("风电机组另依 ISO 10816-21（另见 GB/T 35854）", True),
+    ("hydroUnit", ""): ("水力发电与泵站机组另依 GB/T 6075.5 / ISO 10816-5", True),
+    ("other", ""): ("设备类别为「其他」（双方约定，不是 ISO 14224 的类别），无适用标准", False),
+}
+#: 联接设备（`C-94 §2.1`，平台由「机组」推出）：多台以英文逗号连接，类别与型式逐台对应，没有型式的留空位。
+P_DRIVER = ("driverClass", "driverType")
+P_DRIVEN = ("drivenClass", "drivenType")
+#: 往复式机器（`C-94 §2.1`）：GB/T 6075.3 第 1 章排除「machines coupled to reciprocating machines」。
+_RECIPROCATING = (("CE", ""), ("CO", "RE"), ("PU", "RE"))
+#: 泵的安装环境（`C-94 §2.2`，ISO 14224 表 A.22）：GB/T 6075.7 第 1 章排除潜水泵。
+P_PUMP_ENV = "pumpEnvironment"
+_ELECTRICAL = ("EM", "EG")                    # 第 1/2 组另可按轴中心高分，平台所填分组优先
 GAS_TURBINE_MAX_KW = 3_000.0                  # >3 MW 的燃机另依 GB/T 6075.4 / ISO 10816-4
 FAN_SPLIT_KW = 300.0                          # ≤300 kW 且柔性支承的风机：GB/T 6075.3 第 1 章注排除，应依 ISO 14694
 GROUP1_MIN_KW = 300.0                         # GB/T 6075.3 §4.2：第 1 组 >300 kW，第 2 组 >15 kW 且 ≤300 kW
@@ -281,7 +311,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类型 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13，未部署）
+    version = "1.3.0"   # 1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；未部署
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -325,19 +355,47 @@ class Vibration(Domain):
                     choice_displays=(
                         "第 1 组：大型机器，额定功率 >300 kW；电动机轴中心高 H≥315 mm",
                         "第 2 组：中型机器，额定功率 >15 kW 且 ≤300 kW；电动机轴中心高 160≤H<315 mm",
-                        "（已作废）不适用：本模块不再采用，适用与否由本模块按设备类型、功率、转速判定",
+                        "（已作废）不适用：本模块不再采用，适用与否由本模块按设备类别、功率、转速判定",
                     ),
                     required=False, level="machine",
                     description="可不填：本模块按额定功率推出（>300 kW 第 1 组，15~300 kW 第 2 组）。"
                                 "电动机 / 发电机可按轴中心高分组，填了以所填为准；其他设备填了即与功率核对，不一致不出分级。"
-                                "★「不适用」已作废：适用与否由本模块按设备类型、功率、转速判定（用户 2026-10-12 定）"),
+                                "★「不适用」已作废：适用与否由本模块按设备类别、功率、转速判定（用户 2026-10-12 定）"),
                 ParamSpec(
-                    key=P_TYPE, display="设备类型", value_type="enum",
-                    choices=tuple(_TYPES), choice_displays=tuple(_TYPES.values()),
+                    key=P_CLASS, display="设备类别（ISO 14224）", value_type="string",
                     required=False, level="machine",
-                    description="经典算法用来判是否在国标范围：往复式机器、螺杆压缩机、水电机组、风电机组，"
-                                "以及 ≤300 kW 且柔性支承的风机不在 GB/T 6075.3 范围，不出烈度分级。"
+                    description="ISO 14224:2016 表 A.4 类别代码：EM 电动机、EG 发电机、BL 风机、CO 压缩机、GT 燃气轮机、"
+                                "ST 汽轮机、PU 泵、CE 内燃机、CF 离心机、TE 透平膨胀机、LE 液体膨胀机、MI 搅拌机；"
+                                "扩展类 windTurbine 风电机组、hydroUnit 水力机组，兜底 other 其他旋转设备。"
+                                "经典算法据此判是否在国标范围，不在的不出烈度分级；其他代码按无适用标准处理。"
                                 "未填时照判并警示「未能核对是否在标准范围」"),
+                ParamSpec(
+                    key=P_KIND, display="设备型式（ISO 14224）", value_type="string",
+                    required=False, level="machine",
+                    description="所属类别型式表的代码，如 CO 的 CE 离心 / RE 往复 / SC 螺杆 / AX 轴流、PU 的 CE / RE / RO、"
+                                "EG 的 TD / SD / TE / MD。往复、螺杆、回转容积式等不在国标范围。无型式表的类别不填"),
+                ParamSpec(
+                    key=P_DRIVER[0], display="驱动机类别（由机组推出）", value_type="string",
+                    required=False, level="machine",
+                    description="同机组驱动机的设备类别，多台以英文逗号连接。与往复式机器联接的不在 GB/T 6075.3 范围；"
+                                "往复式发动机驱动的泵不在 GB/T 6075.7 范围"),
+                ParamSpec(
+                    key=P_DRIVER[1], display="驱动机型式（由机组推出）", value_type="string",
+                    required=False, level="machine",
+                    description="与驱动机类别逐台对应，没有型式的留空位（如「CE,」）"),
+                ParamSpec(
+                    key=P_DRIVEN[0], display="被驱动机类别（由机组推出）", value_type="string",
+                    required=False, level="machine",
+                    description="同机组被驱动机的设备类别，多台以英文逗号连接。与往复式机器联接的不在 GB/T 6075.3 范围"),
+                ParamSpec(
+                    key=P_DRIVEN[1], display="被驱动机型式（由机组推出）", value_type="string",
+                    required=False, level="machine",
+                    description="与被驱动机类别逐台对应，没有型式的留空位"),
+                ParamSpec(
+                    key=P_PUMP_ENV, display="泵安装环境", value_type="enum",
+                    choices=("submerged", "dryMounted"), choice_displays=("潜没", "干式安装"),
+                    required=False, level="machine",
+                    description="ISO 14224 表 A.22。潜水泵不在 GB/T 6075.7 范围，不出烈度分级"),
                 ParamSpec(
                     key=P_SUPPORT, display="支承方式", value_type="enum",
                     choices=("rigid", "flexible"), choice_displays=("刚性", "柔性"),
@@ -349,10 +407,10 @@ class Vibration(Domain):
                     choice_displays=(
                         "第Ⅰ类：对可靠性、可用性或安全性要求高的泵",
                         "第Ⅱ类：一般用途的泵",
-                        "不适用：不是泵，或不在 GB/T 6075.7 范围内",
+                        "（已作废）不适用：本模块不再采用，是否为泵、是否在范围内由本模块按设备类别判定",
                     ),
                     required=False, level="machine",
-                    description="经典算法、旋转动力泵必填（工业机器不填）。选第Ⅰ/Ⅱ类即按泵判级"),
+                    description="经典算法、旋转动力泵（PU 离心型）必填，工业机器不填。设备类别未填时，选第Ⅰ/Ⅱ类即按泵判级"),
                 ParamSpec(
                     key=P_POWER, display="额定功率", value_type="float", unit="kW",
                     required=False, level="machine",
@@ -402,7 +460,7 @@ class Vibration(Domain):
                                 "按 GB/T 41850.1-2024（等同 ISO 20816-1:2016）附录 C 表 C.1 区界下端 0.71 / 1.8 / 4.5 mm/s 判区，"
                                 "区的含义照国标（B 区为正常，不是「注意」）。出处：表 C.1 注 1「本表仅适用于没有特定标准和没有合适经验可用的机器」，"
                                 "注 2「小型机器（如功率不大于 15 kW 的电动机）倾向于取范围的下端」；附录 C 为资料性，原文要求宜由供需双方商定，"
-                                "判据摘要注明「非专门标准」。另有专门标准而本模块未实现的设备（往复式机器、风机等）不套用此缺省，须自填"),
+                                "判据摘要注明「非专门标准」。另有专门标准而本模块未实现的设备（往复式机器、与之联接的设备、螺杆压缩机、离心机、风机等）不套用此缺省，须自填"),
                 ParamSpec(
                     key=P_CUSTOM[1], display="自定报警线", value_type="float", unit="mm/s",
                     required=False, level="position", min="0",
@@ -906,26 +964,30 @@ def _grading(params: dict[str, str]
              ) -> tuple[tuple[float, float, float] | None, str, str, bool, list[str]]:
     """选判据、查边界。返回 `(边界, 未给原因, 判据说明, 是否按泵, 警示)`；原因为空表示可以判。
 
-    ★**适用与否由本模块判**（用户 2026-10-12 定「不适用应由你判定」）：平台只传事实（设备类型、额定功率、
-      额定转速、支承方式、泵类别），不在国标范围的不出烈度区，原因以 `NO_STD` 开头。
+    ★**适用与否由本模块判**（用户 2026-10-12 定「不适用应由你判定」）：平台只传事实（设备类别与型式、联接设备、
+      泵安装环境、额定功率、额定转速、支承方式、泵类别），不在国标范围的不出烈度区，原因以 `NO_STD` 开头。
       分组由额定功率推出（GB/T 6075.3 §4.2）；电动机 / 发电机可按轴中心高分组，平台所填优先。
     ★不适用 / 缺参数 / 自相矛盾，都属于「判据立不起来」—— 正是 CONFIG_INCOMPLETE 的定义，不另立新码。
     """
     group = params.get(P_GROUP, "").strip()
     mount = params.get(P_SUPPORT, "").strip()
     pump = params.get(P_PUMP, "").strip()
-    mtype = params.get(P_TYPE, "").strip()
+    cls, kind = params.get(P_CLASS, "").strip(), params.get(P_KIND, "").strip()
     is_rms = params.get("vel_is_rms", "").strip().lower()
     power, rpm = _num(params.get(P_POWER, "")), _num(params.get(P_SPEED, ""))
     power = power if power is not None and power > 0 else None
     rpm = rpm if rpm is not None and rpm > 0 else None
     notes: list[str] = []
 
-    if mtype and mtype not in _TYPES:
-        return None, f"设备类型取值不认（{P_TYPE}={mtype}），不猜", "", False, notes
-    is_pump = pump in _PUMPS or mtype == "pump"
-    if pump in _PUMPS and mtype not in ("", "pump"):
-        return None, (f"参数自相矛盾：填了泵类别（{pump}），设备类型却是「{_TYPES[mtype]}」，"
+    if kind and not cls:
+        return None, f"填了设备型式（{P_KIND}={kind}）却没有设备类别，不猜", "", False, notes
+    if kind and cls in _CLASSES and kind not in _KINDS.get(cls, {}):
+        allowed = " / ".join(_KINDS.get(cls, {})) or "无型式表"
+        return None, (f"设备型式取值不认（{P_KIND}={kind}；{_CLASSES[cls]} {cls} 的型式：{allowed}），"
+                      "不猜"), "", False, notes
+    is_pump = _is_pump(params)
+    if pump in _PUMPS and cls not in ("", "PU"):
+        return None, (f"参数自相矛盾：填了泵类别（{pump}），设备类别却是「{_CLASSES.get(cls, cls)}」，"
                       "不猜哪个对"), "", True, notes
     if pump in _PUMPS and group in _GROUPS:
         return None, (f"参数自相矛盾：既填了泵类别（{pump}）又填了机器分组（{group}），"
@@ -935,10 +997,33 @@ def _grading(params: dict[str, str]
         return None, (f"速度口径不是有效值（vel_is_rms={is_rms or '未填'}：{why}）"
                       "—— 拿峰值套有效值判据会整档偏高，故不给分级"), "", is_pump, notes
 
+    # ── 先按类别、型式、联接设备排除（`AI-99 §4`、`C-94 §2`）
+    if cls and cls not in _CLASSES:
+        return None, (f"{NO_STD}：设备类别 {cls} 不在本模块所认的旋转设备之列，只给数值"), "", is_pump, notes
+    excluded = _excluded(cls, kind)
+    if excluded:
+        why, special = excluded
+        return None, f"{NO_STD}：{why}{'，本模块未实现' if special else ''}，只给数值", "", is_pump, notes
+    why, coupling_notes = _coupled_reciprocating(params, is_pump)
+    if why:
+        return None, f"{NO_STD}：{why}，本模块未实现，只给数值", "", is_pump, notes
+    notes += coupling_notes
+    if cls in _KINDS and not kind:
+        out = "、".join(name for k, name in _KINDS[cls].items() if (cls, k) in _NOT_COVERED)
+        if out:
+            notes.append(f"⚠设备型式未传（{P_KIND}），未核是否为{out}型（不在国标范围）")
+
     # ── 泵：GB/T 6075.7
     if is_pump:
+        env = params.get(P_PUMP_ENV, "").strip()
+        if env == "submerged":
+            return None, f"{NO_STD}：潜水泵 {_PUMP_STD} 第 1 章排除，只给数值", "", True, notes
+        if not env:
+            notes.append(f"⚠泵安装环境未传（{P_PUMP_ENV}），未核是否潜水泵（{_PUMP_STD} 第 1 章排除）")
+        # ISO 14224 表 A.22 无此项，平台台账也没有 ⇒ 只能注明（`AI-100 §3.2`）
+        notes.append(f"⚠未核是否固体输送 / 渣浆泵（{_PUMP_STD} 第 1 章排除）")
         if pump not in _PUMPS:
-            return None, f"设备类型为泵，按 {_PUMP_STD} 判级需要泵类别（第Ⅰ/Ⅱ类）", "", True, notes
+            return None, f"设备类别为泵，按 {_PUMP_STD} 判级需要泵类别（第Ⅰ/Ⅱ类）", "", True, notes
         if power is None:
             raw = params.get(P_POWER, "").strip()
             return None, (f"泵按 {_PUMP_STD} 判级需要额定功率（{P_POWER}={raw or '未填'}），"
@@ -950,17 +1035,15 @@ def _grading(params: dict[str, str]
         roman = "Ⅰ" if pump == "category1" else "Ⅱ"
         basis = (f"{_PUMP_STD}（第{roman}类 / 额定 {power:g} kW，"
                  f"{'≤' if band == 'le200' else '>'}200 kW 档）")
-        if not mtype:
-            notes.append(f"⚠设备类型未传（{P_TYPE}），按所填泵类别认作泵")
+        if not cls:
+            notes.append(f"⚠设备类别未传（{P_CLASS}），按所填泵类别认作泵")
         return _PUMP_LIMITS[(pump, band)], "", basis, True, notes
 
-    # ── 工业机器：GB/T 6075.3。先按类型排除，再按功率、转速核范围
-    if mtype in _TYPE_OTHER_STD:
-        return None, f"{NO_STD}：{_TYPE_OTHER_STD[mtype]}，本模块未实现，只给数值", "", False, notes
-    if mtype == "gasTurbine" and power is not None and power > GAS_TURBINE_MAX_KW:
+    # ── 工业机器：GB/T 6075.3。再按功率、转速核范围
+    if cls == "GT" and power is not None and power > GAS_TURBINE_MAX_KW:
         return None, (f"{NO_STD}：额定 {power:g} kW 的燃气轮机 >3 MW，另依 GB/T 6075.4 / ISO 10816-4，"
                       "本模块未实现，只给数值"), "", False, notes
-    if mtype == "fan" and mount == "flexible" and power is not None and power <= FAN_SPLIT_KW:
+    if cls == "BL" and mount == "flexible" and power is not None and power <= FAN_SPLIT_KW:
         return None, (f"{NO_STD}：额定 {power:g} kW、柔性支承的风机不在 {_MACHINE_STD} 范围（第 1 章注），"
                       "应依 ISO 14694，本模块未实现，只给数值"), "", False, notes
     if power is not None and not (MACHINE_MIN_KW < power <= MACHINE_MAX_KW):
@@ -969,8 +1052,8 @@ def _grading(params: dict[str, str]
     if rpm is not None and not (MACHINE_MIN_RPM <= rpm <= MACHINE_MAX_RPM):
         return None, (f"{NO_STD}：额定 {rpm:g} r/min 不在 {_MACHINE_STD} 范围"
                       f"（{MACHINE_MIN_RPM:g}~{MACHINE_MAX_RPM:g} r/min），只给数值"), "", False, notes
-    if not mtype:
-        notes.append(f"⚠设备类型未传（{P_TYPE}），未能核对是否在 {_MACHINE_STD} 范围"
+    if not cls:
+        notes.append(f"⚠设备类别未传（{P_CLASS}），未能核对是否在 {_MACHINE_STD} 范围"
                      "（往复式机器、螺杆压缩机、≤300 kW 柔性支承风机等不适用）")
     if group == _NA:
         notes.append("平台所填分组「不适用」已不采用：适用与否由本模块判定")
@@ -979,7 +1062,7 @@ def _grading(params: dict[str, str]
     # 分组：由功率推出；电机 / 发电机可按轴中心高分组，平台所填优先；其他设备所填须与功率一致
     derived = ("group1" if power > GROUP1_MIN_KW else "group2") if power is not None else ""
     if group in _GROUPS and derived and group != derived:
-        if mtype not in _ELECTRICAL:
+        if cls not in _ELECTRICAL:
             return None, (f"参数自相矛盾：机器分组填第 {group[-1]} 组，按额定 {power:g} kW 应为第 {derived[-1]} 组"
                           "（GB/T 6075.3 §4.2），不猜哪个对"), "", False, notes
         how = f"按所填第 {group[-1]} 组（电机可按轴中心高分组；按功率应为第 {derived[-1]} 组）"
@@ -999,18 +1082,75 @@ def _grading(params: dict[str, str]
     return limits, "", basis, False, notes
 
 
+def _is_pump(params: dict[str, str]) -> bool:
+    """设备类别为 PU；类别未传时，填了泵类别也认作泵（过渡）。"""
+    cls = params.get(P_CLASS, "").strip()
+    return cls == "PU" or (not cls and params.get(P_PUMP, "").strip() in _PUMPS)
+
+
+def _excluded(cls: str, kind: str) -> tuple[str, bool] | None:
+    """`_NOT_COVERED` 查表：先查「类别 + 型式」，再查整个类别。"""
+    return _NOT_COVERED.get((cls, kind)) or _NOT_COVERED.get((cls, ""))
+
+
+def _partners(params: dict[str, str], keys: tuple[str, str]) -> tuple[list[tuple[str, str]], str]:
+    """联接设备的 `[(类别, 型式)]` 与警示。都没传 ⇒ `([], "")`；类别与型式个数不符 ⇒ 按未传，不猜对应关系。"""
+    raw_cls, raw_kind = (params.get(k, "").strip() for k in keys)
+    if not raw_cls and not raw_kind:
+        return [], ""
+    classes = [c.strip() for c in raw_cls.split(",")] if raw_cls else []
+    kinds = [k.strip() for k in raw_kind.split(",")] if raw_kind else [""] * len(classes)
+    if not classes or len(kinds) != len(classes):
+        return [], (f"⚠联接设备类别与型式个数不符（{keys[0]}={raw_cls or '未传'} / "
+                    f"{keys[1]}={raw_kind or '未传'}），按未传处理")
+    return list(zip(classes, kinds)), ""
+
+
+def _coupled_reciprocating(params: dict[str, str], is_pump: bool) -> tuple[str, list[str]]:
+    """与往复式机器联接 ⇒ `(原因, [])`；否则 `("", 警示)`。
+
+    GB/T 6075.3 第 1 章排除「machines coupled to reciprocating machines」——驱动机、被驱动机任一台是往复式即排除；
+    GB/T 6075.7 第 1 章排除「reciprocating engine driven pumps」——泵只看驱动机是不是内燃机。
+    两侧都没传（不在机组里等）⇒ 照判并注明未核（`AI-99 §6.2` 末条）。
+    """
+    sides = ((P_DRIVER, "驱动机"),) if is_pump else ((P_DRIVER, "驱动机"), (P_DRIVEN, "被驱动机"))
+    notes: list[str] = []
+    known = False
+    for keys, who in sides:
+        parts, bad = _partners(params, keys)
+        if bad:
+            notes.append(bad)
+        known = known or bool(parts)
+        for c, k in parts:
+            if c == "CE" or (not is_pump and (c, k) in _RECIPROCATING):
+                code = f"{c}-{k}" if k else c
+                if is_pump:
+                    return f"由往复式发动机驱动的泵（{who} {code}），{_PUMP_STD} 第 1 章排除，另依 GB/T 6075.6", []
+                return f"与往复式机器联接（{who} {code}），{_MACHINE_STD} 第 1 章排除，另依 GB/T 6075.6 / ISO 10816-6", []
+    if not known:
+        what = "是否由往复式发动机驱动" if is_pump else "是否与往复式机器联接"
+        notes.append(f"⚠联接设备未传（{' / '.join(k[0] for k, _ in sides)}），未核{what}")
+    return "", notes
+
+
 def _annex_c_applies(params: dict[str, str]) -> bool:
     """自定门槛没填时，可否按 GB/T 41850.1 附录 C 下端判（见 `ANNEX_C_LOWER`）。
 
     只在 `_grading` 已判「无适用标准」后调用。条件：额定功率 ≤15 kW（泵 ≤1 kW），且该设备**没有专门标准**
-    —— 往复式机器（GB/T 6075.6）、螺杆压缩机（GB/T 7777）、水力机组、风电机组、风机（ISO 14694）都另有标准，
-    表 C.1 注 1 只许用于「没有特定标准」的机器，故不套。
+    —— `_NOT_COVERED` 里标了另有标准的（往复式机器、螺杆压缩机、离心机、水力机组、风电机组等）、风机（ISO 14694）、
+    与往复式机器联接的（GB/T 6075.6），表 C.1 注 1 只许用于「没有特定标准」的机器，故不套。
+    不认的类别（电气、机械大类等）也不套：附录 C 是机器振动的区界。
     """
     power = _num(params.get(P_POWER, ""))
     if power is None or power <= 0:
         return False
-    mtype = params.get(P_TYPE, "").strip()
-    if mtype in _TYPE_OTHER_STD or mtype == "fan":
+    cls, kind = params.get(P_CLASS, "").strip(), params.get(P_KIND, "").strip()
+    if (cls and cls not in _CLASSES) or cls == "BL":
+        return False
+    excluded = _excluded(cls, kind)
+    if excluded and excluded[1]:
+        return False
+    if _coupled_reciprocating(params, _is_pump(params))[0]:
         return False
     # 泵只在 ≤1 kW 时才落到「无适用标准」（>1 kW 归 6075.7），故与其他设备同用 ≤15 kW 一条即可
     return power <= MACHINE_MIN_KW
@@ -1041,8 +1181,8 @@ def _basis(params: dict[str, str]
     if why.startswith(NO_STD):
         if custom is None and not cwhy and _annex_c_applies(params):
             a, b, c = ANNEX_C_LOWER
-            if not params.get(P_TYPE, "").strip():
-                notes = [*notes, f"⚠设备类型未传（{P_TYPE}），未能核对是否另有专门标准"]
+            if not params.get(P_CLASS, "").strip():
+                notes = [*notes, f"⚠设备类别未传（{P_CLASS}），未能核对是否另有专门标准"]
             return ANNEX_C_LOWER, "", (f"⚠依 {ANNEX_C_STD} 下端（A/B {a:g} / B/C {b:g} / C/D {c:g} mm/s，"
                                        "小型机器倾向下端；资料性），非专门标准"), is_pump, \
                 [why.replace("，只给数值", "") + f"，自定门槛未填，改依 {ANNEX_C_STD} 下端", *notes], _ZONE_STATUS
