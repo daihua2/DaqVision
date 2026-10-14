@@ -31,13 +31,13 @@ T0 = datetime(2026, 9, 17, 8, 0, 0, tzinfo=timezone.utc)
 
 FULL_PARAMS = {
     "algorithms": "classic",
-    "machineGroup": "group2",
+    "ratedPowerKw": "50",          # ⇒ 第 2 组（GB/T 6075.3 §4.2）
     "supportClass": "rigid",      # ⇒ 边界 1.4 / 2.8 / 4.5
     "vel_is_rms": "true",
     "axialAxis": "z",
     "ratedSpeedRpm": "1480",
 }
-JUDGMENT_PARAMS = {"machineGroup", "supportClass", "vel_is_rms", "axialAxis"}
+JUDGMENT_PARAMS = {"ratedPowerKw", "supportClass", "vel_is_rms", "axialAxis"}
 
 
 def _load():
@@ -84,11 +84,24 @@ class TestDeclaration(unittest.TestCase):
         self.assertTrue(specs["vel_is_rms"].required)
         self.assertTrue(specs["axialAxis"].required)
 
-    def test_机器分组只有第1第2组与不适用_取值照平台台账(self):
+    def test_机器分组已作废_声明暂留取值不变(self):
+        """C-103：平台撤填写入口之前照常下发，删声明会被整条拒存（C-64 §3）⇒ 声明与取值都留着，只标作废。"""
         spec = {p.key: p for p in self.d.declaration.params}["machineGroup"]
         self.assertEqual(spec.choices, ("group1", "group2", "notApplicable"))
+        self.assertTrue(all("已作废" in s for s in (spec.display, *spec.choice_displays)))
+        self.assertFalse(spec.required)
+
+    def test_轴中心高_设备层数值毫米可选(self):
+        spec = {p.key: p for p in self.d.declaration.params}["shaftHeightMm"]
+        self.assertEqual((spec.level, spec.value_type, spec.unit, spec.required, spec.default),
+                         ("machine", "float", "mm", False, ""))
+        self.assertIn("ISO 496", spec.description)
+
+    def test_机器分组结论_取值与停机不写(self):
+        spec = {o.key: o for o in self.d.declaration.outputs}["machine_group"]
+        self.assertEqual(spec.choices, ("group1", "group2", "none"))
         self.assertEqual(len(spec.choice_displays), 3)
-        self.assertIn("GB/T 6075.3", spec.display)
+        self.assertEqual(spec.stop_behavior, "not_written")
 
     def test_泵类别第1第2类与不适用_取值照平台台账(self):
         spec = {p.key: p for p in self.d.declaration.params}["pumpCategory"]
@@ -97,7 +110,7 @@ class TestDeclaration(unittest.TestCase):
 
     def test_参数归属(self):
         levels = {p.key: p.level for p in self.d.declaration.params}
-        for k in ("machineGroup", "supportClass", "pumpCategory", "ratedPowerKw", "ratedSpeedRpm"):
+        for k in ("machineGroup", "shaftHeightMm", "supportClass", "pumpCategory", "ratedPowerKw", "ratedSpeedRpm"):
             self.assertEqual(levels[k], "machine", k)
         self.assertEqual(levels["axialAxis"], "sensor", "轴向由振动传感器给（C-64 §2.3）")
         self.assertEqual(levels["vel_is_rms"], "position")
@@ -134,15 +147,21 @@ class TestIsoClassification(unittest.TestCase):
 
     def test_第1组柔性限值(self):
         # 第 1 组柔性 ⇒ 3.5/7.1/11.0，7.0 落 B
-        z, _c, _m = self._zone(7.0, {**FULL_PARAMS, "machineGroup": "group1",
+        z, _c, _m = self._zone(7.0, {**FULL_PARAMS, "ratedPowerKw": "500",
                                      "supportClass": "flexible"})
         self.assertEqual(z.value, "B")
 
-    def test_旧取值与旧版第3第4组都不认(self):
-        """★1.x 的取值 `1`/`2` 不再认：平台原样拷贝台账值，认旧值等于给两套写法开口子。"""
-        for g in ("1", "2", "3", "group3"):
-            z, _c, _m = self._zone(3.0, {**FULL_PARAMS, "machineGroup": g})
-            self.assertIs(z.quality, Quality.CONFIG_INCOMPLETE, g)
+    def test_所填机器分组一律不看(self):
+        """C-103，用户 2026-10-14 定「就当没这个参数」：填什么（含旧取值、不适用）都不影响判级，也不提它。"""
+        base = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)})))
+        for g in ("group1", "group2", "notApplicable", "1", "group3"):
+            out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "machineGroup": g})))
+            self.assertEqual((out["iso_zone"].value, out["machine_group"].value), ("C", "group2"), g)
+            self.assertEqual(out["evidence"].value, base["evidence"].value, g)
+        f = _frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "ratedPowerKw": "", "machineGroup": "group2"})
+        out = _by_key(self.d.instance.infer(f))
+        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, "只填了分组、没有功率 ⇒ 定不了")
+        self.assertIs(out["machine_group"].quality, Quality.CONFIG_INCOMPLETE)
 
     def test_旧键名不认(self):
         params = {"algorithms": "classic", "iso_group": "2", "mount_type": "rigid", "vel_is_rms": "true",
@@ -151,20 +170,18 @@ class TestIsoClassification(unittest.TestCase):
         self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIs(out["direction_hint"].quality, Quality.CONFIG_INCOMPLETE)
 
-    def test_平台所填不适用已不采用_缺功率则不出分级并说明(self):
-        # 用户 2026-10-12 定「不适用应由你判定」：平台的「不适用」不再采用；没有功率就定不了分组
-        f = _frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "machineGroup": "notApplicable"})
+    def test_缺功率则不出分级并说明(self):
+        f = _frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "ratedPowerKw": ""})
         out = _by_key(self.d.instance.infer(f))
-        for k in ("iso_zone", "iso_zone_code", "iso_margin"):
+        for k in ("iso_zone", "iso_zone_code", "iso_margin", "machine_group"):
             self.assertIs(out[k].quality, Quality.CONFIG_INCOMPLETE, k)
             self.assertIsNone(out[k].value)
         self.assertIs(out["vel_max"].quality, Quality.OK, "数值照给")
-        self.assertIn("已不采用", out["evidence"].value)
         self.assertIn("额定功率未传", out["evidence"].value)
 
     def test_判据摘要写明国标(self):
         ev = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)})))["evidence"].value
-        self.assertIn("GB/T 6075.3-2011（按所填第 2 组 / 刚性支承）", ev)
+        self.assertIn("GB/T 6075.3-2011（按额定 50 kW 定为第 2 组 / 刚性支承）", ev)
         self.assertNotIn("ISO 20816", ev, "判级依据已改用国标")
 
 
@@ -263,10 +280,11 @@ class TestPump(unittest.TestCase):
         self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIn("额定功率", out["evidence"].value)
 
-    def test_泵类别与机器分组都填是矛盾(self):
+    def test_泵填了机器分组也不看_照泵判(self):
+        # 机器分组已作废（C-103）⇒ 原「泵类别与机器分组都填是矛盾」不复存在
         out = self._out(3.0, machineGroup="group2", supportClass="rigid")
-        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
-        self.assertIn("自相矛盾", out["evidence"].value)
+        self.assertEqual((out["iso_zone"].value, out["machine_group"].value), ("A", "none"))
+        self.assertNotIn("自相矛盾", out["evidence"].value)
 
     def test_泵类别选不适用时按工业机器判(self):
         params = {**FULL_PARAMS, "pumpCategory": "notApplicable"}
@@ -318,27 +336,27 @@ class TestScopeAndRadial(unittest.TestCase):
         return _by_key(self.d.instance.infer(_frame(channels, {**FULL_PARAMS, **over})))
 
     def test_功率15kW及以下与超50MW无适用标准(self):
-        out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw="50001", machineGroup="")
+        out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw="50001")
         self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
         self.assertIsNone(out["iso_zone"].value)
         self.assertIn("⚠无适用的现场判级标准", out["evidence"].value)
         self.assertAlmostEqual(out["vel_max"].value, 2.0)
         # ≤15 kW：仍无 6075.3 可依，但自定门槛未填时按 GB/T 41850.1 附录 C 下端判（用户 2026-10-13 定）
         for kw in ("15", "5"):
-            out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw, machineGroup="")
+            out = self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw)
             self.assertIs(out["iso_zone"].quality, Quality.OK, kw)
             self.assertEqual(out["iso_zone"].value, "C", kw)
             self.assertIn("⚠无适用的现场判级标准", out["evidence"].value, kw)
             self.assertIn("GB/T 41850.1-2024 附录 C", out["evidence"].value, kw)
             self.assertAlmostEqual(out["vel_max"].value, 2.0)
         for kw in ("15.1", "300", "50000"):
-            self.assertIs(self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw, machineGroup="")["iso_zone"].quality,
+            self.assertIs(self._out({"x_vel": _samples(2.0)}, ratedPowerKw=kw)["iso_zone"].quality,
                           Quality.OK, kw)
 
     def test_平台所填不适用不采用_按功率推分组照判(self):
         out = self._out({"x_vel": _samples(2.0)}, machineGroup="notApplicable", ratedPowerKw="200")
         self.assertEqual(out["iso_zone"].value, "B")
-        self.assertIn("已不采用", out["evidence"].value)
+        self.assertNotIn("已不采用", out["evidence"].value, "机器分组整个作废，所填不再提（C-103）")
 
 
     def test_轴向最大时只按径向判区(self):
@@ -391,15 +409,51 @@ class TestApplicabilityByUs(unittest.TestCase):
         self.assertEqual(self._out(ratedPowerKw="300", equipmentClass="EM")["iso_zone"].value, "C")
         self.assertIn("按额定 400 kW 定为第 1 组", self._out(ratedPowerKw="400", equipmentClass="EM")["evidence"].value)
 
-    def test_非电机所填分组与功率不符是矛盾(self):
-        out = self._out(ratedPowerKw="200", equipmentClass="CO", equipmentType="CE", machineGroup="group1")
-        self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE)
-        self.assertIn("自相矛盾", out["evidence"].value)
+    def test_电机按轴中心高分组_与功率不一致以轴中心高为准并警示(self):
+        # GB/T 6075.3 §4.2：电机 H≥315 mm 第 1 组，160≤H<315 mm 第 2 组（C-103）；3.0 mm/s 第 1 组 B、第 2 组 C
+        for cls, kw, h, zone, group in (("EM", "200", "315", "B", "group1"), ("EM", "400", "314.9", "C", "group2"),
+                                        ("EM", "200", "160", "C", "group2"), ("EG", "200", "400", "B", "group1")):
+            out = self._out(ratedPowerKw=kw, equipmentClass=cls, shaftHeightMm=h)
+            self.assertEqual((out["iso_zone"].value, out["machine_group"].value), (zone, group), (cls, kw, h))
+            ev = out["evidence"].value
+            self.assertIn(f"按轴中心高 {float(h):g} mm 定为第 {group[-1]} 组", ev)
+            self.assertEqual("以轴中心高为准" in ev, (kw, h) != ("200", "160"), (cls, kw, h))
+            self.assertNotIn("轴中心高未传", ev)
 
-    def test_电机可按轴中心高分组_所填优先(self):
-        out = self._out(ratedPowerKw="200", equipmentClass="EM", machineGroup="group1")
-        self.assertEqual(out["iso_zone"].value, "B", "按所填第 1 组")
-        self.assertIn("轴中心高", out["evidence"].value)
+    def test_电机缺轴中心高或小于160_按功率并提示(self):
+        for h, word in (("", "轴中心高未传（shaftHeightMm=未填）"), ("abc", "轴中心高取值非法"),
+                        ("0", "轴中心高取值非法"), ("132", "轴中心高 132 mm <160 mm")):
+            out = self._out(ratedPowerKw="400", equipmentClass="EM", shaftHeightMm=h)
+            self.assertEqual((out["iso_zone"].value, out["machine_group"].value), ("B", "group1"), h)
+            self.assertIn(word, out["evidence"].value, h)
+            self.assertIn("按额定 400 kW 定为第 1 组", out["evidence"].value, h)
+
+    def test_电机只有轴中心高_照判并提示未核功率(self):
+        out = self._out(equipmentClass="EM", shaftHeightMm="355")
+        self.assertEqual((out["iso_zone"].value, out["machine_group"].value), ("B", "group1"))
+        self.assertIn("额定功率未传（ratedPowerKw），未核", out["evidence"].value)
+        out = self._out(equipmentClass="EM")
+        for k in ("iso_zone", "machine_group"):
+            self.assertIs(out[k].quality, Quality.CONFIG_INCOMPLETE, k)
+        self.assertIn("额定功率未传（ratedPowerKw），轴中心高未传", out["evidence"].value)
+
+    def test_非电机不看轴中心高(self):
+        for over in ({"equipmentClass": "CO", "equipmentType": "CE"}, {}):
+            out = self._out(ratedPowerKw="200", shaftHeightMm="400", **over)
+            self.assertEqual((out["iso_zone"].value, out["machine_group"].value), ("C", "group2"), over)
+            self.assertNotIn("轴中心高", out["evidence"].value, over)
+
+    def test_机器分组结论_泵与无标准不分组(self):
+        self.assertEqual(self._out(ratedPowerKw="200", equipmentClass="PU", pumpCategory="category1",
+                                   pumpEnvironment="dryMounted")["machine_group"].value, "none")
+        out = self._out(ratedPowerKw="200", equipmentClass="CO", equipmentType="RE")
+        self.assertIs(out["machine_group"].quality, Quality.OK)
+        self.assertEqual(out["machine_group"].value, "none", "无适用标准")
+        out = self._out(ratedPowerKw="5", equipmentClass="EM", shaftHeightMm="400")
+        self.assertEqual((out["iso_zone"].quality, out["machine_group"].value), (Quality.OK, "none"),
+                         "≤15 kW 按附录 C 判，不是 GB/T 6075.3 的组")
+        out = self._out(ratedPowerKw="200", supportClass="")
+        self.assertIs(out["machine_group"].quality, Quality.CONFIG_INCOMPLETE, "判据立不起来就不给")
 
     def test_不在国标范围的类别与型式不出分级(self):
         # AI-99 §4：按 ISO 14224 类别 + 型式判（C-94 照收）
@@ -455,8 +509,8 @@ class TestApplicabilityByUs(unittest.TestCase):
         out = self._out(ratedPowerKw="400", equipmentClass="servoMotor", equipmentType="AC")
         self.assertEqual(out["iso_zone"].value, "B", "按功率定第 1 组，同 EM")
         self.assertIn("变工况下的分级只作参考", out["evidence"].value)
-        out = self._out(ratedPowerKw="200", equipmentClass="servoMotor", machineGroup="group1")
-        self.assertEqual(out["iso_zone"].value, "B", "可按轴中心高分组，所填优先")
+        out = self._out(ratedPowerKw="200", equipmentClass="servoMotor", shaftHeightMm="315")
+        self.assertEqual(out["iso_zone"].value, "B", "同电动机按轴中心高分组")
         self.assertNotIn("变工况", self._out(ratedPowerKw="400", equipmentClass="EM")["evidence"].value)
         out = self._out(ratedPowerKw="200", equipmentClass="servoMotor", equipmentType="AX")
         self.assertIn("取值不认", out["evidence"].value, "型式只有 AC / DC")
@@ -581,8 +635,8 @@ class TestParamsMissing(unittest.TestCase):
         self.assertIn("手册未注明", yes)
         self.assertIn("惯例", spec.description)
 
-    def test_工业机器缺机器分组或支承方式不出分级(self):
-        for missing in ("machineGroup", "supportClass"):
+    def test_工业机器缺额定功率或支承方式不出分级(self):
+        for missing in ("ratedPowerKw", "supportClass"):
             params = {k: v for k, v in FULL_PARAMS.items() if k != missing}
             out = _by_key(self.d.instance.infer(_frame({"x_vel": _samples(3.0)}, params)))
             self.assertIs(out["iso_zone"].quality, Quality.CONFIG_INCOMPLETE, missing)

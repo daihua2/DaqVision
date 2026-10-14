@@ -29,7 +29,7 @@ DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 T0 = datetime(2026, 10, 5, 8, 0, 0, tzinfo=timezone.utc)
 
 #: 第 2 组刚性 ⇒ A/B 1.4、B/C 2.8、C/D 4.5。
-BOTH = {"algorithms": "both", "machineGroup": "group2", "supportClass": "rigid",
+BOTH = {"algorithms": "both", "ratedPowerKw": "50", "supportClass": "rigid",
         "vel_is_rms": "true", "axialAxis": "z", "ratedSpeedRpm": "1480"}
 
 
@@ -264,7 +264,7 @@ class TestBaselineOnlyFallback(unittest.TestCase):
 
     ONLY = {**BOTH, "algorithms": "baseline"}
     CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
-                    "axial_ratio", "direction_hint")
+                    "axial_ratio", "direction_hint", "machine_group")
 
     def setUp(self):
         self.d = _load().instance
@@ -354,7 +354,7 @@ class TestBaselineIsoCheck(unittest.TestCase):
         self.assertIn("已按 GB/T 6075.3-2011", art.meta["iso_check"])
 
     def test_判级参数不全时不查但写明(self):
-        art = _baseline(self.d, {**BOTH, "machineGroup": ""}, (5.0, 5.0, 5.0, 5.0, 5.0))
+        art = _baseline(self.d, {**BOTH, "ratedPowerKw": ""}, (5.0, 5.0, 5.0, 5.0, 5.0))
         self.assertIn("未做国标核查", art.meta["iso_check"])
 
 

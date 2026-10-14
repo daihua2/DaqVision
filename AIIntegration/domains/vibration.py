@@ -183,22 +183,26 @@ P_DRIVEN = ("drivenClass", "drivenType")
 _RECIPROCATING = (("CE", ""), ("CO", "RE"), ("PU", "RE"))
 #: 泵的安装环境（`C-94 §2.2`，ISO 14224 表 A.22）：GB/T 6075.7 第 1 章排除潜水泵。
 P_PUMP_ENV = "pumpEnvironment"
-_ELECTRICAL = ("EM", "EG", "servoMotor")      # 第 1/2 组另可按轴中心高分，平台所填分组优先
+_ELECTRICAL = ("EM", "EG", "servoMotor")      # 电机（electrical machines）：第 1/2 组按轴中心高分，没有再按功率
 _MOTORS = ("EM", "servoMotor")
 GAS_TURBINE_MAX_KW = 3_000.0                  # >3 MW 的燃机另依 GB/T 6075.4 / ISO 10816-4
 FAN_SPLIT_KW = 300.0                          # ≤300 kW 且柔性支承的风机：GB/T 6075.3 第 1 章注排除，应依 ISO 14694
 GROUP1_MIN_KW = 300.0                         # GB/T 6075.3 §4.2：第 1 组 >300 kW，第 2 组 >15 kW 且 ≤300 kW
+SHAFT_GROUP1_MIN_MM = 315.0                   # GB/T 6075.3 §4.2：电机轴中心高 H≥315 mm 第 1 组，160≤H<315 mm 第 2 组
+SHAFT_GROUP2_MIN_MM = 160.0
 
 #: 警示前缀：判据摘要里凡是「没有标准依据 / 标准要求的量测不到」都以它开头，平台与人一眼可辨。
 NO_STD = "⚠无适用的现场判级标准"
 
 _GROUPS = ("group1", "group2")
+GROUP_NONE = "none"                           # 结论「机器分组」：泵、无适用标准的不分组
 _PUMPS = ("category1", "category2")
 _NA = "notApplicable"
 
 #: 平台台账的键（`C-64 §2.3`）。
 P_GROUP, P_SUPPORT, P_PUMP = "machineGroup", "supportClass", "pumpCategory"
 P_POWER, P_SPEED, P_AXIAL = "ratedPowerKw", "ratedSpeedRpm", "axialAxis"
+P_SHAFT = "shaftHeightMm"                     # 轴中心高，与平台台账同名（`C-103 §2.1`）
 P_ALGOS = "algorithms"
 _MACHINE_STD = "GB/T 6075.3-2011"
 _PUMP_STD = "GB/T 6075.7-2015"
@@ -297,7 +301,7 @@ DEFAULT_NORMAL_LABEL = "正常"
 
 #: 两部分各自的结论键。没启用的那一半不写。
 CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
-                "axial_ratio", "direction_hint")
+                "axial_ratio", "direction_hint", "machine_group")
 BASELINE_KEYS = ("vel_z_max", "acc_z_max", "disp_z_max", "freq_z_max",
                  "ratio_drift", "temp_rise", "anomaly_score")
 CLASSIFY_KEYS = ("fault_class", "fault_vote")
@@ -321,7 +325,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.3.1"   # 1.3.1（2026-10-14）：扩展型式 rotaryPD，回转容积式压缩机 / 风机判无适用标准（AI-109）。1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；扩展类 servoMotor 判级同电动机并警示变工况（C-98，10-13）；10-13 已部署
+    version = "1.4.0"   # 1.4.0（2026-10-14）：分组改由本模块推出 —— 新增参数 shaftHeightMm，电机按轴中心高分组、缺则按功率并警示；machineGroup 作废不采用；新增结论「机器分组」（C-103）。1.3.1（2026-10-14）：扩展型式 rotaryPD，回转容积式压缩机 / 风机判无适用标准（AI-109）。1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；扩展类 servoMotor 判级同电动机并警示变工况（C-98，10-13）；10-13 已部署
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -360,17 +364,18 @@ class Vibration(Domain):
                     required=True, level="position",
                     description="没有缺省。只启用经典即保存即出结论；启用 AI 自训须先采基线"),
                 ParamSpec(
-                    key=P_GROUP, display="机器分组（GB/T 6075.3）", value_type="enum",
+                    # ★整个参数已作废、所填一律不采用（C-103，用户 2026-10-14 定「就当没这个参数」）。声明暂留只为
+                    #   平台撤填写入口之前照常下发、旧绑定照常保存 —— 现场对未声明参数整条拒存（C-64 §3）
+                    key=P_GROUP, display="（已作废）机器分组", value_type="enum",
                     choices=(*_GROUPS, _NA),
                     choice_displays=(
-                        "第 1 组：大型机器，额定功率 >300 kW；电动机轴中心高 H≥315 mm",
-                        "第 2 组：中型机器，额定功率 >15 kW 且 ≤300 kW；电动机轴中心高 160≤H<315 mm",
-                        "（已作废）不适用：本模块不再采用，适用与否由本模块按设备类别、功率、转速判定",
+                        "（已作废）第 1 组",
+                        "（已作废）第 2 组",
+                        "（已作废）不适用",
                     ),
                     required=False, level="machine",
-                    description="可不填：本模块按额定功率推出（>300 kW 第 1 组，15~300 kW 第 2 组）。"
-                                "电动机 / 发电机可按轴中心高分组，填了以所填为准；其他设备填了即与功率核对，不一致不出分级。"
-                                "★「不适用」已作废：适用与否由本模块按设备类别、功率、转速判定（用户 2026-10-12 定）"),
+                    description="已作废，所填不采用（2026-10-14）：分组由本模块按额定功率推出，电机按轴中心高（GB/T 6075.3 §4.2）。"
+                                "请勿再填"),
                 ParamSpec(
                     key=P_CLASS, display="设备类别（ISO 14224）", value_type="string",
                     required=False, level="machine",
@@ -427,6 +432,13 @@ class Vibration(Domain):
                     required=False, level="machine",
                     description="经典算法须填。泵：按 200 kW 分两档，≤1 kW 无适用标准。"
                                 "工业机器：据此定分组、核对 GB/T 6075.3 范围（>15 kW 且 ≤50 MW），不在范围不出烈度分级"),
+                ParamSpec(
+                    key=P_SHAFT, display="轴中心高", value_type="float", unit="mm",
+                    required=False, level="machine",
+                    description="电机（电动机、发电机、伺服电动机）按此分组（GB/T 6075.3 §4.2）：H≥315 mm 第 1 组，"
+                                "160≤H<315 mm 第 2 组；未传或 <160 mm 按额定功率分组。与按功率推出的组别不一致时以轴中心高为准并警示。"
+                                "口径照 ISO 496：出厂状态下轴中心线到机座底面的距离；无底脚、底脚抬高或立式的取同机座号卧式底脚型的，"
+                                "机座号不明取机器直径的一半（§4.2 注 2）。其他设备不用"),
                 ParamSpec(
                     key=P_SPEED, display="额定转速", value_type="float", unit="r/min",
                     required=False, level="machine",
@@ -517,6 +529,14 @@ class Vibration(Domain):
                 OutputSpec(key="iso_margin", display="距下一档余量", value_type="float", unit="mm/s",
                            description="经典。离更差一档的边界还有多远；已在 D 区时为负",
                            stop_behavior=STOP_NOT_WRITTEN),
+                # 平台撤掉人填的「机器分组」后，组别由本模块推出，须让人看得到（用户 2026-10-14 定加，C-103）
+                OutputSpec(key="machine_group", display="机器分组", value_type="string",
+                           description="经典。GB/T 6075.3 §4.2 由本模块推出：电机按轴中心高，未传或 <160 mm 按额定功率，"
+                                       "其他设备按额定功率；怎么定的见判据摘要。泵与无适用标准的为「不分组」；"
+                                       "参数不足、判据立不起来时不给值",
+                           stop_behavior=STOP_NOT_WRITTEN,
+                           choices=(*_GROUPS, GROUP_NONE),
+                           choice_displays=("第 1 组（大型）", "第 2 组（中型）", "不分组")),
                 OutputSpec(key="axial_ratio", display="轴向/径向比", value_type="float",
                            description="经典。轴向 ÷ 径向两轴较大者",
                            stop_behavior=STOP_NOT_WRITTEN),
@@ -615,7 +635,7 @@ class Vibration(Domain):
                 + "）—— 样本太少算出来的离散度没有意义")
 
         # ★国标核查：用偏大的那段作基线，之后再大也显得「没变」。
-        limits, iso_bad, basis, _is_pump, _, _ = _basis(params)
+        limits, iso_bad, basis, _is_pump, _, _, _ = _basis(params)
         if iso_bad:
             iso_check = f"未做国标核查：{iso_bad}"
         else:
@@ -773,7 +793,7 @@ class Vibration(Domain):
     def _classic(frame: Frame, peaks: dict[str, float], vel_max: float, t: datetime,
                  out: list[Finding], parts: list[str]) -> tuple[str | None, Quality | None]:
         """烈度分级 + 方向性。返回 `(档位, 算不出时的码)`。"""
-        limits, iso_bad, basis, is_pump, grade_notes, zone_status = _basis(frame.params)
+        limits, iso_bad, basis, is_pump, grade_notes, zone_status, group = _basis(frame.params)
         level: str | None = None
         bad_q: Quality | None = None
         v_grade, ax_grade, radial_note = _radial_peak(peaks, frame.params)
@@ -796,6 +816,10 @@ class Vibration(Domain):
             parts.append(radial_note)
             parts.extend(grade_notes)
             parts.append(_speed_note(frame.params.get(P_SPEED, ""), is_pump))
+        if group:
+            out.append(Finding(key="machine_group", value=group, quality=Quality.OK, t=t))
+        else:
+            out += _bad_group(("machine_group",), Quality.CONFIG_INCOMPLETE, t)
 
         axial = frame.params.get(P_AXIAL, "").strip().lower()
         dir_bad, dir_q, ratio, hint = _direction_check(peaks, axial)
@@ -878,7 +902,7 @@ def _classic_fallback(params: dict[str, str], peaks: dict[str, float]
     ★借的只是状态：经典那几个结论点**没启用就不写**（§0.2）。判级参数不全就不借 ——
       码返回 None，让状态落自训那部分的码（那才是这条绑定缺的东西）。
     """
-    limits, why, basis, _, _, zone_status = _basis(params)
+    limits, why, basis, _, _, zone_status, _ = _basis(params)
     v_grade, _, radial_note = _radial_peak(peaks, params)
     if not why and v_grade is None:
         why = radial_note
@@ -977,10 +1001,10 @@ def _grading(params: dict[str, str]
 
     ★**适用与否由本模块判**（用户 2026-10-12 定「不适用应由你判定」）：平台只传事实（设备类别与型式、联接设备、
       泵安装环境、额定功率、额定转速、支承方式、泵类别），不在国标范围的不出烈度区，原因以 `NO_STD` 开头。
-      分组由额定功率推出（GB/T 6075.3 §4.2）；电动机 / 发电机可按轴中心高分组，平台所填优先。
+      分组按 GB/T 6075.3 §4.2「额定功率或轴中心高」由本模块推出：电机按轴中心高，没有再按功率；
+      平台所填 `machineGroup` 已作废、一律不采用（C-103，用户 2026-10-14 定）。
     ★不适用 / 缺参数 / 自相矛盾，都属于「判据立不起来」—— 正是 CONFIG_INCOMPLETE 的定义，不另立新码。
     """
-    group = params.get(P_GROUP, "").strip()
     mount = params.get(P_SUPPORT, "").strip()
     pump = params.get(P_PUMP, "").strip()
     cls, kind = params.get(P_CLASS, "").strip(), params.get(P_KIND, "").strip()
@@ -999,9 +1023,6 @@ def _grading(params: dict[str, str]
     is_pump = _is_pump(params)
     if pump in _PUMPS and cls not in ("", "PU"):
         return None, (f"参数自相矛盾：填了泵类别（{pump}），设备类别却是「{_CLASSES.get(cls, cls)}」，"
-                      "不猜哪个对"), "", True, notes
-    if pump in _PUMPS and group in _GROUPS:
-        return None, (f"参数自相矛盾：既填了泵类别（{pump}）又填了机器分组（{group}），"
                       "不猜哪个对"), "", True, notes
     if is_rms != "true":
         why = {"false": "手册明写为峰值 / 峰峰值", "": "未填"}.get(is_rms, "取值不认")
@@ -1077,31 +1098,53 @@ def _grading(params: dict[str, str]
     if not cls:
         notes.append(f"⚠设备类别未传（{P_CLASS}），未能核对是否在 {_MACHINE_STD} 范围"
                      "（往复式机器、螺杆压缩机、≤300 kW 柔性支承风机等不适用）")
-    if group == _NA:
-        notes.append("平台所填分组「不适用」已不采用：适用与否由本模块判定")
-        group = ""
-
-    # 分组：由功率推出；电机 / 发电机可按轴中心高分组，平台所填优先；其他设备所填须与功率一致
-    derived = ("group1" if power > GROUP1_MIN_KW else "group2") if power is not None else ""
-    if group in _GROUPS and derived and group != derived:
-        if cls not in _ELECTRICAL:
-            return None, (f"参数自相矛盾：机器分组填第 {group[-1]} 组，按额定 {power:g} kW 应为第 {derived[-1]} 组"
-                          "（GB/T 6075.3 §4.2），不猜哪个对"), "", False, notes
-        how = f"按所填第 {group[-1]} 组（电机可按轴中心高分组；按功率应为第 {derived[-1]} 组）"
-    elif derived:
-        group, how = derived, f"按额定 {power:g} kW 定为第 {derived[-1]} 组"
-    elif group in _GROUPS:
-        how = f"按所填第 {group[-1]} 组"
-        notes.append(f"⚠额定功率未传（{P_POWER}），分组按平台所填，未核功率范围")
-    else:
-        return None, (f"额定功率未传（{P_POWER}），机器分组也未填，"
-                      f"无法确定 {_MACHINE_STD} 的分组"), "", False, notes
+    group, how, why = _machine_group(params, notes)
+    if not group:
+        return None, why, "", False, notes
     limits = _MACHINE_LIMITS.get((group, mount))
     if limits is None:
         return None, (f"支承方式未填或取值非法（{P_SUPPORT}={mount or '未填'}），"
                       f"查不到 {_MACHINE_STD} 边界"), "", False, notes
     basis = f"{_MACHINE_STD}（{how} / {'刚性' if mount == 'rigid' else '柔性'}支承）"
     return limits, "", basis, False, notes
+
+
+def _machine_group(params: dict[str, str], notes: list[str]) -> tuple[str, str, str]:
+    """GB/T 6075.3 §4.2「额定功率或轴中心高」分组。返回 `(组别, 怎么定的, 定不了的原因)`，警示追加进 `notes`。
+
+    电机（electrical machines：电动机、发电机、伺服电动机）按轴中心高，未传或 <160 mm 再按功率；两者不一致以轴中心高为准。
+    ★平台所填 `machineGroup` 已作废，一律不看（`C-103`，用户 2026-10-14 定「就当没这个参数」「缺轴心高时，也提示缺轴心高参数」）。
+    """
+    cls = params.get(P_CLASS, "").strip()
+    power = _num(params.get(P_POWER, ""))
+    power = power if power is not None and power > 0 else None
+    by_power = ("group1" if power > GROUP1_MIN_KW else "group2") if power is not None else ""
+    by_shaft, shaft, shaft_why = "", None, ""
+    if cls in _ELECTRICAL:
+        raw = params.get(P_SHAFT, "").strip()
+        shaft = _num(raw)
+        shaft = shaft if shaft is not None and shaft > 0 else None
+        if shaft is None:
+            shaft_why = f"轴中心高{'取值非法' if raw else '未传'}（{P_SHAFT}={raw or '未填'}）"
+        elif shaft >= SHAFT_GROUP1_MIN_MM:
+            by_shaft = "group1"
+        elif shaft >= SHAFT_GROUP2_MIN_MM:
+            by_shaft = "group2"
+        else:
+            shaft_why = f"轴中心高 {shaft:g} mm <{SHAFT_GROUP2_MIN_MM:g} mm，不按轴中心高分组"
+    if by_shaft:
+        if by_power and by_power != by_shaft:
+            notes.append(f"⚠按轴中心高为第 {by_shaft[-1]} 组、按额定 {power:g} kW 应为第 {by_power[-1]} 组，"
+                         "以轴中心高为准（GB/T 6075.3 §4.2）")
+        if power is None:
+            notes.append(f"⚠额定功率未传（{P_POWER}），未核 {_MACHINE_STD} 的功率范围")
+        return by_shaft, f"按轴中心高 {shaft:g} mm 定为第 {by_shaft[-1]} 组", ""
+    if by_power:
+        if shaft_why:
+            notes.append(f"⚠{shaft_why}，按额定功率分组")
+        return by_power, f"按额定 {power:g} kW 定为第 {by_power[-1]} 组", ""
+    why = f"额定功率未传（{P_POWER}）" + (f"，{shaft_why}" if shaft_why else "")
+    return "", "", f"{why}，无法确定 {_MACHINE_STD} 的分组"
 
 
 def _is_pump(params: dict[str, str]) -> bool:
@@ -1191,14 +1234,16 @@ def _custom_limits(params: dict[str, str]) -> tuple[tuple[float, float, float] |
 
 
 def _basis(params: dict[str, str]
-           ) -> tuple[tuple[float, float, float] | None, str, str, bool, list[str], dict[str, str]]:
+           ) -> tuple[tuple[float, float, float] | None, str, str, bool, list[str], dict[str, str], str]:
     """判据来源：**有适用国标按国标；没有的才用用户自定门槛**（用户 2026-10-12 定）；
     自定门槛**三条都没填**、且 ≤15 kW 确无专门标准的，按 GB/T 41850.1 附录 C 下端（用户 2026-10-13 定，见 `ANNEX_C_LOWER`）。
     自定门槛填了却不全 / 不递增的，**不退回缺省**（退回会掩盖填错），照旧不出分级并说明。
 
-    返回 `(边界, 未给原因, 判据说明, 是否按泵, 警示, 区→状态)`。自定门槛的第二段是「注意」，故区→状态随来源而变。
+    返回 `(边界, 未给原因, 判据说明, 是否按泵, 警示, 区→状态, 机器分组输出)`。自定门槛的第二段是「注意」，故区→状态随来源而变。
+    机器分组输出：按 GB/T 6075.3 判的为 `group1` / `group2`，泵与无适用标准的为 `none`，判据立不起来的为空。
     """
     limits, why, basis, is_pump, notes = _grading(params)
+    group = GROUP_NONE if is_pump or why.startswith(NO_STD) else "" if why else _machine_group(params, [])[0]
     custom, cwhy = _custom_limits(params)
     if why.startswith(NO_STD):
         if custom is None and not cwhy and _annex_c_applies(params):
@@ -1207,15 +1252,16 @@ def _basis(params: dict[str, str]
                 notes = [*notes, f"⚠设备类别未传（{P_CLASS}），未能核对是否另有专门标准"]
             return ANNEX_C_LOWER, "", (f"⚠依 {ANNEX_C_STD} 下端（A/B {a:g} / B/C {b:g} / C/D {c:g} mm/s，"
                                        "小型机器倾向下端；资料性），非专门标准"), is_pump, \
-                [why.replace("，只给数值", "") + f"，自定门槛未填，改依 {ANNEX_C_STD} 下端", *notes], _ZONE_STATUS
+                [why.replace("，只给数值", "") + f"，自定门槛未填，改依 {ANNEX_C_STD} 下端", *notes], _ZONE_STATUS, group
         if custom is None:
-            return None, why + "；" + (cwhy or "可在诊断上填自定预警线 / 报警线 / 危险线"), "", is_pump, notes, _ZONE_STATUS
+            return None, why + "；" + (cwhy or "可在诊断上填自定预警线 / 报警线 / 危险线"), "", is_pump, notes, \
+                _ZONE_STATUS, group
         a, b, c = custom
         return custom, "", f"⚠依用户自定门槛（预警 {a:g} / 报警 {b:g} / 危险 {c:g} mm/s），非标准", is_pump, \
-            [why.replace("，只给数值", "") + "，改依用户自定门槛", *notes], _CUSTOM_STATUS
+            [why.replace("，只给数值", "") + "，改依用户自定门槛", *notes], _CUSTOM_STATUS, group
     if not why and (custom is not None or cwhy):
         notes = [*notes, "有适用国标，自定门槛不采用"]
-    return limits, why, basis, is_pump, notes, _ZONE_STATUS
+    return limits, why, basis, is_pump, notes, _ZONE_STATUS, group
 
 
 def _classify(vel: float, limits: tuple[float, float, float]) -> tuple[str, int, float]:

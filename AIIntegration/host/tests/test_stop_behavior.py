@@ -37,7 +37,6 @@ STOPPED_PARAMS = {
     "algorithms": "both",
     "stop_threshold": "100",
     "axialAxis": "x",
-    "machineGroup": "group1",
     "supportClass": "rigid",
     "ratedPowerKw": "100",
     "ratedSpeedRpm": "1500",

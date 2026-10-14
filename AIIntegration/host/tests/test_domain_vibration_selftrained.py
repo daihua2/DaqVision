@@ -23,7 +23,7 @@ T0 = datetime(2026, 9, 17, 8, 0, 0, tzinfo=timezone.utc)
 PARAMS = {"algorithms": "baseline", "axialAxis": "z"}
 #: 只启用自训时不写的那一半（与 `vibration.CLASSIC_KEYS` 同）。
 CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
-                "axial_ratio", "direction_hint")
+                "axial_ratio", "direction_hint", "machine_group")
 #: 未启用故障分类时不写的（与 `vibration.CLASSIFY_KEYS` 同）。
 CLASSIFY_KEYS = ("fault_class", "fault_vote")
 

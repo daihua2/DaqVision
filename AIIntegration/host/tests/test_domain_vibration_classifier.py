@@ -20,7 +20,7 @@ from aiintegration.types import ArtifactBlob, Dataset, Frame, LabeledFrame, Prog
 
 DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 T0 = datetime(2026, 10, 8, 8, 0, 0, tzinfo=timezone.utc)
-PARAMS = {"algorithms": "classic", "machineGroup": "group2", "supportClass": "rigid",
+PARAMS = {"algorithms": "classic", "ratedPowerKw": "50", "supportClass": "rigid",
           "vel_is_rms": "true", "axialAxis": "z", "fault_classify": "true"}
 
 #: 三类的中心。速度都压在 GB/T 6075.3 第 2 组刚性的 A 区（≤1.4 mm/s）—— 好验「分类不推状态」。

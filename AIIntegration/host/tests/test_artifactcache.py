@@ -28,7 +28,7 @@ UTC = timezone.utc
 T0 = datetime(2026, 9, 11, 8, 0, 0, tzinfo=UTC)
 DOMAINS_DIR = Path(__file__).resolve().parents[2] / "domains"
 
-FULL_PARAMS = {"algorithms": "both", "machineGroup": "group2", "supportClass": "rigid",
+FULL_PARAMS = {"algorithms": "both", "ratedPowerKw": "50", "supportClass": "rigid",
                "vel_is_rms": "true", "axialAxis": "z"}
 
 
