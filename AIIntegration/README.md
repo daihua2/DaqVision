@@ -1753,4 +1753,4 @@ AICloud `C-72`：按 `AI-76 §5.1` 在 khb 上实跑采基线（标注 UTC 06:41
 - 投后：`/health` `unregistered=[]`、`used` 2195 → **2197**；新点 `machine_group` localId 1054 / **gid 2804**、`machine_group_basis` 1055 / **gid 2805**；`NRestarts=0`、0 条 ERROR；投放哈希一致；
   只读回读部署后两拍（`QueryHistory`）：`group2` / `ratedPower`、质量 Ok，烈度区仍 D、检测状态 danger；现场正式目录 `run-tests.sh 312` 1019 条全过。
 - **08:27:47 投 `AI-114`**。回滚 `rollback-745fb60.sh` 只退代码；回滚后 gid 2804 / 2805 成孤儿须函告 hs（H-281），平台若已存了带 `shaftHeightMm` 的绑定须先函告 AICloud。
-- 现场备份 `*-20261014-deploy745fb60` 与暂存 `/root/aii-stage-20261014b/`，清理待用户点头。
+- 现场备份 `*-20261014-deploy745fb60` 与暂存 `/root/aii-stage-20261014b/` 经用户同意（「清所有回滚备份」）**08:35:03 已清**，服务未受影响 ⇒ **现场无回滚备份，下次部署前必须先备份**。
