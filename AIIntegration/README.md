@@ -1738,3 +1738,19 @@ AICloud `C-72`：按 `AI-76 §5.1` 在 khb 上实跑采基线（标注 UTC 06:41
 - **18:45:23 投 `AI-110` 预告「18:50 前后、约 10 秒」**；`deploy-cc647fc.sh`（备份标签 `20261014-deploycc647fc`）**18:49:06 停服 → 18:49:09.9 起服**，约 4 秒。
 - 投后：三域装载、快照 19 点 + 2 上级全接受、`unregistered=[]`；`NRestarts=0`、0 ERROR；投放哈希一致；回读 18:49:36 一拍照常；现场正式目录 `run-tests.sh 312` 1014 条全过。
 - 投 `AI-111` 完工。现场备份现有两套：`*-20261013-deploy64869b0`、`*-20261014-deploycc647fc`，暂存 `/root/aii-stage-2026101{3,4}/`，清理待用户点头。
+
+## 38. 部署记录：`vibration` 1.4.0 上现场（2026-10-14，用户授权；本节时刻均为 UTC）
+
+改动见定案 §1.5.6、`AI-112`：电机收轴中心高 `shaftHeightMm` 分组，`machineGroup` 作废不看，新增结论「机器分组」`machine_group`、「分组依据」`machine_group_basis`。
+
+- 用户在「授权，现在部署」选项上确认（`C-105`：授权余量够、+2 点无碍、khb 额定功率以 56 kW 为准）。
+- 投放 `745fb60`（代码同 `6c17cb4`）相对现场 `cc647fc`：现场 87 个文件哈希无漂移；另有 `host/tests/test_source_identity.py` 从未进过本仓（现场 09-24 的文件），未动。
+  只换 8 个文件：`domains/vibration.py` 与 `host/tests` 下 `test_artifactcache` / `test_domain_vibration` / `_classic` / `_classifier` / `_selftrained` / `test_runner_invariant` / `test_stop_behavior`。契约 1.19 不动。
+  暂存 `/root/aii-stage-20261014b/`（`try.sh`、`deploy-` / `rollback-745fb60.sh`、`readback.py`，本机副本在仓外）。
+- 试跑：暂存副本上现场 `run-tests.sh 312` 1019 条全过；现场 venv 装载三域无错、vibration 结论 21；按 khb 现参数预演：第 2 组刚性、依据按额定功率，多「轴中心高未传」警示。
+- **08:16:07 投 `AI-113` 预告「08:25 前后、约 10 秒」**；`deploy-745fb60.sh`（备份标签 `20261014-deploy745fb60`：`host.bak-` / `domains.bak-` / `data/backup-`，数据在停服后备份）**08:24:56.186 停服 → 08:25:11.489 起服**，约 15 秒，比预告多 5 秒，完工函已说明。
+  ★我方投完预告后等到预告时刻才部署，用户随即纠正「**部署时不要等待**」——以后投完预告即部署。
+- 投后：`/health` `unregistered=[]`、`used` 2195 → **2197**；新点 `machine_group` localId 1054 / **gid 2804**、`machine_group_basis` 1055 / **gid 2805**；`NRestarts=0`、0 条 ERROR；投放哈希一致；
+  只读回读部署后两拍（`QueryHistory`）：`group2` / `ratedPower`、质量 Ok，烈度区仍 D、检测状态 danger；现场正式目录 `run-tests.sh 312` 1019 条全过。
+- **08:27:47 投 `AI-114`**。回滚 `rollback-745fb60.sh` 只退代码；回滚后 gid 2804 / 2805 成孤儿须函告 hs（H-281），平台若已存了带 `shaftHeightMm` 的绑定须先函告 AICloud。
+- 现场备份 `*-20261014-deploy745fb60` 与暂存 `/root/aii-stage-20261014b/`，清理待用户点头。
