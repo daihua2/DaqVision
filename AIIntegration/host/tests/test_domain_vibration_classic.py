@@ -98,9 +98,15 @@ class TestDeclaration(unittest.TestCase):
         self.assertIn("ISO 496", spec.description)
 
     def test_机器分组结论_取值与停机不写(self):
-        spec = {o.key: o for o in self.d.declaration.outputs}["machine_group"]
+        specs = {o.key: o for o in self.d.declaration.outputs}
+        spec = specs["machine_group"]
         self.assertEqual(spec.choices, ("group1", "group2", "none"))
         self.assertEqual(len(spec.choice_displays), 3)
+        self.assertEqual(spec.stop_behavior, "not_written")
+        self.assertFalse(spec.headline, "分组是判级的前提，不是结论本身（C-104 §2）")
+        spec = specs["machine_group_basis"]
+        self.assertEqual(spec.choices, ("shaftHeight", "ratedPower", "pump", "noStandard"))
+        self.assertEqual(len(spec.choice_displays), 4)
         self.assertEqual(spec.stop_behavior, "not_written")
 
     def test_泵类别第1第2类与不适用_取值照平台台账(self):
@@ -173,7 +179,7 @@ class TestIsoClassification(unittest.TestCase):
     def test_缺功率则不出分级并说明(self):
         f = _frame({"x_vel": _samples(3.0)}, {**FULL_PARAMS, "ratedPowerKw": ""})
         out = _by_key(self.d.instance.infer(f))
-        for k in ("iso_zone", "iso_zone_code", "iso_margin", "machine_group"):
+        for k in ("iso_zone", "iso_zone_code", "iso_margin", "machine_group", "machine_group_basis"):
             self.assertIs(out[k].quality, Quality.CONFIG_INCOMPLETE, k)
             self.assertIsNone(out[k].value)
         self.assertIs(out["vel_max"].quality, Quality.OK, "数值照给")
@@ -415,6 +421,7 @@ class TestApplicabilityByUs(unittest.TestCase):
                                         ("EM", "200", "160", "C", "group2"), ("EG", "200", "400", "B", "group1")):
             out = self._out(ratedPowerKw=kw, equipmentClass=cls, shaftHeightMm=h)
             self.assertEqual((out["iso_zone"].value, out["machine_group"].value), (zone, group), (cls, kw, h))
+            self.assertEqual(out["machine_group_basis"].value, "shaftHeight", (cls, kw, h))
             ev = out["evidence"].value
             self.assertIn(f"按轴中心高 {float(h):g} mm 定为第 {group[-1]} 组", ev)
             self.assertEqual("以轴中心高为准" in ev, (kw, h) != ("200", "160"), (cls, kw, h))
@@ -425,6 +432,7 @@ class TestApplicabilityByUs(unittest.TestCase):
                         ("0", "轴中心高取值非法"), ("132", "轴中心高 132 mm <160 mm")):
             out = self._out(ratedPowerKw="400", equipmentClass="EM", shaftHeightMm=h)
             self.assertEqual((out["iso_zone"].value, out["machine_group"].value), ("B", "group1"), h)
+            self.assertEqual(out["machine_group_basis"].value, "ratedPower", h)
             self.assertIn(word, out["evidence"].value, h)
             self.assertIn("按额定 400 kW 定为第 1 组", out["evidence"].value, h)
 
@@ -444,16 +452,19 @@ class TestApplicabilityByUs(unittest.TestCase):
             self.assertNotIn("轴中心高", out["evidence"].value, over)
 
     def test_机器分组结论_泵与无标准不分组(self):
-        self.assertEqual(self._out(ratedPowerKw="200", equipmentClass="PU", pumpCategory="category1",
-                                   pumpEnvironment="dryMounted")["machine_group"].value, "none")
+        def grp(out):
+            return out["machine_group"].value, out["machine_group_basis"].value
+        self.assertEqual(grp(self._out(ratedPowerKw="200", equipmentClass="PU", pumpCategory="category1",
+                                       pumpEnvironment="dryMounted")), ("none", "pump"))
         out = self._out(ratedPowerKw="200", equipmentClass="CO", equipmentType="RE")
-        self.assertIs(out["machine_group"].quality, Quality.OK)
-        self.assertEqual(out["machine_group"].value, "none", "无适用标准")
+        self.assertIs(out["machine_group_basis"].quality, Quality.OK)
+        self.assertEqual(grp(out), ("none", "noStandard"), "无适用标准")
         out = self._out(ratedPowerKw="5", equipmentClass="EM", shaftHeightMm="400")
-        self.assertEqual((out["iso_zone"].quality, out["machine_group"].value), (Quality.OK, "none"),
+        self.assertEqual((out["iso_zone"].quality, *grp(out)), (Quality.OK, "none", "noStandard"),
                          "≤15 kW 按附录 C 判，不是 GB/T 6075.3 的组")
         out = self._out(ratedPowerKw="200", supportClass="")
-        self.assertIs(out["machine_group"].quality, Quality.CONFIG_INCOMPLETE, "判据立不起来就不给")
+        for k in ("machine_group", "machine_group_basis"):
+            self.assertIs(out[k].quality, Quality.CONFIG_INCOMPLETE, "判据立不起来就不给")
 
     def test_不在国标范围的类别与型式不出分级(self):
         # AI-99 §4：按 ISO 14224 类别 + 型式判（C-94 照收）

@@ -264,7 +264,7 @@ class TestBaselineOnlyFallback(unittest.TestCase):
 
     ONLY = {**BOTH, "algorithms": "baseline"}
     CLASSIC_KEYS = ("vel_max", "dominant_axis", "iso_zone", "iso_zone_code", "iso_margin",
-                    "axial_ratio", "direction_hint", "machine_group")
+                    "axial_ratio", "direction_hint", "machine_group", "machine_group_basis")
 
     def setUp(self):
         self.d = _load().instance
