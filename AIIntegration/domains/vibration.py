@@ -202,7 +202,7 @@ _PUMPS = ("category1", "category2")
 _NA = "notApplicable"
 
 #: 平台台账的键（`C-64 §2.3`）。
-P_GROUP, P_SUPPORT, P_PUMP = "machineGroup", "supportClass", "pumpCategory"
+P_SUPPORT, P_PUMP = "supportClass", "pumpCategory"
 P_POWER, P_SPEED, P_AXIAL = "ratedPowerKw", "ratedSpeedRpm", "axialAxis"
 P_SHAFT = "shaftHeightMm"                     # 轴中心高，与平台台账同名（`C-103 §2.1`）
 P_ALGOS = "algorithms"
@@ -327,7 +327,7 @@ class Vibration(Domain):
 
     key = "vibration"
     display = "低频采集AI振动诊断"
-    version = "1.4.0"   # 1.4.0（2026-10-14）：分组改由本模块推出 —— 新增参数 shaftHeightMm，电机按轴中心高分组、缺则按功率并警示；machineGroup 作废不采用；新增结论「机器分组」「分组依据」（C-103、C-104）。1.3.1（2026-10-14）：扩展型式 rotaryPD，回转容积式压缩机 / 风机判无适用标准（AI-109）。1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；扩展类 servoMotor 判级同电动机并警示变工况（C-98，10-13）；10-13 已部署
+    version = "1.4.1"   # 1.4.1（2026-10-15）：删去已作废参数 machineGroup 的声明 —— 平台全环境已不再下发（C-108），再带即按未声明拒存。1.4.0（2026-10-14）：分组改由本模块推出 —— 新增参数 shaftHeightMm，电机按轴中心高分组、缺则按功率并警示；machineGroup 作废不采用；新增结论「机器分组」「分组依据」（C-103、C-104）。1.3.1（2026-10-14）：扩展型式 rotaryPD，回转容积式压缩机 / 风机判无适用标准（AI-109）。1.3.0（2026-10-12）：按标准判级 —— 只取径向判区、不在国标范围不出烈度区并警示、低速警示可能判轻（定案 §1.5.2）；适用与否与分组由本模块按设备类别 / 功率 / 转速判（§1.5.3）；无标准时可用自定门槛（§1.5.4）；自定门槛不填时 ≤15 kW 且无专门标准的按 GB/T 41850.1 附录 C 下端判（§1.5.4，10-13）；设备类型改为 ISO 14224 类别 + 型式，接机组推出的联接设备与泵安装环境（§1.5.5，C-94，10-13）；扩展类 servoMotor 判级同电动机并警示变工况（C-98，10-13）；10-13 已部署
 
     # ── 声明 ──────────────────────────────────────────────────────────────
     def declare(self) -> Declaration:
@@ -365,19 +365,6 @@ class Vibration(Domain):
                     choice_displays=("经典算法（国标判级）", "AI 自训（基线偏离）", "两者都用"),
                     required=True, level="position",
                     description="没有缺省。只启用经典即保存即出结论；启用 AI 自训须先采基线"),
-                ParamSpec(
-                    # ★整个参数已作废、所填一律不采用（C-103，用户 2026-10-14 定「就当没这个参数」）。声明暂留只为
-                    #   平台撤填写入口之前照常下发、旧绑定照常保存 —— 现场对未声明参数整条拒存（C-64 §3）
-                    key=P_GROUP, display="（已作废）机器分组", value_type="enum",
-                    choices=(*_GROUPS, _NA),
-                    choice_displays=(
-                        "（已作废）第 1 组",
-                        "（已作废）第 2 组",
-                        "（已作废）不适用",
-                    ),
-                    required=False, level="machine",
-                    description="已作废，所填不采用（2026-10-14）：分组由本模块按额定功率推出，电机按轴中心高（GB/T 6075.3 §4.2）。"
-                                "请勿再填"),
                 ParamSpec(
                     key=P_CLASS, display="设备类别（ISO 14224）", value_type="string",
                     required=False, level="machine",
@@ -1010,7 +997,7 @@ def _grading(params: dict[str, str]
     ★**适用与否由本模块判**（用户 2026-10-12 定「不适用应由你判定」）：平台只传事实（设备类别与型式、联接设备、
       泵安装环境、额定功率、额定转速、支承方式、泵类别），不在国标范围的不出烈度区，原因以 `NO_STD` 开头。
       分组按 GB/T 6075.3 §4.2「额定功率或轴中心高」由本模块推出：电机按轴中心高，没有再按功率；
-      平台所填 `machineGroup` 已作废、一律不采用（C-103，用户 2026-10-14 定）。
+      平台原填的 `machineGroup` 已作废（C-103，用户 2026-10-14 定），1.4.1 起声明也删了。
     ★不适用 / 缺参数 / 自相矛盾，都属于「判据立不起来」—— 正是 CONFIG_INCOMPLETE 的定义，不另立新码。
     """
     mount = params.get(P_SUPPORT, "").strip()
@@ -1121,7 +1108,7 @@ def _machine_group(params: dict[str, str], notes: list[str]) -> tuple[str, str, 
     """GB/T 6075.3 §4.2「额定功率或轴中心高」分组。返回 `(组别, 依据代码, 怎么定的, 定不了的原因)`，警示追加进 `notes`。
 
     电机（electrical machines：电动机、发电机、伺服电动机）按轴中心高，未传或 <160 mm 再按功率；两者不一致以轴中心高为准。
-    ★平台所填 `machineGroup` 已作废，一律不看（`C-103`，用户 2026-10-14 定「就当没这个参数」「缺轴心高时，也提示缺轴心高参数」）。
+    ★平台原填的 `machineGroup` 已作废、1.4.1 起不再声明（`C-103`、`C-108`；用户 2026-10-14 定「就当没这个参数」「缺轴心高时，也提示缺轴心高参数」）。
     """
     cls = params.get(P_CLASS, "").strip()
     power = _num(params.get(P_POWER, ""))

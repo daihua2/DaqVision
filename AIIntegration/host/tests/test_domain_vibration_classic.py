@@ -84,12 +84,9 @@ class TestDeclaration(unittest.TestCase):
         self.assertTrue(specs["vel_is_rms"].required)
         self.assertTrue(specs["axialAxis"].required)
 
-    def test_机器分组已作废_声明暂留取值不变(self):
-        """C-103：平台撤填写入口之前照常下发，删声明会被整条拒存（C-64 §3）⇒ 声明与取值都留着，只标作废。"""
-        spec = {p.key: p for p in self.d.declaration.params}["machineGroup"]
-        self.assertEqual(spec.choices, ("group1", "group2", "notApplicable"))
-        self.assertTrue(all("已作废" in s for s in (spec.display, *spec.choice_displays)))
-        self.assertFalse(spec.required)
+    def test_机器分组不再声明(self):
+        """C-103 作废；C-108 平台全环境已不再下发 ⇒ 1.4.1 删声明，再带的 PutBinding 按未声明整条拒存（C-64 §3）。"""
+        self.assertNotIn("machineGroup", {p.key for p in self.d.declaration.params})
 
     def test_轴中心高_设备层数值毫米可选(self):
         spec = {p.key: p for p in self.d.declaration.params}["shaftHeightMm"]
@@ -116,7 +113,7 @@ class TestDeclaration(unittest.TestCase):
 
     def test_参数归属(self):
         levels = {p.key: p.level for p in self.d.declaration.params}
-        for k in ("machineGroup", "shaftHeightMm", "supportClass", "pumpCategory", "ratedPowerKw", "ratedSpeedRpm"):
+        for k in ("shaftHeightMm", "supportClass", "pumpCategory", "ratedPowerKw", "ratedSpeedRpm"):
             self.assertEqual(levels[k], "machine", k)
         self.assertEqual(levels["axialAxis"], "sensor", "轴向由振动传感器给（C-64 §2.3）")
         self.assertEqual(levels["vel_is_rms"], "position")
