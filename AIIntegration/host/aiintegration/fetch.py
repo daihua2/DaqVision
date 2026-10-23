@@ -102,19 +102,19 @@ class Fetcher:
         channels: dict[str, Sequence[Sample]] = {}
         empty_roles: list[str] = []
         decoded: dict[int, list[StructSample | str]] = {}
+        field_roles = set(b.field_roles)
         for role, gid in b.roles.items():
             vqts = by_gid.get(gid, [])
             if not vqts:
                 empty_roles.append(role)
             # ★空的也放进去（空列表），不是"这一路不存在" —— 两者对模块的含义不同：
             #   不在字典里 = 这一路没绑；在字典里但为空 = 绑了但这段没数据。
-            fname = b.fields.get(role)
-            if fname is None:
+            if role not in field_roles:
                 channels[role] = [self._scalar(b, role, v) for v in vqts]
             else:
                 if gid not in decoded:   # 同一个点的几路只解一遍
                     decoded[gid] = [self._decode(v) for v in vqts]
-                channels[role] = [self._field(b, role, fname, v, d)
+                channels[role] = [self._field(b, role, v, d)
                                   for v, d in zip(vqts, decoded[gid])]
 
         if empty_roles:
@@ -158,8 +158,13 @@ class Fetcher:
         except StructRegistryError as exc:
             return f"decode:{v.StructVal.StructId}/{v.StructVal.StructVersion}:{exc}"
 
-    def _field(self, b: Binding, role: str, fname: str, v: daq.VQT,
-               d: StructSample | str) -> Sample:
+    def _field(self, b: Binding, role: str, v: daq.VQT, d: StructSample | str) -> Sample:
+        num = b.field_numbers.get(role)
+        if num is not None:
+            # ★有号以号为准（契约 1.20）：字段原地改了名，号不变，照样取得到。找名只是为了到 `fields` 里取值。
+            fname = d.numbers.get(num, f"#{num}") if isinstance(d, StructSample) else f"#{num}"
+        else:
+            fname = b.fields[role]   # 1.20 之前存下的老绑定：只有名
         if isinstance(d, StructSample):
             if fname in d.fields:
                 val = d.fields[fname]
@@ -169,7 +174,8 @@ class Fetcher:
                 reason = f"字段 {fname} 在 {d.struct_name} v{d.struct_version} 里不是数值标量"
             else:
                 # ★采集侧发了新版本、删了这个字段：如实落坏，**不猜**换成哪个字段。
-                reason = f"{d.struct_name} v{d.struct_version} 里没有字段 {fname}"
+                reason = (f"{d.struct_name} v{d.struct_version} 里没有字段号 {num}（绑定时叫 {b.fields.get(role)!r}）"
+                          if num is not None else f"{d.struct_name} v{d.struct_version} 里没有字段 {fname}")
             self._warn_once((b.domain, b.binding, role, d.struct_name, d.struct_version),
                             "%s/%s 角色 %s：%s —— 这一版的值逐条落坏样本",
                             b.domain, b.binding, role, reason)

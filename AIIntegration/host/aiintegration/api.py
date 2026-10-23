@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import dataclasses
 import platform
 import sys
 from datetime import datetime, timezone
@@ -30,7 +31,7 @@ from . import structbind
 logger = logging.getLogger(__name__)
 
 SERVICE = "aiintegration.AIIntegrationService"
-PROTO_VERSION = "1.19"
+PROTO_VERSION = "1.20"
 
 
 def _ts(dt: datetime) -> object:
@@ -178,6 +179,8 @@ class ApiService(WorkbenchApiMixin):
             out.roles[role] = gid
         for role, fname in b.fields.items():
             out.role_fields[role] = fname
+        for role, num in b.field_numbers.items():
+            out.role_field_numbers[role] = num
         for k, v in b.params.items():
             out.params[k] = v
         # ★1.10：本条绑定产出哪些结论点 + 它们的 localId（贵方 C-47 §3）。
@@ -226,7 +229,8 @@ class ApiService(WorkbenchApiMixin):
             interval_sec=b.interval_sec or 60.0,
             window_sec=b.window_sec or 60.0,
             enabled=b.enabled, fields=dict(b.role_fields),
-            display_name=b.display_name, status_on_delay_sec=b.status_on_delay_sec)
+            display_name=b.display_name, status_on_delay_sec=b.status_on_delay_sec,
+            field_numbers=dict(b.role_field_numbers))
         why = _undeclared(nb, loaded)
         if why:
             return pb.PutBindingReply(ok=False, message=why)
@@ -235,10 +239,14 @@ class ApiService(WorkbenchApiMixin):
             return pb.PutBindingReply(
                 ok=False, message=f"绑定 {nb.domain}/{nb.binding} 未保存：模块没有检测状态，"
                                   f"去抖时长 {nb.status_on_delay_sec} 秒无处可用（请留空）")
-        if nb.fields:
-            why = self._check_fields(nb, loaded)
+        notes: list[str] = []
+        if nb.field_roles:
+            why, resolved = self._check_fields(nb, loaded)
             if why:
                 return pb.PutBindingReply(ok=False, message=why)
+            # ★存**核对出来的**号与当前名（1.20）：只给名的老平台从此也有号；名与号对不上时按号，名改成实时库的。
+            nb = dataclasses.replace(nb, field_numbers=resolved.numbers, fields=resolved.names)
+            notes = resolved.notes
         why = self._admit_points(nb, loaded)
         if why:
             return pb.PutBindingReply(ok=False, message=why)
@@ -247,7 +255,8 @@ class ApiService(WorkbenchApiMixin):
         except ValueError as exc:
             # 校验失败原样回给调用方（globalId=0、一个角色都没绑…），**不吞**。
             return pb.PutBindingReply(ok=False, message=str(exc))
-        return pb.PutBindingReply(ok=True, message=self._notify_changed())
+        msg = self._notify_changed()
+        return pb.PutBindingReply(ok=True, message="；".join([*notes, msg] if msg else notes))
 
     def _admit_points(self, b: Binding, loaded: LoadedDomain) -> str:
         """建前拦（`registration` 甲）：这次保存会让新结论点进快照、而实时库授权数据点数不够 ⇒ 不存。
@@ -263,19 +272,19 @@ class ApiService(WorkbenchApiMixin):
                                        what=f"保存绑定 {b.domain}/{b.binding}")
         return f"绑定 {b.domain}/{b.binding} 未保存：{why}" if why else ""
 
-    def _check_fields(self, b: Binding, loaded: LoadedDomain) -> str:
-        """按字段绑定的核对（`structbind`）。过了回空串，不过回原因。"""
+    def _check_fields(self, b: Binding, loaded: LoadedDomain):
+        """按字段绑定的核对（`structbind`）。过了回 `("", Resolved)`，不过回 `(原因, None)`。"""
         if self._hs is None or self._structs is None:
-            return "本服务未接实时库读口，无法核对结构值字段 —— 按字段绑定一律拒绝（不跳过核对存下来）"
+            return "本服务未接实时库读口，无法核对结构值字段 —— 按字段绑定一律拒绝（不跳过核对存下来）", None
         try:
-            structbind.check_binding(b, loaded.declaration.inputs,
-                                     structbind.cached_lookup(self._hs, self._structs))
+            return "", structbind.check_binding(b, loaded.declaration.inputs,
+                                                structbind.cached_lookup(self._hs, self._structs))
         except structbind.StructBindError as exc:
-            return str(exc)
+            return str(exc), None
         except Exception as exc:  # noqa: BLE001 —— 连不上实时库等：如实回，不当成核对通过
             logger.warning("按字段绑定核对时读实时库失败：%s", exc)
-            return f"读实时库失败，无法核对结构值字段（{type(exc).__name__}: {exc}）—— 绑定未保存，请稍后重试"
-        return ""
+            return (f"读实时库失败，无法核对结构值字段（{type(exc).__name__}: {exc}）—— 绑定未保存，请稍后重试",
+                    None)
 
     def DescribeStructPoint(self, request, context):
         if self._hs is None or self._structs is None:
@@ -299,7 +308,8 @@ class ApiService(WorkbenchApiMixin):
                            type=structbind.type_name(f), unit=f.unit,
                            quantity=f.attrs.get(structbind.ATTR_QUANTITY, ""),
                            axis=f.attrs.get(structbind.ATTR_AXIS, ""),
-                           bindable=structbind.is_bindable(f), description=f.description)
+                           bindable=structbind.is_bindable(f), description=f.description,
+                           number=f.number)
         return res
 
     def DeleteBinding(self, request, context):

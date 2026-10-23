@@ -326,6 +326,22 @@ class TestFetchFields(unittest.TestCase):
         self.assertEqual(req.hisReq.method, hs.kRawData)
         self.assertEqual(fr.channels["x_vel"][0].value, 1.0)
 
+    def test_按号取_字段原地改名照样取得到(self):
+        # 号不变、名变了（D-319 第 4 步的字段原地改名）：按号的绑定照取，按名的老绑定落坏。
+        d = self.hs.defs[(3, 1)]
+        nx = next(f.number for f in d.fields if f.name == "x")
+        self.hs.put(9, T0 - timedelta(seconds=1), 3, 1, x=1.0, y=2.0, z=3.0)
+        next(f for f in d.fields if f.name == "x").name = "x_vel_rms"
+        by_num = self.f.fetch(fb({"x_vel": 9}, {"x_vel": "x"}, field_numbers={"x_vel": nx}), T0)
+        self.assertEqual([s.value for s in by_num.channels["x_vel"]], [1.0])
+        by_name = Fetcher(self.hs, StructRegistry(self.hs)).fetch(fb({"x_vel": 9}, {"x_vel": "x"}), T0)
+        self.assertEqual([s.quality for s in by_name.channels["x_vel"]], [Quality.INPUT_BAD])
+
+    def test_按号_这一版没有该号_落坏(self):
+        self.hs.put(9, T0 - timedelta(seconds=1), 3, 1, x=1.0, y=2.0, z=3.0)
+        fr = self.f.fetch(fb({"x_vel": 9}, {"x_vel": "x"}, field_numbers={"x_vel": 999}), T0)
+        self.assertEqual([s.quality for s in fr.channels["x_vel"]], [Quality.INPUT_BAD])
+
     def test_这一版没有该字段_该条落坏而不是跳过(self):
         self.hs.add_struct(3, 2, "Vib", [fld("x", hs.SFT_FLOAT, unit="mm/s", quantity="velocity")])
         self.hs.put(9, T0 - timedelta(seconds=2), 3, 1, x=1.0, y=2.0, z=3.0)
@@ -408,7 +424,9 @@ class TestRightMargin(unittest.TestCase):
                           bindings=BindingStore(Path(d) / "b.db"), points=PointMap(Path(d) / "p.db"))
             s.run_once(fb({"x_vel": 9}, {"x_vel": "x"}), T0)
             s.run_once(fb({"x_vel": 9}, {}), T0)
-        self.assertEqual(f.ends, [T0 - timedelta(seconds=STRUCT_RIGHT_MARGIN_SEC), T0])
+            s.run_once(fb({"x_vel": 9}, {}, field_numbers={"x_vel": 7}), T0)   # 1.20：只给号也是字段绑定
+        self.assertEqual(f.ends, [T0 - timedelta(seconds=STRUCT_RIGHT_MARGIN_SEC), T0,
+                                  T0 - timedelta(seconds=STRUCT_RIGHT_MARGIN_SEC)])
         self.assertGreaterEqual(STRUCT_RIGHT_MARGIN_SEC, 5.0, "H-263：右端至少留 5 秒")
 
 
@@ -519,6 +537,49 @@ class TestCheckBinding(unittest.TestCase):
         with self.assertRaisesRegex(StructBindError, "不在域"):
             self.check({"nope": 9}, {"nope": "x"}, vel3())
 
+    # ── 1.20 按字段号 ──
+    def test_只给名_核对补上号与当前名(self):
+        lookup = self.lookup_for(vel3())
+        nums = {f.name: f.number for f in self.hs.defs[(3, 1)].fields}
+        r = check_binding(fb({k: 9 for k in XYZ}, XYZ), DECL.inputs, lookup)
+        self.assertEqual(r.numbers, {k: nums[v] for k, v in XYZ.items()})
+        self.assertEqual((r.names, r.notes), (XYZ, []))
+
+    def test_按号绑定_名不符按号并说明(self):
+        # 字段原地改过名（号不变），平台送来的名还是旧的：按号取，不拒，但要说。
+        lookup = self.lookup_for(vel3())
+        nx = next(f.number for f in self.hs.defs[(3, 1)].fields if f.name == "x")
+        r = check_binding(fb({"x_vel": 9}, {"x_vel": "x_old"}, field_numbers={"x_vel": nx}),
+                          DECL.inputs, lookup)
+        self.assertEqual((r.numbers, r.names), ({"x_vel": nx}, {"x_vel": "x"}))
+        self.assertEqual(len(r.notes), 1)
+        self.assertIn("x_old", r.notes[0])
+
+    def test_只给号也行(self):
+        lookup = self.lookup_for(vel3())
+        ny = next(f.number for f in self.hs.defs[(3, 1)].fields if f.name == "y")
+        r = check_binding(fb({"y_vel": 9}, {}, field_numbers={"y_vel": ny}), DECL.inputs, lookup)
+        self.assertEqual(r.names, {"y_vel": "y"})
+
+    def test_号不存在_拒(self):
+        lookup = self.lookup_for(vel3())
+        with self.assertRaisesRegex(StructBindError, "没有字段号 999"):
+            check_binding(fb({"x_vel": 9}, {"x_vel": "x"}, field_numbers={"x_vel": 999}),
+                          DECL.inputs, lookup)
+
+    def test_按号的字段照样核单位(self):
+        lookup = self.lookup_for(vel3(unit="g"))
+        nx = next(f.number for f in self.hs.defs[(3, 1)].fields if f.name == "x")
+        with self.assertRaisesRegex(StructBindError, "单位是 g"):
+            check_binding(fb({"x_vel": 9}, {}, field_numbers={"x_vel": nx}), DECL.inputs, lookup)
+
+    def test_同记录组_只给号的也算字段绑定(self):
+        lookup = self.lookup_for(vel3())
+        nx = next(f.number for f in self.hs.defs[(3, 1)].fields if f.name == "x")
+        with self.assertRaisesRegex(StructBindError, "绑的却是整点"):
+            check_binding(fb({"x_vel": 9, "y_vel": 12}, {}, field_numbers={"x_vel": nx}),
+                          DECL.inputs, lookup)
+
 
 # ═══════════════════════════ 绑定表 ═══════════════════════════
 
@@ -547,7 +608,33 @@ class TestBindingStoreFields(unittest.TestCase):
         con.commit(); con.close()
         s = BindingStore(self.db)
         b = s.get("vib", "dev1")
-        self.assertEqual((b.roles, b.fields), ({"x_vel": 9}, {}))
+        self.assertEqual((b.roles, b.fields, b.field_numbers), ({"x_vel": 9}, {}, {}))
+        s.close()
+
+    def test_字段号存得下读得回(self):
+        s = BindingStore(self.db)
+        s.put(fb({"x_vel": 9}, {"x_vel": "x"}, field_numbers={"x_vel": 7}))
+        self.assertEqual(s.get("vib", "dev1").field_numbers, {"x_vel": 7})
+        s.close()
+
+    def test_1_19的库补列_老字段绑定照旧按名(self):
+        import sqlite3
+        s = BindingStore(self.db)
+        s.put(fb({"x_vel": 9}, {"x_vel": "x"}))
+        s.close()
+        con = sqlite3.connect(str(self.db))
+        con.execute("ALTER TABLE bindings DROP COLUMN field_numbers_json")
+        con.commit(); con.close()
+        s = BindingStore(self.db)
+        b = s.get("vib", "dev1")
+        self.assertEqual((b.fields, b.field_numbers, b.field_roles), ({"x_vel": "x"}, {}, ["x_vel"]))
+        s.close()
+
+    def test_字段号非法或没点_拒(self):
+        s = BindingStore(self.db)
+        for nums, msg in (({"x_vel": 0}, "非法"), ({"x_vel": True}, "非法"), ({"y_vel": 7}, "却没绑点")):
+            with self.subTest(nums=nums), self.assertRaisesRegex(ValueError, msg):
+                s.put(fb({"x_vel": 9}, {}, field_numbers=nums))
         s.close()
 
     def test_有字段没点_拒(self):
@@ -654,6 +741,38 @@ class TestApi(unittest.TestCase):
         y = next(f for f in r.fields if f.name == "y")
         self.assertEqual((y.type, y.unit, y.quantity, y.axis, y.bindable),
                          ("float", "mm/s", "velocity", "y", True))
+        self.assertEqual(y.number, next(f.number for f in self.hs.defs[(3, 1)].fields if f.name == "y"))
+
+    # ── 1.20 按字段号 ──
+    def _nums(self):
+        return {f.name: f.number for f in self.hs.defs[(3, 1)].fields}
+
+    def test_老平台只给名_存下时补号_列出两格都全(self):
+        r = self.put({k: 9 for k in XYZ}, XYZ)
+        self.assertTrue(r.ok, r.message)
+        got = self.call("ListBindings", pb.ListBindingsRequest(), pb.ListBindingsReply).bindings[0]
+        self.assertEqual(dict(got.role_fields), XYZ)
+        self.assertEqual(dict(got.role_field_numbers), {k: self._nums()[v] for k, v in XYZ.items()})
+
+    def test_名与号不符_按号存_回执写明(self):
+        b = pb.Binding(domain="vib", binding="dev1")
+        b.roles.update({"x_vel": 9})
+        b.role_fields.update({"x_vel": "x_旧名"})
+        b.role_field_numbers.update({"x_vel": self._nums()["x"]})
+        r = self.call("PutBinding", pb.PutBindingRequest(binding=b), pb.PutBindingReply)
+        self.assertTrue(r.ok, r.message)
+        self.assertIn("x_旧名", r.message)
+        saved = self.bindings.get("vib", "dev1")
+        self.assertEqual((saved.fields, saved.field_numbers), ({"x_vel": "x"}, {"x_vel": self._nums()["x"]}))
+
+    def test_号不存在_拒且不存(self):
+        b = pb.Binding(domain="vib", binding="dev1")
+        b.roles.update({"x_vel": 9})
+        b.role_field_numbers.update({"x_vel": 999})
+        r = self.call("PutBinding", pb.PutBindingRequest(binding=b), pb.PutBindingReply)
+        self.assertFalse(r.ok)
+        self.assertIn("没有字段号 999", r.message)
+        self.assertIsNone(self.bindings.get("vib", "dev1"))
 
     def test_DescribeStructPoint标量点与0号如实拒(self):
         for gid, why in ((8, "不是结构值点"), (0, "不是可用的 globalId")):

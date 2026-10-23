@@ -13,6 +13,10 @@
 ★**按字段绑定**（契约 1.11，定义文档 §10.3）：角色可以对到**结构值点的某个字段**上 ——
   `roles[角色]` 仍是那个点的 globalId，`fields[角色]` 是字段名。不在 `fields` 里 = 整点标量（原语义）。
   字段对不对（存在、数值标量、单位与物理量相符、同记录组同点）由 `structbind` 在存之前核，这一层只管形状。
+
+★**按字段号绑定**（契约 1.20，`D-319`、`C-122`）：`field_numbers[角色]` 是字段号（= 实时库 `StructField.number`）。
+  字段可以原地改名而号不变 ⇒ **有号以号为准**，`fields` 里的名字只作显示。
+  1.20 之前存下的绑定只有名、没有号 ⇒ 照旧按名取（`field_roles` 两者都算）。
 """
 
 from __future__ import annotations
@@ -42,6 +46,8 @@ CREATE TABLE IF NOT EXISTS bindings (
     data_origin  TEXT NOT NULL DEFAULT '',
     -- 角色 → 结构值点的字段名（契约 1.11）。老库由 _migrate 补列。
     fields_json  TEXT NOT NULL DEFAULT '{}',
+    -- 角色 → 结构字段号（契约 1.20）。老库由 _migrate 补列。
+    field_numbers_json TEXT NOT NULL DEFAULT '{}',
     -- 显示名、检测状态去抖时长（契约 1.15）。老库由 _migrate 补列。
     display_name        TEXT NOT NULL DEFAULT '',
     status_on_delay_sec INTEGER NOT NULL DEFAULT 0,
@@ -95,6 +101,14 @@ class Binding:
     status_on_delay_sec: int = 0
     """检测状态报警的去抖时长（秒，契约 1.15，`C-67 §3.1`）。**0 = 不去抖**，不给缺省。"""
 
+    field_numbers: dict[str, int] = field(default_factory=dict)
+    """角色 → 结构**字段号**（契约 1.20）。有号以号为准；`fields` 里的名字只作显示。"""
+
+    @property
+    def field_roles(self) -> list[str]:
+        """按字段绑定的角色（有名或有号），按出现先后。不在这里的角色 = 整点标量。"""
+        return list(dict.fromkeys([*self.fields, *self.field_numbers]))
+
     def missing_required(self, required_roles: list[str]) -> list[str]:
         """声明里必填、而绑定里没给的那些角色。"""
         return [r for r in required_roles if r not in self.roles]
@@ -136,6 +150,11 @@ class BindingStore:
             self._conn.execute(
                 "ALTER TABLE bindings ADD COLUMN fields_json TEXT NOT NULL DEFAULT '{}'")
             logger.info("绑定表已补列 fields_json（老库升级；老绑定一律整点标量）")
+        if "field_numbers_json" not in have:
+            # 补空 = 没有号、照旧按名取 —— 那正是 1.20 之前它们存下时的意思。
+            self._conn.execute(
+                "ALTER TABLE bindings ADD COLUMN field_numbers_json TEXT NOT NULL DEFAULT '{}'")
+            logger.info("绑定表已补列 field_numbers_json（老库升级；老的按字段绑定照旧按名取）")
         if "display_name" not in have:
             self._conn.execute(
                 "ALTER TABLE bindings ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
@@ -176,6 +195,14 @@ class BindingStore:
                 raise ValueError(
                     f"绑定 {b.domain}/{b.binding} 的角色 {role} 字段名为空"
                     "（整点标量请不要放进 fields，空串不等于「不按字段」）")
+        for role, num in b.field_numbers.items():
+            if role not in b.roles:
+                raise ValueError(
+                    f"绑定 {b.domain}/{b.binding} 的角色 {role} 指定了字段号 {num!r}，却没绑点")
+            if isinstance(num, bool) or not isinstance(num, int) or num <= 0:
+                # 0 = proto3 缺省、即「没填」；当成号存下，取数时就会去找一个不存在的字段。
+                raise ValueError(
+                    f"绑定 {b.domain}/{b.binding} 的角色 {role} 字段号 {num!r} 非法（须为正整数）")
         delay = b.status_on_delay_sec
         if isinstance(delay, bool) or not isinstance(delay, int) or not 0 <= delay <= 0xFFFFFFFF:
             # 上界是实时库 `OnDelaySec` 的 uint32；负数或越界传过去会被截成别的数，且不报错。
@@ -194,11 +221,12 @@ class BindingStore:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO bindings(domain,binding,roles_json,params_json,data_origin,"
-                "interval_sec,window_sec,enabled,fields_json,display_name,status_on_delay_sec) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                "interval_sec,window_sec,enabled,fields_json,display_name,status_on_delay_sec,"
+                "field_numbers_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(domain,binding) DO UPDATE SET "
                 "roles_json=excluded.roles_json, params_json=excluded.params_json, "
-                "fields_json=excluded.fields_json, "
+                "fields_json=excluded.fields_json, field_numbers_json=excluded.field_numbers_json, "
                 "data_origin=excluded.data_origin, interval_sec=excluded.interval_sec, "
                 "window_sec=excluded.window_sec, enabled=excluded.enabled, "
                 "display_name=excluded.display_name, "
@@ -208,7 +236,7 @@ class BindingStore:
                  json.dumps(b.params, ensure_ascii=False), dataorigin.normalize(b.data_origin),
                  float(b.interval_sec), float(b.window_sec), 1 if b.enabled else 0,
                  json.dumps(b.fields, ensure_ascii=False), b.display_name.strip(),
-                 b.status_on_delay_sec),
+                 b.status_on_delay_sec, json.dumps(b.field_numbers)),
             )
             self._conn.commit()
 
@@ -262,4 +290,5 @@ def _to_binding(row: sqlite3.Row) -> Binding:
         fields={k: str(v) for k, v in json.loads(row["fields_json"] or "{}").items()},
         display_name=row["display_name"] or "",
         status_on_delay_sec=int(row["status_on_delay_sec"] or 0),
+        field_numbers={k: int(v) for k, v in json.loads(row["field_numbers_json"] or "{}").items()},
     )

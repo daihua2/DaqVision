@@ -310,7 +310,8 @@ class StructRegistry:
             else:
                 out[f.name] = v
         return StructSample(t=t, quality=quality, fields=out,
-                            struct_name=d.name, struct_version=int(sv.StructVersion))
+                            struct_name=d.name, struct_version=int(sv.StructVersion),
+                            numbers={int(f.number): f.name for f in d.fields})
 
     def decode(self, name: str, sv, t, quality) -> StructSample:
         """同 `decode_value`，另核对值确实属于结构 `name` —— 不是就抛，不按错的结构解。"""

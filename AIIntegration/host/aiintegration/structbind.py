@@ -20,6 +20,12 @@ hs 的点表**不暴露 `StructRef`**（`StoredPoint` / `EntityIdentity` 都没�
 
 ★取的是**当前**的版本。采集侧日后发新版本、删了这个字段 ⇒ 取数时那一路逐条落坏质量码并写明（`fetch`），
   不在这里预判。
+
+## 1 按字段号（契约 1.20，`D-319`、`C-122`）
+
+字段可以原地改名、号不变 ⇒ 绑定**以号为准**。核对时有号按号找、没号按名找（老平台），
+找到后把号与该号**当前**的名一并交回（`Resolved`），调用方存下 —— 只给名的老平台从此也有号。
+名与号指向不同字段：**按号**，不拒，但写进 `notes` 回给配置者（`C-122 §2` 第 3 条：不静默）。
 """
 
 from __future__ import annotations
@@ -107,29 +113,59 @@ def find_point_struct(client, registry: StructRegistry, gid: int,
         "也就无从核对字段。请等采集侧写入数据后再绑（或确认绑的是不是这个点）")
 
 
+@dataclass(frozen=True, slots=True)
+class Resolved:
+    """核对通过后，各字段角色**实际**对到的字段（契约 1.20）。调用方拿它覆盖绑定再存。"""
+
+    numbers: dict[str, int]
+    """角色 → 字段号。只给了名的（老平台）在这里补上号。"""
+    names: dict[str, str]
+    """角色 → 该号**当前**的字段名（显示用）。"""
+    notes: list[str]
+    """名与号对不上等**不拒、但要说**的事（`C-122 §2` 第 3 条：按号取、报出、不静默）。"""
+
+
 def check_binding(b: Binding, inputs: Sequence[InputSpec],
-                  lookup: Callable[[int], PointStruct]) -> None:
+                  lookup: Callable[[int], PointStruct]) -> Resolved:
     """按字段绑定的全部核对。不过就抛 `StructBindError`，**一次只报第一条**（逐条改、逐条再提交）。
 
     `lookup(gid)` 由调用方给（真路径是 `find_point_struct`，带本次调用内的缓存）。
     ★没有字段绑定的绑定**一次 hs 都不拨** —— 纯标量的老绑定行为与 1.10 完全相同。
+    ★**有号以号为准**（契约 1.20）：字段可以原地改名、号不变。名与号指向不同字段 ⇒ 按号、记进 `notes`。
     """
     specs = {i.role: i for i in inputs}
-    for role, fname in b.fields.items():
+    numbers: dict[str, int] = {}
+    names: dict[str, str] = {}
+    notes: list[str] = []
+    for role in b.field_roles:
+        fname, fnum = b.fields.get(role), b.field_numbers.get(role)
+        asked = f"字段号 {fnum}" if fnum is not None else f"字段 {fname!r}"
         spec = specs.get(role)
         if spec is None:
             raise StructBindError(f"角色 {role} 不在域 {b.domain} 的声明里")
         if spec.kind != "point":
             raise StructBindError(f"角色 {role} 的形态是 {spec.kind}，只有测点类角色能绑到字段")
         if role not in b.roles:
-            raise StructBindError(f"角色 {role} 指定了字段 {fname!r}，却没绑点")
+            raise StructBindError(f"角色 {role} 指定了{asked}，却没绑点")
         ps = lookup(b.roles[role])
         d = ps.struct
-        field = next((f for f in d.fields if f.name == fname), None)
         where = f"角色 {role}（{spec.display or role}）→ 点 {ps.gid} 的结构 {d.name} v{d.version}"
-        if field is None:
-            raise StructBindError(
-                f"{where} 里没有字段 {fname!r}；有的是 {[f.name for f in d.fields]}")
+        if fnum is not None:
+            field = next((f for f in d.fields if f.number == fnum), None)
+            if field is None:
+                raise StructBindError(
+                    f"{where} 里没有字段号 {fnum}"
+                    + (f"（同时给的字段名是 {fname!r}）" if fname else "")
+                    + f"；有的是 {[(f.number, f.name) for f in d.fields]}")
+            if fname is not None and fname != field.name:
+                notes.append(f"{where}：字段号 {fnum} 现名 {field.name!r}，与给的字段名 {fname!r} 不符"
+                             " —— 已按号绑定，名字以实时库为准")
+        else:
+            field = next((f for f in d.fields if f.name == fname), None)
+            if field is None:
+                raise StructBindError(
+                    f"{where} 里没有字段 {fname!r}；有的是 {[f.name for f in d.fields]}")
+        fname = field.name
         if not is_bindable(field):
             raise StructBindError(
                 f"{where} 的字段 {fname} 是 {type_name(field)}，不是数值标量 —— 不能当成一路采样")
@@ -144,14 +180,16 @@ def check_binding(b: Binding, inputs: Sequence[InputSpec],
                 raise StructBindError(
                     f"{where} 的字段 {fname} 物理量是 {q or '（未声明 quantity）'}，域要的是 {spec.quantity}"
                     + ("" if q else " —— 请采集侧按 H-261 §2.1 在字段 attrs 里填 quantity"))
+        numbers[role], names[role] = int(field.number), field.name
 
+    field_roles = set(b.field_roles)
     records: dict[str, list[str]] = {}
     for i in inputs:
         if i.record:
             records.setdefault(i.record, []).append(i.role)
     for rec, roles in records.items():
         bound = [r for r in roles if r in b.roles]
-        by_field = [r for r in bound if r in b.fields]
+        by_field = [r for r in bound if r in field_roles]
         if not by_field:
             continue
         if len(by_field) != len(bound):
@@ -163,6 +201,7 @@ def check_binding(b: Binding, inputs: Sequence[InputSpec],
             raise StructBindError(
                 f"同记录组 {rec}：{by_field} 分别绑到了点 {sorted(gids)} —— 必须是**同一个**点的字段，"
                 "否则同一时刻的保证就没了，且不报错")
+    return Resolved(numbers=numbers, names=names, notes=notes)
 
 
 def cached_lookup(client, registry: StructRegistry) -> Callable[[int], PointStruct]:

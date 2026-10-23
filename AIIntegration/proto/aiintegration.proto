@@ -412,6 +412,15 @@ message Binding {
   //   **0 = 不去抖**；我方不给缺省、不按设备类型出模板，按设备由人定（贵方 `C-67 §3.1`）。
   //   模块没有检测状态（`OutputSpec.role` 无 `status`）却填非 0 ⇒ PutBinding `ok=false`。
   uint32 status_on_delay_sec = 14;
+
+  // ── 1.20 按字段号绑定（`D-319`，形态照贵方 `C-122 §4` 定稿）────────────
+  // ★角色 → **结构字段号**（= 实时库 `StructField.number`，取自 `StructFieldInfo.number`）。
+  //   由来：字段将来可以原地改名（字段号不变），只存字段名的绑定会对不上。号不随改名变。
+  //   ★**两格都填**：本格有号的角色**以号为准**；`role_fields` 照填字段名（显示用，也给认不得本格的老版本用）。
+  //   ★两格指向的不是同一个字段 ⇒ **按号取**，存下，并在 `PutBindingReply.message` 里写明（不静默）。
+  //   ★只给 `role_fields` 不给本格（老平台）⇒ 我方核对时按名查到号一并存下；`ListBindings` 回的两格都是全的，
+  //     且 `role_fields` 是实时库里该号**当前**的字段名。
+  map<string, int32> role_field_numbers = 15;
 }
 
 // 一条结论点的结构化出口（1.10）。字段与我方 `AI-41` 许诺的那个形状一致。
@@ -464,7 +473,7 @@ message RetirePointsRes {
 // ── 结构值点的字段（1.11）──
 message DescribeStructPointReq { int32 point_id = 1; }   // ★globalId，与 `Binding.roles` 同一个号空间
 message StructFieldInfo {
-  string name         = 1;   // 字段名 —— 填进 `Binding.role_fields` 的就是它
+  string name         = 1;   // 字段名 —— 填进 `Binding.role_fields` 的就是它（1.20 起只作显示，绑定以 `number` 为准）
   string display_name = 2;
   string type         = 3;   // int32 | int64 | uint32 | uint64 | float | double | bool | string | bytes | timestamp | numbuf；repeated 带 "[]"
   string unit         = 4;
@@ -472,6 +481,7 @@ message StructFieldInfo {
   string axis         = 6;   // attrs["axis"]；无方向的量为空
   bool   bindable     = 7;   // ★能不能绑给一路测点角色：**非 repeated 的数值标量**才行。请只让人选 true 的
   string description  = 8;
+  int32  number       = 9;   // 1.20：字段号（= 实时库 `StructField.number`）—— 填进 `Binding.role_field_numbers` 的就是它
 }
 message DescribeStructPointRes {
   bool   ok             = 1;

@@ -204,6 +204,9 @@ class StructSample:
     """★这个值是按**哪一版**结构写的。旧值永远按写入时的版本解 ——
     拿最新版去解老值是静默错读（实时库契约的硬约束）。"""
 
+    numbers: dict[int, str] = dataclasses.field(default_factory=dict)
+    """该版本的字段号 → 字段名（契约 1.20）。骨架按号绑定的角色由它找到 `fields` 里的键；域不用管。"""
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "t", _require_utc(self.t, "StructSample.t"))
 

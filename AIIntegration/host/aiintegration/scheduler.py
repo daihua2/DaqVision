@@ -232,7 +232,7 @@ class Scheduler:
 
         # ★推理路径**带上当前启用的工件**；训练路径不带（拿旧模型当输入 = 模型喂自己）。
         arts = self._artifacts.for_binding(b.domain, b.binding) if self._artifacts else {}
-        end = tick - timedelta(seconds=STRUCT_RIGHT_MARGIN_SEC) if b.fields else tick
+        end = tick - timedelta(seconds=STRUCT_RIGHT_MARGIN_SEC) if b.field_roles else tick
         frame = self._fetcher.fetch(b, end, artifacts=arts)    # hs 不可用会抛，调用方按退避处置
         result = run_domain(loaded, frame, states=self._states)
 
