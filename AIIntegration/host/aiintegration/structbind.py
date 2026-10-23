@@ -92,7 +92,8 @@ def find_point_struct(client, registry: StructRegistry, gid: int,
                 if which == "StructVal":
                     sid, ver = int(v.StructVal.StructId), int(v.StructVal.StructVersion)
                     try:
-                        d = registry.describe(sid, ver)
+                        # ★现取不走缓存：单位 / 物理量 / 字段名可能刚在采集侧原地改过（AI-122 §3.2）
+                        d = registry.describe(sid, ver, fresh=True)
                     except StructRegistryError as exc:
                         raise StructBindError(
                             f"点 {gid} 的值属于结构 id {sid} v{ver}，但取不到它的描述：{exc}") from exc

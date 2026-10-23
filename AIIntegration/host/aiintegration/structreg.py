@@ -87,6 +87,13 @@ BINDABLE_TYPES = frozenset({hs.SFT_INT32, hs.SFT_INT64, hs.SFT_UINT32, hs.SFT_UI
 #: ★一帧几万条同版本的值，不缓存失败就是几万次往返 —— 而答案在这几秒里不会变。
 _MISS_TTL_SEC = 60.0
 
+#: 取到的描述多久重取一次核对（秒）。
+#: ★**版本号不变，描述也会变**：实时库允许在最新版上原地改单位 / attrs / 字段顺序（`D-302`、`D-303`），
+#   将来还有结构改名、字段原地改名（`D-319`）。原先缓存永不过期 ⇒ 要我方重启才看得到（`AI-122 §3.2`）。
+#   实时库不缓存描述、改了立即生效（`H-313` ⑥）⇒ 到期重取一次，**内容变了才重建**。
+#   ★不用 `StructDef.modifiedMs` 判变：我方契约快照（10-10）还没有这一格；直接比内容也不怕漏掉哪一种改法。
+_REFRESH_SEC = 60.0
+
 
 #: protobuf 里 `LABEL_REPEATED` 的值（老版 `FieldDescriptor.label` 用它）。
 _LABEL_REPEATED = 3
@@ -135,6 +142,35 @@ class StructRegistryError(RuntimeError):
     """注册/解码本身出的错。★**不拦服务启动**（定案 P2），由调用方落降级项。"""
 
 
+def _new_pool() -> descriptor_pool.DescriptorPool:
+    """一个 (结构 id, 版本) 一个描述池。
+
+    ★**不能所有结构共用一个池**：池按消息全名 `hs.structs.<name>_v<version>` 认类型，
+      两个不同的 (id, 版本) 同名时，第二个加不进去，取到的是第一个的类型 —— 拿 A 的字段号解 B 的值，
+      不报错（`AI-122 §3.1`，两版 protobuf 实测一样）。结构改名后旧名别处再用、或改名前后的描述，
+      都会撞上（`D-319`）。分开放就不靠全名区分了。
+    ★hs 对带 TIMESTAMP 字段的结构在描述符里加了 `google/protobuf/timestamp.proto` 依赖；
+      空池里没有它，`Add` 会当场失败 —— 先放进去。
+    """
+    pool = descriptor_pool.DescriptorPool()
+    ts = descriptor_pb2.FileDescriptorProto()
+    timestamp_pb2.DESCRIPTOR.CopyToProto(ts)
+    pool.Add(ts)
+    return pool
+
+
+class _Entry:
+    """缓存的一份描述：该版本的 `StructDef`、动态消息类、上次核对的时刻、内容指纹。"""
+
+    __slots__ = ("struct", "cls", "checked_at", "fingerprint")
+
+    def __init__(self, struct, cls, checked_at, fingerprint):
+        self.struct = struct
+        self.cls = cls
+        self.checked_at = checked_at
+        self.fingerprint = fingerprint
+
+
 def to_struct_def(spec: StructSpec) -> hs.StructDef:
     """域自述 → 实时库的 `StructDef`。**不填任何输出字段**（id / version / number 由 hs 分配）。"""
     d = hs.StructDef(name=spec.name, displayName=spec.display, description=spec.description)
@@ -160,16 +196,10 @@ class StructRegistry:
         self._lock = threading.RLock()
         #: 结构名 → 生效的 `StructDef`（含 hs 分配的 id / version / number）
         self._defs: dict[str, hs.StructDef] = {}
-        #: 读侧：(结构 id, 版本) → (该版本的 `StructDef`, 动态消息类)。
+        #: 读侧：(结构 id, 版本) → 该版本的描述与动态消息类。
         #  ★按**值自带的** id 与版本取（值里只有这两样，没有结构名），不拿最新版解老值。
-        self._entries: dict[tuple[int, int], tuple[hs.StructDef, type]] = {}
+        self._entries: dict[tuple[int, int], _Entry] = {}
         self._misses: dict[tuple[int, int], tuple[float, str]] = {}
-        self._pool = descriptor_pool.DescriptorPool()
-        # ★hs 对带 TIMESTAMP 字段的结构在描述符里加了 `google/protobuf/timestamp.proto` 依赖；
-        #   空池里没有它，`Add` 会当场失败 —— 先放进去。
-        ts = descriptor_pb2.FileDescriptorProto()
-        timestamp_pb2.DESCRIPTOR.CopyToProto(ts)
-        self._pool.Add(ts)
         self._available: bool | None = None
         self._degraded: list[str] = []
 
@@ -246,9 +276,13 @@ class StructRegistry:
         return d.id if d is not None else 0
 
     # ── 读侧：描述与解码 ────────────────────────────────────────────────
-    def describe(self, struct_id: int, version: int) -> hs.StructDef:
-        """该 (id, 版本) 的结构描述。★`unit` / `attrs` 只在这里有 —— hs 导出的描述符**不带**它们。"""
-        return self._entry(struct_id, version)[0]
+    def describe(self, struct_id: int, version: int, *, fresh: bool = False) -> hs.StructDef:
+        """该 (id, 版本) 的结构描述。★`unit` / `attrs` 只在这里有 —— hs 导出的描述符**不带**它们。
+
+        `fresh=True`：不用缓存、现取（顺手刷新缓存）。★绑定核对与 `DescribeStructPoint` 用它 ——
+          那里核的是单位 / 物理量 / 字段名，配置的人刚在采集侧原地改过，不能拿一分钟前的答案回他。
+        """
+        return self._entry(struct_id, version, fresh=fresh)[0]
 
     def decode_value(self, sv, t, quality) -> StructSample:
         """`VQT.StructVal` → `StructSample`。
@@ -286,15 +320,17 @@ class StructRegistry:
                 f"值属于结构 {s.struct_name!r}（id {sv.StructId}），不是期望的 {name!r}")
         return s
 
-    def _entry(self, struct_id: int, version: int) -> tuple[hs.StructDef, type]:
+    def _entry(self, struct_id: int, version: int, *, fresh: bool = False) -> tuple[hs.StructDef, type]:
         key = (struct_id, version)
+        now = time.monotonic()
         with self._lock:
             hit = self._entries.get(key)
-            if hit is not None:
-                return hit
-            miss = self._misses.get(key)
-            if miss is not None and time.monotonic() - miss[0] < _MISS_TTL_SEC:
-                raise StructRegistryError(miss[1])
+            if hit is not None and not fresh and now - hit.checked_at < _REFRESH_SEC:
+                return hit.struct, hit.cls
+            if hit is None and not fresh:
+                miss = self._misses.get(key)
+                if miss is not None and now - miss[0] < _MISS_TTL_SEC:
+                    raise StructRegistryError(miss[1])
         try:
             res = self._client.get_struct(struct_id=struct_id, version=version,
                                           with_descriptor=True)
@@ -302,24 +338,37 @@ class StructRegistry:
                 raise StructRegistryError(
                     f"结构 id {struct_id} v{version} 没有描述符 —— 解不了这个值（不猜字段号）")
             d = getattr(res, "def")
+            fingerprint = d.SerializeToString(deterministic=True) + b"\0" + bytes(res.fileDescriptor)
+            with self._lock:
+                hit = self._entries.get(key)
+                if hit is not None and hit.fingerprint == fingerprint:
+                    hit.checked_at = now          # 没变：类照用，不重建
+                    return hit.struct, hit.cls
             fdp = descriptor_pb2.FileDescriptorProto()
             fdp.ParseFromString(bytes(res.fileDescriptor))
+            pool = _new_pool()
+            pool.Add(fdp)
+            full = f"{fdp.package + '.' if fdp.package else ''}{fdp.message_type[0].name}"
+            cls = message_class(pool.FindMessageTypeByName(full), pool)
             with self._lock:
-                try:
-                    self._pool.Add(fdp)
-                except Exception:  # noqa: BLE001 —— 同名文件已加过（并发取同一版），直接取
-                    self._pool.FindFileByName(fdp.name)
-                full = f"{fdp.package + '.' if fdp.package else ''}{fdp.message_type[0].name}"
-                cls = message_class(self._pool.FindMessageTypeByName(full), self._pool)
-                entry = (d, cls)
-                self._entries[key] = entry
+                if hit is not None:
+                    logger.info("结构 id %d v%d 的描述在实时库上原地改过（版本号未变），已换用新描述",
+                                struct_id, version)
+                self._entries[key] = _Entry(d, cls, now, fingerprint)
                 self._misses.pop(key, None)
-                return entry
+            return d, cls
         except Exception as exc:
             why = (str(exc) if isinstance(exc, StructRegistryError)
                    else f"取结构 id {struct_id} v{version} 失败：{type(exc).__name__}: {exc}")
             with self._lock:
-                self._misses[key] = (time.monotonic(), why)
+                hit = self._entries.get(key)
+                if hit is not None and not fresh:
+                    # 到期重取没取到：先用着手里这份，过一个周期再试 —— 不因实时库一时答不上就让整帧落坏。
+                    hit.checked_at = now
+                    logger.warning("重取结构 id %d v%d 的描述失败，暂用缓存的那份：%s",
+                                   struct_id, version, why)
+                    return hit.struct, hit.cls
+                self._misses[key] = (now, why)
             raise StructRegistryError(why) from exc
 
 

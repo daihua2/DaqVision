@@ -12,6 +12,7 @@
 import tempfile
 import unittest
 from concurrent import futures
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -231,6 +232,65 @@ class TestDecodeById(unittest.TestCase):
         with self.assertRaises(StructRegistryError):
             self.reg.decode("别的结构", v.StructVal, T0, Quality.OK)
 
+    # ── AI-122 §3 / D-319 第 0 步 ──
+    def test_两个结构描述同名_各解各的(self):
+        # A 改名后旧名被另一个结构再用：两份描述的消息全名都是 hs.structs.A_v1。
+        # 共用一个池时第二份加不进去，id 9 的值被按 id 5 的字段号解成 {'x': 0.0}、不报错。
+        self.hs.add_struct(5, 1, "A", [fld("x")])
+        self.hs.add_struct(9, 1, "A", [fld("y", hs.SFT_FLOAT)])
+        a = self.hs.put(1, T0, 5, 1, x=1.25)
+        b = self.hs.put(2, T0, 9, 1, y=2.5)
+        self.assertEqual(self.reg.decode_value(a.StructVal, T0, Quality.OK).fields, {"x": 1.25})
+        self.assertEqual(self.reg.decode_value(b.StructVal, T0, Quality.OK).fields, {"y": 2.5})
+
+    def _clock(self, t):
+        return mock.patch("aiintegration.structreg.time.monotonic", return_value=t)
+
+    def test_原地修改_到期重取后看得到(self):
+        # 字段原地改名 + 改单位，号与版本都不变（D-302 / D-319）。原先要我方重启才看得到。
+        d = self.hs.add_struct(5, 1, "V", [fld("x", hs.SFT_FLOAT, unit="mm/s")])
+        v = self.hs.put(1, T0, 5, 1, x=1.5)
+        with self._clock(1000.0):
+            self.assertEqual(self.reg.decode_value(v.StructVal, T0, Quality.OK).fields, {"x": 1.5})
+        d.fields[0].name, d.fields[0].unit = "x_vel", "m/s"
+        with self._clock(1000.0 + 30):
+            self.assertEqual(self.reg.decode_value(v.StructVal, T0, Quality.OK).fields, {"x": 1.5},
+                             "未到期就重取 —— 一帧几万条值每条都去拨")
+        with self._clock(1000.0 + 61):
+            self.assertEqual(self.reg.decode_value(v.StructVal, T0, Quality.OK).fields, {"x_vel": 1.5})
+            self.assertEqual(self.reg.describe(5, 1).fields[0].unit, "m/s")
+        self.assertEqual(self.hs.get_calls.count((5, 1)), 2)
+
+    def test_到期重取_没变就不重建(self):
+        self.hs.add_struct(5, 1, "V", [fld("a")])
+        with self._clock(1000.0):
+            self.reg.describe(5, 1)
+        before = self.reg._entries[(5, 1)].cls
+        with self._clock(1000.0 + 61):
+            self.reg.describe(5, 1)
+        self.assertIs(self.reg._entries[(5, 1)].cls, before)
+        self.assertEqual(self.hs.get_calls.count((5, 1)), 2)
+
+    def test_到期重取失败_暂用缓存的那份(self):
+        self.hs.add_struct(5, 1, "V", [fld("a")])
+        v = self.hs.put(1, T0, 5, 1, a=2.0)
+        with self._clock(1000.0):
+            self.reg.decode_value(v.StructVal, T0, Quality.OK)
+        self.hs.fail_get = True
+        with self._clock(1000.0 + 61):
+            for _ in range(3):
+                self.assertEqual(self.reg.decode_value(v.StructVal, T0, Quality.OK).fields, {"a": 2.0})
+        self.assertEqual(len(self.hs.get_calls), 2, "重取失败后同一周期内又去拨")
+
+    def test_fresh_不走缓存_也不受失败缓存拦(self):
+        self.hs.add_struct(5, 1, "V", [fld("a", unit="mm/s")])
+        self.reg.describe(5, 1)
+        self.hs.defs[(5, 1)].fields[0].unit = "m/s"
+        self.assertEqual(self.reg.describe(5, 1, fresh=True).fields[0].unit, "m/s")
+        self.hs.fail_get = True
+        with self.assertRaises(StructRegistryError):
+            self.reg.describe(5, 1, fresh=True)     # 现取失败如实报，不拿缓存顶
+
 
 # ═══════════════════════════ fetch：按字段拆 ═══════════════════════════
 
@@ -368,6 +428,15 @@ class TestFindPointStruct(unittest.TestCase):
         self.assertEqual(len(self.hs.queries), 3, "1 分钟、1 小时都没有，1 天里找到")
         self.assertTrue(all(q.supportsStructValue and q.hisReq.method == hs.kLastTime
                             for q in self.hs.queries))
+
+    def test_原地改单位_绑定核对立即看得到(self):
+        # 取数先把描述缓存上，采集侧随即原地改单位（D-302）：绑定核对要拿到新的，不等缓存到期。
+        v = self.hs.put(9, T0 - timedelta(seconds=10), 3, 1, x=1.0, y=2.0, z=3.0)
+        self.reg.decode_value(v.StructVal, T0, Quality.OK)
+        for f in self.hs.defs[(3, 1)].fields:
+            f.unit = "m/s"
+        ps = find_point_struct(self.hs, self.reg, 9, now=T0)
+        self.assertEqual({f.unit for f in ps.struct.fields}, {"m/s"})
 
     def test_7天内没有值_拒(self):
         self.hs.put(9, T0 - timedelta(days=8), 3, 1, x=1.0, y=2.0, z=3.0)
